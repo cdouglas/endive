@@ -1,17 +1,44 @@
 #!/usr/bin/env python3
 
+import simpy
+import heapq
+import itertools
 import pandas as pd
+import numpy as np
 import matplotlib.pyplot as plt
 from plotnine import ggplot, aes, geom_line, labs, theme_minimal
+from dataclasses import dataclass, field
 
-def calculate_expected_time(rtt, n, p):
+class Catalog:
+    def __init__(self, env, ntables):
+        self.env = env
+        self.seq = 0
+        self.tbl = [0] * ntables
+
+    def try_CAS(self, seq, wtbl):
+        if self.seq == seq:
+            for off, val in wtbl.items():
+                self.tbl[off] = val
+            self.seq += 1
+            return True
+        return False
+
+@dataclass
+class Txn:
+    nextt: int
+    initt: int = field(compare=False)
+    tblr: list = field(default_factory=list, compare=False)
+    tblw: list = field(default_factory=list, compare=False)
+
+def cas_time(rtt, n, p, delayf):
     """
-    Calculate the expected transaction time with exponential backoff.
+    Calculate the expected transaction time with configurable delay
 
     Parameters:
         rtt (float): Round trip time in milliseconds.
         n (int): Maximum number of retries.
         p (float): Probability of success for compare-and-swap.
+        delayf: e.g., exponential backoff
 
     Returns:
         float: Expected transaction time in milliseconds.
@@ -27,7 +54,7 @@ def calculate_expected_time(rtt, n, p):
     sum_sn = 0
 
     for k in range(1, n + 1):
-        delay = 2**(k - 1)  # Exponential backoff delay multiplier
+        delay = next(delayf) # 2**(k - 1)  # Exponential backoff delay multiplier
         sum_sn += one_minus_p**k * delay
 
     # Final S_n value
@@ -41,13 +68,26 @@ def calculate_expected_time(rtt, n, p):
 
     return t_0
 
+def conflict_time(rtt, n, p, c):
+    """
+    Calculate time to 
+    """
+    pass
+
+def multi_iter(i, j, k):
+    try:
+        while True:
+            yield(next(i), next(j), next(k))
+    except StopIteration:
+        return
+
 # Function to explore a range of n values and generate a plot
-def explore_and_plot(rtt, max_n, p):
+def explore_and_plot(rtti, ni, pi, delayf):
     """
     Explore a range of n values and generate a plot of expected transaction time.
 
     Parameters:
-        rtt (float): Round trip time in milliseconds.
+        rtt (int): Round trip time in milliseconds.
         max_n (int): Maximum number of retries to explore.
         p (float): Probability of success for compare-and-swap.
 
@@ -57,9 +97,11 @@ def explore_and_plot(rtt, max_n, p):
     # Create a DataFrame to store results
     results = []
 
-    for n in range(1, max_n + 1):
-        expected_time = calculate_expected_time(rtt, n, p)
+    for (rtt, n, p) in multi_iter(rtti, ni, pi): # range(1, max_n + 1):
+        expected_time = cas_time(rtt, n, p, delayf)
+        # results.append({"RTT": rtt, "ExpectedTime": expected_time})
         results.append({"Retries": n, "ExpectedTime": expected_time})
+        # results.append({"Prob success": p, "ExpectedTime": expected_time})
 
     df = pd.DataFrame(results)
 
@@ -78,15 +120,14 @@ def explore_and_plot(rtt, max_n, p):
     print(plot)
     plot.save("rtt.png")
 
-# Input values
 if __name__ == "__main__":
-    print("Expected Transaction Time Explorer")
-    rtt = 100 # float(input("Enter round trip time (RTT) in ms: "))
-    max_n = 10 # int(input("Enter maximum number of retries to explore: "))
-    p = 0.8 # float(input("Enter probability of success (p): "))
+    rtt = itertools.repeat(100) # fix rtt to 100ms
+    n = iter(range(1,10))       # 1..10 retries
+    p = itertools.repeat(0.80)  # 80% chance of successful CAS
+    delayf = (min(100 * 2**(k - 1), 1800000) for k in itertools.count(1)) # BaseTransaction:L356
 
     try:
-        explore_and_plot(rtt, max_n, p)
+        explore_and_plot(rtt, n, p, delayf)
     except ValueError as e:
         print(f"Error: {e}")
 
