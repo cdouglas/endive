@@ -35,7 +35,7 @@ def lognormal_params_from_mean_and_sigma(mean_runtime_ms: float, sigma: float) -
 
     Parameters
     ----------
-    mean_runtime : float
+    mean_runtime_ms : float
         The desired mean of the lognormal distribution (e.g., 10,000 ms for 10 seconds).
     sigma : float
         The standard deviation of the underlying normal distribution that
@@ -52,6 +52,7 @@ def lognormal_params_from_mean_and_sigma(mean_runtime_ms: float, sigma: float) -
     return mu, sigma
 
 # lognormal distribution of transaction runtimes
+T_MIN_RUNTIME_MS = 5000
 T_RUNTIME_MU, T_RUNTIME_SIGMA = lognormal_params_from_mean_and_sigma(10000.0, 1.5)
 # exponential inter-arrival rate for transactions (ms; 1000 = ~ 1/sec)
 T_TXN_INTER_ARRIVAL_MS = 5000.0
@@ -174,10 +175,10 @@ def rand_tbl(catalog):
 
 def txn_gen(sim, txn_id, catalog):
     tblr, tblw = rand_tbl(catalog)
-    t_runtime = np.random.lognormal(mean=T_RUNTIME_MU, sigma=T_RUNTIME_SIGMA)
-    logger.debug(f"{sim.now} TXN {txn_id} r {tblr} w {tblw}")
+    t_runtime = T_MIN_RUNTIME_MS + np.random.lognormal(mean=T_RUNTIME_MU, sigma=T_RUNTIME_SIGMA)
+    logger.debug(f"{sim.now} TXN {txn_id} {t_runtime} r {tblr} w {tblw}")
     # check all versions read/written TODO: serializable vs snapshot
-    txn = Txn(txn_id, sim.now, t_runtime, catalog.seq, tblr, tblw)
+    txn = Txn(txn_id, sim.now, int(t_runtime), catalog.seq, tblr, tblw)
     txn.v_dirty = txn.v_tblr.copy()
     txn.v_dirty.update(txn.v_tblw)
     # run the transaction
