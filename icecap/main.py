@@ -4,6 +4,7 @@ import itertools
 import logging
 import math
 import simpy
+import tomllib
 import numpy as np
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -43,27 +44,81 @@ def lognormal_params_from_mean_and_sigma(mean_runtime_ms: float, sigma: float) -
     mu = math.log(mean_runtime_ms) - (sigma ** 2 / 2.0)
     return mu, sigma
 
-# constants
-N_TABLES = 10
-T_CAS = 100
-T_METADATA_ROOT = 100
-T_MANIFEST_LIST = 100
-T_MANIFEST_FILE = 100
-
-# lognormal distribution of transaction runtimes
-# TODO add to config file
-T_MIN_RUNTIME_MS = 5000
-T_RUNTIME_MU, T_RUNTIME_SIGMA = lognormal_params_from_mean_and_sigma(10000.0, 1.5)
-# exponential inter-arrival rate for transactions (ms; 1000 = ~ 1/sec)
-T_TXN_INTER_ARRIVAL_MS = 5000.0
-# tables per transaction (prob. mass function)
-NTBL_PMF = truncated_zipf_pmf(N_TABLES, 2.0)
-# which tables are selected; (zipf, 0 most likely, so on)
-TBLR_PMF = truncated_zipf_pmf(N_TABLES, 1.4)
-# number of tables written (subset read)
-NTBLW_PMF = [truncated_zipf_pmf(k, 1.2) for k in range(0, N_TABLES + 1)]
+# # constants
+# N_TABLES = 10
+# T_CAS = 100
+# T_METADATA_ROOT = 100
+# T_MANIFEST_LIST = 100
+# T_MANIFEST_FILE = 100
+#
+# # lognormal distribution of transaction runtimes
+# # TODO add to config file
+# T_MIN_RUNTIME_MS = 5000
+# T_RUNTIME_MU, T_RUNTIME_SIGMA = lognormal_params_from_mean_and_sigma(10000.0, 1.5)
+# # exponential inter-arrival rate for transactions (ms; 1000 = ~ 1/sec)
+# T_TXN_INTER_ARRIVAL_MS = 5000.0
+# # tables per transaction (prob. mass function)
+# NTBL_PMF = truncated_zipf_pmf(N_TABLES, 2.0)
+# # which tables are selected; (zipf, 0 most likely, so on)
+# TBLR_PMF = truncated_zipf_pmf(N_TABLES, 1.4)
+# # number of tables written (subset read)
+# NTBLW_PMF = [truncated_zipf_pmf(k, 1.2) for k in range(0, N_TABLES + 1)]
 
 logger = logging.getLogger(__name__)
+
+
+# Assume these are defined somewhere
+# from your_pmf_module import truncated_zipf_pmf
+# from your_distribution_module import lognormal_params_from_mean_and_sigma
+
+# Global variables to be configured
+N_TABLES = None
+T_CAS = None
+T_METADATA_ROOT = None
+T_MANIFEST_LIST = None
+T_MANIFEST_FILE = None
+# lognormal distribution of transaction runtimes
+T_MIN_RUNTIME_MS = None
+T_RUNTIME_MU = None
+T_RUNTIME_SIGMA = None
+T_TXN_INTER_ARRIVAL_MS = None
+NTBL_PMF = None
+TBLR_PMF = None
+NTBLW_PMF = None
+
+def configure_from_toml(config_file: str):
+    global N_TABLES, T_CAS, T_METADATA_ROOT, T_MANIFEST_LIST, T_MANIFEST_FILE
+    global T_MIN_RUNTIME_MS, T_RUNTIME_MU, T_RUNTIME_SIGMA, T_TXN_INTER_ARRIVAL_MS
+    global NTBL_PMF, TBLR_PMF, NTBLW_PMF
+
+    with open(config_file, "rb") as f:
+        config = tomllib.load(f)
+
+    # Load basic integer configuration
+    N_TABLES = config["catalog"]["num_tables"]
+    T_CAS = config["T_CAS"]
+    T_METADATA_ROOT = config["T_METADATA_ROOT"]
+    T_MANIFEST_LIST = config["T_MANIFEST_LIST"]
+    T_MANIFEST_FILE = config["T_MANIFEST_FILE"]
+
+    # Load runtime-related configuration
+    T_MIN_RUNTIME_MS = config["T_MIN_RUNTIME_MS"]
+    mean = config["T_RUNTIME_MEAN"]
+    sigma = config["T_RUNTIME_SIGMA"]
+    T_RUNTIME_MU, T_RUNTIME_SIGMA = lognormal_params_from_mean_and_sigma(mean, sigma)
+
+    # Load transaction inter-arrival time
+    T_TXN_INTER_ARRIVAL_MS = config["T_TXN_INTER_ARRIVAL_MS"]
+
+    # Load parameters for PMFs
+    ntbl_exponent = config.get("NTBL_EXPONENT", 2.0)
+    tblr_exponent = config.get("TBLR_EXPONENT", 1.4)
+    ntblw_exponent = config.get("NTBLW_EXPONENT", 1.2)
+
+    # Generate PMFs
+    NTBL_PMF = truncated_zipf_pmf(N_TABLES, ntbl_exponent)
+    TBLR_PMF = truncated_zipf_pmf(N_TABLES, tblr_exponent)
+    NTBLW_PMF = [truncated_zipf_pmf(k, ntblw_exponent) for k in range(0, N_TABLES + 1)]
 
 class Catalog:
     def __init__(self, sim):
@@ -184,6 +239,7 @@ def setup(sim): # TODO rand seed
 if __name__ == "__main__":
     logging.basicConfig(level=logging.DEBUG)
     # logging.basicConfig(filename='est.log', level=logging.DEBUG)
+    configure_from_toml("cfg.toml")
 
     # detn replay
     seed = np.random.randint(0, 2**32 -1)
