@@ -1,0 +1,15 @@
+[catalog]
+num_tables = 10
+
+# all times in milliseconds
+[transaction]
+ntables_sigma=2.0
+tables_sigma=1.4
+tablesw_sigma=1.2
+runtime.min=5000
+runtime.avg=10000
+runtime.sigma=1.5
+inter_arrival=5000
+
+[store]
+cas=100
