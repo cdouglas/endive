@@ -9,13 +9,6 @@ import numpy as np
 from collections import defaultdict
 from dataclasses import dataclass, field
 
-# constants
-T_CAS = 100
-T_METADATA_ROOT = 100
-T_MANIFEST_LIST = 100
-T_MANIFEST_FILE = 100
-N_TABLES = 10
-
 def truncated_zipf_pmf(n, s):
     """
     Compute the truncated Zipf PMF for ranks 1 through n with exponent s.
@@ -51,7 +44,15 @@ def lognormal_params_from_mean_and_sigma(mean_runtime_ms: float, sigma: float) -
     mu = math.log(mean_runtime_ms) - (sigma ** 2 / 2.0)
     return mu, sigma
 
+# constants
+N_TABLES = 10
+T_CAS = 100
+T_METADATA_ROOT = 100
+T_MANIFEST_LIST = 100
+T_MANIFEST_FILE = 100
+
 # lognormal distribution of transaction runtimes
+# TODO add to config file
 T_MIN_RUNTIME_MS = 5000
 T_RUNTIME_MU, T_RUNTIME_SIGMA = lognormal_params_from_mean_and_sigma(10000.0, 1.5)
 # exponential inter-arrival rate for transactions (ms; 1000 = ~ 1/sec)
@@ -64,17 +65,6 @@ TBLR_PMF = truncated_zipf_pmf(N_TABLES, 1.4)
 NTBLW_PMF = [truncated_zipf_pmf(k, 1.2) for k in range(0, N_TABLES + 1)]
 
 logger = logging.getLogger(__name__)
-
-def multi_iter(i, j, k):
-    try:
-        while True:
-            yield next(i), next(j), next(k)
-    except StopIteration:
-        return
-
-def chk_multi_iter(i, j, k):
-    for (ii, jj, kk) in multi_iter(i, j, k):
-        print(ii, jj, kk)
 
 class Catalog:
     def __init__(self, sim):
@@ -125,13 +115,14 @@ def txn_commit(sim, txn, catalog):
     else:
         logger.debug(f"{sim.now} TXN {txn.id} CAS Fail")
         yield sim.timeout(T_CAS / 2) # CAS > failed, read catalog
-        # catalog versions read from store
+        # record catalog sequence number and versions read
         v_catalog = dict()
         txn.v_catalog_seq = catalog.seq
         for t in txn.v_dirty.keys():
             v_catalog[t] = catalog.tbl[t]
         yield sim.timeout(T_CAS / 2) # < CAS
 
+        # TODO still sequential per-table...
         for t, v in txn.v_dirty.items():
             # optimistic, parallel version
             if not v_catalog[t] == v:
@@ -147,12 +138,6 @@ def txn_commit(sim, txn, catalog):
 
                 # update validation to current
                 txn.v_dirty[t] = v_catalog[t]
-
-            # pessimistic, serial version
-            #   yield sim.timeout(T_METADATA_ROOT) # read root
-            #   for _ in (catalog.tbl[t] - v):
-            #       yield sim.timeout(T_MANIFEST_LIST) # each snapshot
-            #       yield sim.timeout(T_MANIFEST_FILE) # TODO: distr
         # update write set to the next available version per table (confluent w)
         for t in txn.v_tblw.keys():
             txn.v_tblw[t] = v_catalog[t] + 1
