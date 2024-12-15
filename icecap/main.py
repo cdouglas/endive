@@ -66,34 +66,28 @@ def lognormal_params_from_mean_and_sigma(mean_runtime_ms: float, sigma: float) -
 
 logger = logging.getLogger(__name__)
 
-
-# Assume these are defined somewhere
-# from your_pmf_module import truncated_zipf_pmf
-# from your_distribution_module import lognormal_params_from_mean_and_sigma
-
-# Global variables to be configured
-N_TABLES = None
-T_CAS = None
-T_METADATA_ROOT = None
-T_MANIFEST_LIST = None
-T_MANIFEST_FILE = None
+N_TABLES: int
+T_CAS: int
+T_METADATA_ROOT: int
+T_MANIFEST_LIST: int
+T_MANIFEST_FILE: int
 # lognormal distribution of transaction runtimes
-T_MIN_RUNTIME_MS = None
-T_RUNTIME_MU = None
-T_RUNTIME_SIGMA = None
+T_MIN_RUNTIME: int
+T_RUNTIME_MU: float
+T_RUNTIME_SIGMA: float
 # exponential inter-arrival rate for transactions (ms; 1000 = ~ 1/sec)
-T_TXN_INTER_ARRIVAL_MS = None
+T_TXN_INTER_ARRIVAL: int
 # tables per transaction (prob. mass function)
-NTBL_PMF = None
+N_TBL_PMF: float
 # which tables are selected; (zipf, 0 most likely, so on)
-TBLR_PMF = None
+TBL_R_PMF: float
 # number of tables written (subset read)
-NTBLW_PMF = None
+N_TBL_W_PMF: float
 
 def configure_from_toml(config_file: str):
     global N_TABLES, T_CAS, T_METADATA_ROOT, T_MANIFEST_LIST, T_MANIFEST_FILE
-    global T_MIN_RUNTIME_MS, T_RUNTIME_MU, T_RUNTIME_SIGMA, T_TXN_INTER_ARRIVAL_MS
-    global NTBL_PMF, TBLR_PMF, NTBLW_PMF
+    global T_MIN_RUNTIME, T_RUNTIME_MU, T_RUNTIME_SIGMA, T_TXN_INTER_ARRIVAL
+    global N_TBL_PMF, TBL_R_PMF, N_TBL_W_PMF
 
     with open(config_file, "rb") as f:
         config = tomllib.load(f)
@@ -108,12 +102,12 @@ def configure_from_toml(config_file: str):
     T_MANIFEST_FILE = config["storage"]["T_MANIFEST_FILE"]
 
     # Load runtime-related configuration
-    T_MIN_RUNTIME_MS = config["transaction"]["runtime"]["min"] #["T_MIN_RUNTIME_MS"]
+    T_MIN_RUNTIME = config["transaction"]["runtime"]["min"] #["T_MIN_RUNTIME_MS"]
     mean = config["transaction"]["runtime"]["mean"] #["T_RUNTIME_MEAN"]
     sigma = config["transaction"]["runtime"]["sigma"] #["T_RUNTIME_SIGMA"]
     T_RUNTIME_MU, T_RUNTIME_SIGMA = lognormal_params_from_mean_and_sigma(mean, sigma)
     # Load transaction inter-arrival time
-    T_TXN_INTER_ARRIVAL_MS = config["transaction"]["inter_arrival"] #["T_TXN_INTER_ARRIVAL_MS"]
+    T_TXN_INTER_ARRIVAL = config["transaction"]["inter_arrival"] #["T_TXN_INTER_ARRIVAL_MS"]
 
     # Load parameters for PMFs
     ntbl_exponent = config.get("transaction", {}).get("ntable", {}).get("zipf", 2.0)
@@ -121,9 +115,9 @@ def configure_from_toml(config_file: str):
     ntblw_exponent = config.get("transaction", {}).get("seltblw", {}).get("zipf", 1.2)
 
     # Generate PMFs
-    NTBL_PMF = truncated_zipf_pmf(N_TABLES, ntbl_exponent)
-    TBLR_PMF = truncated_zipf_pmf(N_TABLES, tblr_exponent)
-    NTBLW_PMF = [truncated_zipf_pmf(k, ntblw_exponent) for k in range(0, N_TABLES + 1)]
+    N_TBL_PMF = truncated_zipf_pmf(N_TABLES, ntbl_exponent)
+    TBL_R_PMF = truncated_zipf_pmf(N_TABLES, tblr_exponent)
+    N_TBL_W_PMF = [truncated_zipf_pmf(k, ntblw_exponent) for k in range(0, N_TABLES + 1)]
 
 class Catalog:
     def __init__(self, sim):
@@ -204,13 +198,13 @@ def txn_commit(sim, txn, catalog):
 
 def rand_tbl(catalog):
     # how many tables
-    ntbl = int(np.random.choice(np.arange(1, N_TABLES + 1), p=NTBL_PMF))
+    ntbl = int(np.random.choice(np.arange(1, N_TABLES + 1), p=N_TBL_PMF))
     # which tables read
-    tblr_idx = np.random.choice(np.arange(0, N_TABLES), size=ntbl, replace=False, p=TBLR_PMF).astype(int).tolist()
+    tblr_idx = np.random.choice(np.arange(0, N_TABLES), size=ntbl, replace=False, p=TBL_R_PMF).astype(int).tolist()
     tblr = {t: catalog.tbl[t] for t in tblr_idx}
     tblr_idx.sort()
     # write \subseteq read (not empty, read-only txn snapshot)
-    ntblw = int(np.random.choice(np.arange(1, ntbl + 1), p=NTBLW_PMF[ntbl]))
+    ntblw = int(np.random.choice(np.arange(1, ntbl + 1), p=N_TBL_W_PMF[ntbl]))
     # uniform random from #tables to write
     tblw_idx = np.random.choice(tblr_idx, size=ntblw, replace=False).astype(int).tolist()
     # write versions = catalog versions + 1
@@ -219,7 +213,7 @@ def rand_tbl(catalog):
 
 def txn_gen(sim, txn_id, catalog):
     tblr, tblw = rand_tbl(catalog)
-    t_runtime = T_MIN_RUNTIME_MS + np.random.lognormal(mean=T_RUNTIME_MU, sigma=T_RUNTIME_SIGMA)
+    t_runtime = T_MIN_RUNTIME + np.random.lognormal(mean=T_RUNTIME_MU, sigma=T_RUNTIME_SIGMA)
     logger.debug(f"{sim.now} TXN {txn_id} {t_runtime} r {tblr} w {tblw}")
     # check all versions read/written TODO: serializable vs snapshot
     txn = Txn(txn_id, sim.now, int(t_runtime), catalog.seq, tblr, tblw)
@@ -238,7 +232,7 @@ def setup(sim): # TODO rand seed
     txn_ids = itertools.count(1)
     sim.process(txn_gen(sim, next(txn_ids), catalog))
     while True:
-        yield sim.timeout(int(np.random.exponential(scale=T_TXN_INTER_ARRIVAL_MS)))
+        yield sim.timeout(int(np.random.exponential(scale=T_TXN_INTER_ARRIVAL)))
         sim.process(txn_gen(sim, next(txn_ids), catalog))
 
 if __name__ == "__main__":
