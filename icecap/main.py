@@ -81,9 +81,13 @@ T_MANIFEST_FILE = None
 T_MIN_RUNTIME_MS = None
 T_RUNTIME_MU = None
 T_RUNTIME_SIGMA = None
+# exponential inter-arrival rate for transactions (ms; 1000 = ~ 1/sec)
 T_TXN_INTER_ARRIVAL_MS = None
+# tables per transaction (prob. mass function)
 NTBL_PMF = None
+# which tables are selected; (zipf, 0 most likely, so on)
 TBLR_PMF = None
+# number of tables written (subset read)
 NTBLW_PMF = None
 
 def configure_from_toml(config_file: str):
@@ -96,24 +100,25 @@ def configure_from_toml(config_file: str):
 
     # Load basic integer configuration
     N_TABLES = config["catalog"]["num_tables"]
-    T_CAS = config["T_CAS"]
-    T_METADATA_ROOT = config["T_METADATA_ROOT"]
-    T_MANIFEST_LIST = config["T_MANIFEST_LIST"]
-    T_MANIFEST_FILE = config["T_MANIFEST_FILE"]
+
+    # TODO distr around these
+    T_CAS = config["storage"]["T_CAS"]
+    T_METADATA_ROOT = config["storage"]["T_METADATA_ROOT"]
+    T_MANIFEST_LIST = config["storage"]["T_MANIFEST_LIST"]
+    T_MANIFEST_FILE = config["storage"]["T_MANIFEST_FILE"]
 
     # Load runtime-related configuration
-    T_MIN_RUNTIME_MS = config["T_MIN_RUNTIME_MS"]
-    mean = config["T_RUNTIME_MEAN"]
-    sigma = config["T_RUNTIME_SIGMA"]
+    T_MIN_RUNTIME_MS = config["transaction"]["runtime"]["min"] #["T_MIN_RUNTIME_MS"]
+    mean = config["transaction"]["runtime"]["mean"] #["T_RUNTIME_MEAN"]
+    sigma = config["transaction"]["runtime"]["sigma"] #["T_RUNTIME_SIGMA"]
     T_RUNTIME_MU, T_RUNTIME_SIGMA = lognormal_params_from_mean_and_sigma(mean, sigma)
-
     # Load transaction inter-arrival time
-    T_TXN_INTER_ARRIVAL_MS = config["T_TXN_INTER_ARRIVAL_MS"]
+    T_TXN_INTER_ARRIVAL_MS = config["transaction"]["inter_arrival"] #["T_TXN_INTER_ARRIVAL_MS"]
 
     # Load parameters for PMFs
-    ntbl_exponent = config.get("NTBL_EXPONENT", 2.0)
-    tblr_exponent = config.get("TBLR_EXPONENT", 1.4)
-    ntblw_exponent = config.get("NTBLW_EXPONENT", 1.2)
+    ntbl_exponent = config.get("transaction", {}).get("ntable", {}).get("zipf", 2.0)
+    tblr_exponent = config.get("transaction", {}).get("seltbl", {}).get("zipf", 1.4)
+    ntblw_exponent = config.get("transaction", {}).get("seltblw", {}).get("zipf", 1.2)
 
     # Generate PMFs
     NTBL_PMF = truncated_zipf_pmf(N_TABLES, ntbl_exponent)

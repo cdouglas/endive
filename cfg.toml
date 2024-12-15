@@ -1,16 +1,20 @@
+[catalog]
+num_tables = 10
+
+[transaction]
+runtime.min = 5000
+runtime.mean = 10000
+runtime.sigma = 1.5
+inter_arrival = 5000.0
+# tables per transaction
+ntable.zipf = 2.0
+# which tables are selected; (0 most likely, so on)
+seltbl.zipf = 1.4
+# number of tables written (subset read)
+seltblw.zipf = 1.2
+
+[storage]
 T_CAS = 100
 T_METADATA_ROOT = 100
 T_MANIFEST_LIST = 100
 T_MANIFEST_FILE = 100
-
-T_MIN_RUNTIME_MS = 5000
-T_RUNTIME_MEAN = 10000.0
-T_RUNTIME_SIGMA = 1.5
-T_TXN_INTER_ARRIVAL_MS = 5000.0
-
-NTBL_EXPONENT = 2.0
-TBLR_EXPONENT = 1.4
-NTBLW_EXPONENT = 1.2
-
-[catalog]
-num_tables = 10
