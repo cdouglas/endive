@@ -3,7 +3,6 @@
 import itertools
 import logging
 import math
-import random
 import simpy
 import numpy as np
 from collections import defaultdict
@@ -187,9 +186,8 @@ if __name__ == "__main__":
     # logging.basicConfig(filename='est.log', level=logging.DEBUG)
 
     # detn replay
-    seed = random.randint(0, 2**32 - 1)
+    seed = np.random.randint(0, 2**32 -1)
     np.random.seed(seed)
-    random.seed(seed)
     logger.info(f"SEED: {seed}")
 
     env = simpy.Environment()
