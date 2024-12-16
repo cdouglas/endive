@@ -2,67 +2,12 @@
 
 import itertools
 import logging
-import math
 import simpy
 import tomllib
 import numpy as np
+from capstats import truncated_zipf_pmf, lognormal_params_from_mean_and_sigma
 from collections import defaultdict
 from dataclasses import dataclass, field
-
-def truncated_zipf_pmf(n, s):
-    """
-    Compute the truncated Zipf PMF for ranks 1 through n with exponent s.
-    Returns a probability vector of length n.
-    (OpenAI ChatGPT o1)
-    """
-    ranks = np.arange(1, n+1)
-    weights = 1.0 / (ranks ** s)
-    pmf = weights / weights.sum()
-    return pmf
-
-def lognormal_params_from_mean_and_sigma(mean_runtime_ms: float, sigma: float) -> (float, float):
-    """
-    Given the desired average (mean) runtime of a lognormal distribution and
-    the chosen sigma (std. dev.) of the underlying normal distribution,
-    compute the mu parameter for the underlying normal distribution.
-
-    Parameters
-    ----------
-    mean_runtime_ms : float
-        The desired mean of the lognormal distribution (e.g., 10,000 ms for 10 seconds).
-    sigma : float
-        The standard deviation of the underlying normal distribution that
-        generates the lognormal distribution.
-
-    Returns
-    -------
-    mu : float
-        The mu parameter of the underlying normal distribution.
-    sigma : float
-        The sigma parameter of the underlying normal distribution (unchanged).
-    """
-    mu = math.log(mean_runtime_ms) - (sigma ** 2 / 2.0)
-    return mu, sigma
-
-# # constants
-# N_TABLES = 10
-# T_CAS = 100
-# T_METADATA_ROOT = 100
-# T_MANIFEST_LIST = 100
-# T_MANIFEST_FILE = 100
-#
-# # lognormal distribution of transaction runtimes
-# # TODO add to config file
-# T_MIN_RUNTIME_MS = 5000
-# T_RUNTIME_MU, T_RUNTIME_SIGMA = lognormal_params_from_mean_and_sigma(10000.0, 1.5)
-# # exponential inter-arrival rate for transactions (ms; 1000 = ~ 1/sec)
-# T_TXN_INTER_ARRIVAL_MS = 5000.0
-# # tables per transaction (prob. mass function)
-# NTBL_PMF = truncated_zipf_pmf(N_TABLES, 2.0)
-# # which tables are selected; (zipf, 0 most likely, so on)
-# TBLR_PMF = truncated_zipf_pmf(N_TABLES, 1.4)
-# # number of tables written (subset read)
-# NTBLW_PMF = [truncated_zipf_pmf(k, 1.2) for k in range(0, N_TABLES + 1)]
 
 logger = logging.getLogger(__name__)
 
