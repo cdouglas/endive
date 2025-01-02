@@ -1,5 +1,8 @@
 import math
+import sys
+
 import numpy as np
+from hdrh.histogram import HdrHistogram
 
 def truncated_zipf_pmf(n, s):
     """
@@ -36,3 +39,24 @@ def lognormal_params_from_mean_and_sigma(mean_runtime_ms: float, sigma: float) -
     mu = math.log(mean_runtime_ms) - (sigma ** 2 / 2.0)
     return mu, sigma
 
+class Stats:
+    def __init__(self):
+        # TODO compute max w.r.t. longest total time w/ retries
+        self.latency = HdrHistogram(1, 10 * 60 * 1000, 3)
+        self.txn_total = 0
+        self.txn_committed = 0
+        self.txn_aborted = 0
+
+    def commit(self, txn):
+        self.txn_total += 1
+        self.txn_committed += 1
+        commit_latency = txn.t_commit - txn.t_runtime - txn.t_submit
+        self.latency.record_value(commit_latency)
+
+    def abort(self, env, txn):
+        self.txn_total += 1
+        self.txn_aborted += 1
+
+    def print_summary(self, out=sys.stdout):
+        assert self.txn_committed + self.txn_aborted == self.txn_total
+        self.latency.output_percentile_distribution(out_file=out)

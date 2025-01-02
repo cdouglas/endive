@@ -5,13 +5,14 @@ import logging
 import simpy
 import tomllib
 import numpy as np
-from capstats import truncated_zipf_pmf, lognormal_params_from_mean_and_sigma
+from capstats import Stats, truncated_zipf_pmf, lognormal_params_from_mean_and_sigma
 from collections import defaultdict
 from dataclasses import dataclass, field
 
 logger = logging.getLogger(__name__)
 
 N_TABLES: int
+N_TXN_RETRY: int
 T_CAS: int
 T_METADATA_ROOT: int
 T_MANIFEST_LIST: int
@@ -29,10 +30,12 @@ TBL_R_PMF: float
 # number of tables written (subset read)
 N_TBL_W_PMF: float
 
+STATS = Stats()
+
 def configure_from_toml(config_file: str):
     global N_TABLES, T_CAS, T_METADATA_ROOT, T_MANIFEST_LIST, T_MANIFEST_FILE
     global T_MIN_RUNTIME, T_RUNTIME_MU, T_RUNTIME_SIGMA, T_TXN_INTER_ARRIVAL
-    global N_TBL_PMF, TBL_R_PMF, N_TBL_W_PMF
+    global N_TBL_PMF, TBL_R_PMF, N_TBL_W_PMF, N_TXN_RETRY
 
     with open(config_file, "rb") as f:
         config = tomllib.load(f)
@@ -47,6 +50,7 @@ def configure_from_toml(config_file: str):
     T_MANIFEST_FILE = config["storage"]["T_MANIFEST_FILE"]
 
     # Load runtime-related configuration
+    N_TXN_RETRY = config["transaction"]["retry"]
     T_MIN_RUNTIME = config["transaction"]["runtime"]["min"] #["T_MIN_RUNTIME_MS"]
     mean = config["transaction"]["runtime"]["mean"] #["T_RUNTIME_MEAN"]
     sigma = config["transaction"]["runtime"]["sigma"] #["T_RUNTIME_SIGMA"]
@@ -90,13 +94,10 @@ class Txn:
     v_catalog_seq: int # version of catalog read (CAS in storage)
     v_tblr: dict[int, int] # versions of tables read
     v_tblw: dict[int, int] # versions of tables written
+    n_retries: int # number of retries
     t_commit: int = field(default=-1)
+    t_abort: int = field(default=-1)
     v_dirty: dict[int, int] = field(default_factory=lambda: defaultdict(dict)) # versions validated (init union(v_tblr, v_tblw))
-
-# TODO store success/failure for transactions
-class Stats:
-    def __init__(self):
-        pass
 
 def txn_ml_w(sim, txn):
     # write each manifest list TODO: not sequential?
@@ -110,8 +111,13 @@ def txn_commit(sim, txn, catalog):
     if catalog.try_CAS(sim, txn): # txn.v_catalog_seq, txn.v_tblw): # success?
         logger.debug(f"{sim.now} TXN {txn.id} commit")
         txn.t_commit = sim.now # known committed at this tick
+        STATS.commit(txn)
     else:
         logger.debug(f"{sim.now} TXN {txn.id} CAS Fail")
+        if txn.n_retries > N_TXN_RETRY:
+            txn.t_abort = sim.now
+            STATS.abort(txn)
+            return
         yield sim.timeout(T_CAS / 2) # CAS > failed, read catalog
         # record catalog sequence number and versions read
         v_catalog = dict()
@@ -120,7 +126,6 @@ def txn_commit(sim, txn, catalog):
             v_catalog[t] = catalog.tbl[t]
         yield sim.timeout(T_CAS / 2) # < CAS
 
-        # TODO still sequential per-table...
         for t, v in txn.v_dirty.items():
             # optimistic, parallel version
             if not v_catalog[t] == v:
@@ -168,8 +173,9 @@ def txn_gen(sim, txn_id, catalog):
     yield sim.timeout(txn.t_runtime)
     # write the manifest list
     yield sim.process(txn_ml_w(sim, txn))
-    while txn.t_commit < 0:
+    while txn.t_commit < 0 and txn.t_abort < 0:
         # attempt commit
+        txn.n_retries += 1
         yield sim.process(txn_commit(sim, txn, catalog))
 
 def setup(sim): # TODO rand seed

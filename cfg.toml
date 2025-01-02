@@ -2,6 +2,7 @@
 num_tables = 10
 
 [transaction]
+retry=10
 runtime.min = 5000
 runtime.mean = 10000
 runtime.sigma = 1.5
