@@ -1,13 +1,36 @@
+[simulation]
+# Simulation duration in milliseconds
+duration_ms = 100000000
+# Output file path (parquet format)
+output_path = "results.parquet"
+# Random seed (omit for random seed)
+# seed = 42
+
 [catalog]
 num_tables = 10
 
 [transaction]
-retry=10
+retry = 10
+# Transaction runtime distribution (lognormal)
 runtime.min = 5000
 runtime.mean = 10000
 runtime.sigma = 1.5
-inter_arrival = 5000.0
-# tables per transaction
+
+# Inter-arrival time distribution
+# distribution: "fixed", "exponential", "uniform", "normal"
+inter_arrival.distribution = "exponential"
+# For exponential: scale parameter (mean = scale)
+inter_arrival.scale = 5000.0
+# For uniform: [min, max]
+inter_arrival.min = 1000.0
+inter_arrival.max = 10000.0
+# For normal: mean and std_dev
+inter_arrival.mean = 5000.0
+inter_arrival.std_dev = 1000.0
+# For fixed: value
+inter_arrival.value = 5000.0
+
+# tables per transaction (zipf distribution)
 ntable.zipf = 2.0
 # which tables are selected; (0 most likely, so on)
 seltbl.zipf = 1.4

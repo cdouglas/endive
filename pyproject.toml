@@ -1,2 +1,4 @@
 [project.scripts]
-icecap = icecap.main:cli
+icecap = "icecap.main:cli"
+icecap-experiment = "icecap.experiment:cli"
+icecap-analysis = "icecap.analysis:cli"

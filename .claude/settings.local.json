@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(source bin/activate)",
+      "Bash(python -m icecap.main:*)",
+      "Bash(python -m icecap.experiment:*)",
+      "Bash(python -m icecap.analysis:*)",
+      "Bash(cat:*)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}
