@@ -153,6 +153,7 @@ seed = 42                # For reproducible results (omit for random)
 
 [catalog]
 num_tables = 10          # More tables = less contention
+num_groups = 1           # Number of table groups (1 = catalog-level conflicts)
 
 [transaction]
 retry = 10               # Max retry attempts before abort
@@ -200,6 +201,64 @@ T_MANIFEST_FILE.write.stddev = 15
 - **Standard cloud storage (S3)**: mean=50-150ms, stddev=20-40ms
 - **Slower storage (cross-region)**: mean=200-500ms, stddev=50-100ms
 - **min_latency**: Set to 1-2ms for very fast storage, 5-10ms for typical
+
+### Table Grouping Configuration
+
+Control conflict detection granularity by partitioning tables into groups:
+
+```toml
+[catalog]
+num_tables = 20
+num_groups = 1              # Default: catalog-level conflicts
+
+# Group size distribution
+group_size_distribution = "uniform"  # or "longtail"
+
+# For longtail distribution
+longtail.large_group_fraction = 0.5
+longtail.medium_groups_count = 3
+longtail.medium_group_fraction = 0.3
+```
+
+**Conflict Detection Modes:**
+
+1. **Catalog-level conflicts** (`num_groups = 1`):
+   - Default behavior
+   - Any two concurrent writers conflict
+   - Models Iceberg v1 style catalogs
+
+2. **Table-level conflicts** (`num_groups = num_tables`):
+   - Transactions only conflict if they touch the same tables
+   - Each table is its own group (size 1)
+   - Models independent table commits
+
+3. **Group-level isolation** (`1 < num_groups < num_tables`):
+   - Transactions confined to one group
+   - Useful for multi-tenant scenarios
+   - Balance between catalog-wide and table-level locking
+
+**Distribution Examples:**
+
+```toml
+# Uniform: all groups have ~4 tables
+num_tables = 20
+num_groups = 5
+group_size_distribution = "uniform"
+
+# Longtail: one large (50 tables), few medium (15 each), many small (~5 each)
+num_tables = 100
+num_groups = 10
+group_size_distribution = "longtail"
+longtail.large_group_fraction = 0.5      # 50% in largest group
+longtail.medium_groups_count = 3          # 3 medium-sized groups
+longtail.medium_group_fraction = 0.3     # 30% of remaining in medium groups
+```
+
+**Important Notes:**
+- Transactions never span groups
+- If a transaction requests more tables than exist in its group, a warning is logged and all tables in the group are used
+- Group assignment is deterministic (controlled by simulation seed)
+- With table-level conflicts, expect lower contention and retry rates
 
 ### Workload Configuration
 
@@ -338,6 +397,42 @@ This is why retry latency increases non-linearly with contention.
 
 ## Advanced Usage
 
+### Comparing Conflict Detection Strategies
+
+Run side-by-side experiments to compare catalog-level vs table-level conflicts:
+
+```bash
+# Catalog-level conflicts (baseline)
+cp cfg.toml cfg_catalog.toml
+# Edit cfg_catalog.toml: num_groups = 1
+python -m icecap.main cfg_catalog.toml -y --no-progress
+
+# Table-level conflicts
+cp cfg.toml cfg_table.toml
+# Edit cfg_table.toml: num_groups = num_tables (e.g., 10)
+python -m icecap.main cfg_table.toml -y --no-progress
+
+# Compare results
+python -c "
+import pandas as pd
+catalog = pd.read_parquet('results_catalog.parquet')
+table = pd.read_parquet('results_table.parquet')
+
+print('Catalog-level:')
+print(f\"  Success rate: {len(catalog[catalog['status']=='committed'])/len(catalog)*100:.1f}%\")
+print(f\"  Mean retries: {catalog[catalog['status']=='committed']['n_retries'].mean():.2f}\")
+
+print('Table-level:')
+print(f\"  Success rate: {len(table[table['status']=='committed'])/len(table)*100:.1f}%\")
+print(f\"  Mean retries: {table[table['status']=='committed']['n_retries'].mean():.2f}\")
+"
+```
+
+**Expected differences:**
+- Table-level should show higher success rates (fewer conflicts)
+- Table-level should show lower retry counts
+- Table-level benefits increase with more tables and lower table overlap
+
 ### Custom Arrival Patterns
 
 Test different client behavior:
@@ -405,6 +500,7 @@ print(f"Mean throughput: {throughput.mean():.2f} txn/10sec")
 - Increase `retry` limit
 - Decrease load (increase `inter_arrival.scale`)
 - Increase `num_tables` to reduce contention
+- Consider table-level conflicts (`num_groups = num_tables`) to reduce false conflicts
 
 **Unrealistic latencies:**
 - Check `min_latency` is set appropriately (5-10ms typical)
@@ -416,16 +512,32 @@ print(f"Mean throughput: {throughput.mean():.2f} txn/10sec")
 - Increase `inter_arrival.scale` (fewer transactions)
 - Use `--no-progress` flag
 
+**Many "transaction requested more tables" warnings:**
+- Normal with small groups and high-zipf table distribution
+- Reduce `ntable.zipf` to request fewer tables
+- Increase group sizes (fewer groups)
+- These warnings don't affect correctness, just indicate capping behavior
+
+**Unexpected conflict behavior:**
+- Verify `num_groups` setting matches your intent:
+  - `num_groups = 1`: catalog-level (default, most conflicts)
+  - `num_groups = num_tables`: table-level (fewest conflicts)
+- Check group assignment with verbose logging: `-v`
+- Ensure deterministic results with `seed = 42`
+
 **Tests failing:**
 - Check you activated virtual environment: `source bin/activate`
 - Verify all dependencies installed: `pip install -r requirements.txt`
 - Check config format matches current schema (see cfg.toml)
+- Run specific test suite: `pytest tests/test_table_groups.py -v`
 
 ## Next Steps
 
-1. **Explore parameter space**: Run sweep-combined with wide ranges
-2. **Model your storage**: Configure latencies based on real measurements
-3. **Test scaling strategies**: Vary num_tables, parallelism, retry limits
-4. **Compare storage systems**: S3 vs S3 Express vs local using different latencies
-5. **Analyze results**: Use summary.csv and Parquet files for detailed analysis
-6. **Read the paper**: Understanding Iceberg's optimistic concurrency model
+1. **Explore conflict detection**: Compare catalog-level vs table-level conflicts
+2. **Explore parameter space**: Run sweep-combined with wide ranges
+3. **Model your storage**: Configure latencies based on real measurements
+4. **Test scaling strategies**: Vary num_tables, num_groups, parallelism, retry limits
+5. **Multi-tenant scenarios**: Use longtail group distributions to model skewed workloads
+6. **Compare storage systems**: S3 vs S3 Express vs local using different latencies
+7. **Analyze results**: Use summary.csv and Parquet files for detailed analysis
+8. **Read the paper**: Understanding Iceberg's optimistic concurrency model

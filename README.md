@@ -122,7 +122,30 @@ seed = null                  # Random seed (null = random)
 ```toml
 [catalog]
 num_tables = 10              # Number of tables in catalog
+
+# Table grouping (optional, default: num_groups = 1)
+num_groups = 1               # Number of table groups
+group_size_distribution = "uniform"  # "uniform" or "longtail"
+
+# Longtail distribution parameters
+longtail.large_group_fraction = 0.5
+longtail.medium_groups_count = 3
+longtail.medium_group_fraction = 0.3
 ```
+
+**Table Grouping:**
+
+Tables can be partitioned into groups to model different conflict detection granularities:
+
+- **`num_groups = 1`** (default): Catalog-level conflicts - any concurrent writes conflict
+- **`num_groups = T`** (where T = num_tables): Table-level conflicts - transactions only conflict if they touch the same tables
+- **`1 < num_groups < T`**: Group-level isolation - useful for modeling multi-tenant scenarios
+
+Transactions never span group boundaries. The simulator enforces this by selecting all transaction tables from a single random group.
+
+**Distribution types:**
+- **`uniform`**: All groups have approximately equal size (T/G tables each)
+- **`longtail`**: One large group, a few medium groups, and many small groups (models skewed workloads)
 
 ### Transaction Parameters
 
@@ -259,6 +282,55 @@ Multi-panel plot showing how catalog CAS latency affects:
 ### 4. Summary Table (CSV)
 Contains aggregated statistics for all experiments.
 
+## Table Grouping Use Cases
+
+### Catalog-Level vs Table-Level Conflicts
+
+Compare how different catalog designs affect performance:
+
+```bash
+# Catalog-level conflicts (like Iceberg v1)
+python -m icecap.main cfg.toml  # with num_groups = 1
+
+# Table-level conflicts (like Iceberg v2 with independent table commits)
+# Edit cfg.toml: set num_groups = num_tables
+python -m icecap.main cfg.toml
+```
+
+With catalog-level conflicts, any two concurrent writes conflict. With table-level conflicts, only transactions touching the same tables conflict, reducing contention.
+
+### Multi-Tenant Workloads
+
+Model isolation between tenants using groups:
+
+```toml
+[catalog]
+num_tables = 100
+num_groups = 10              # 10 tenants
+group_size_distribution = "longtail"
+longtail.large_group_fraction = 0.4   # One large tenant
+longtail.medium_groups_count = 3       # Three medium tenants
+longtail.medium_group_fraction = 0.3   # Remainder split among small tenants
+```
+
+This models a realistic scenario where one large tenant dominates, a few medium tenants share resources, and many small tenants have minimal activity.
+
+### Hotspot Analysis
+
+Examine how table popularity affects contention:
+
+```toml
+[catalog]
+num_tables = 50
+num_groups = 5
+group_size_distribution = "uniform"
+
+[transaction]
+seltbl.zipf = 2.0   # High skew - group 0 is "hot"
+```
+
+Since table selection is Zipf-distributed and transactions are confined to groups, group 0 (containing tables 0-9) will experience the highest contention.
+
 ## Example Workflow
 
 ```bash
@@ -351,6 +423,13 @@ pytest tests/test_simulator.py::TestParameterEffects -v
 ```
 
 ### Test Coverage
+
+**Table Grouping Tests** (`test_table_groups.py`):
+- Uniform and longtail group size distributions
+- Transactions stay within single group
+- Table-level conflict detection when num_groups = num_tables
+- Warning emission when transaction exceeds group size
+- Deterministic group partitioning with seed
 
 **Determinism Tests** (`test_simulator.py`):
 - Verifies identical results with same random seed
