@@ -238,6 +238,118 @@ def configure_from_toml(config_file: str):
 
     # NOTE: Table partitioning is done in CLI after seed is set for determinism
 
+
+def validate_config(config: dict) -> list[str]:
+    """Validate configuration and return list of errors.
+
+    Returns:
+        List of validation error messages. Empty list if configuration is valid.
+    """
+    errors = []
+
+    # Validate catalog configuration
+    num_tables = config.get('catalog', {}).get('num_tables', 0)
+    num_groups = config.get('catalog', {}).get('num_groups', 1)
+
+    if num_tables <= 0:
+        errors.append("catalog.num_tables must be > 0")
+
+    if num_groups <= 0:
+        errors.append("catalog.num_groups must be > 0")
+
+    if num_groups > num_tables:
+        errors.append(f"catalog.num_groups ({num_groups}) cannot exceed num_tables ({num_tables})")
+
+    # Validate group size distribution
+    group_dist = config.get('catalog', {}).get('group_size_distribution', 'uniform')
+    if group_dist not in ['uniform', 'longtail']:
+        errors.append(f"catalog.group_size_distribution must be 'uniform' or 'longtail', got '{group_dist}'")
+
+    # Validate longtail parameters if using longtail distribution
+    if group_dist == 'longtail' and 'longtail' in config.get('catalog', {}):
+        large_frac = config['catalog']['longtail'].get('large_group_fraction', 0.5)
+        medium_frac = config['catalog']['longtail'].get('medium_group_fraction', 0.3)
+        medium_count = config['catalog']['longtail'].get('medium_groups_count', 3)
+
+        if not (0 < large_frac < 1):
+            errors.append(f"longtail.large_group_fraction must be in (0, 1), got {large_frac}")
+
+        if not (0 <= medium_frac < 1):
+            errors.append(f"longtail.medium_group_fraction must be in [0, 1), got {medium_frac}")
+
+        if large_frac + medium_frac >= 1.0:
+            errors.append(f"longtail.large_group_fraction ({large_frac}) + medium_group_fraction ({medium_frac}) must be < 1.0")
+
+        if medium_count < 0:
+            errors.append(f"longtail.medium_groups_count must be >= 0, got {medium_count}")
+
+        if num_groups > 1 and num_groups < 1 + medium_count:
+            errors.append(f"longtail distribution requires at least {1 + medium_count} groups (1 large + {medium_count} medium), but num_groups = {num_groups}")
+
+    # Validate storage configuration
+    storage = config.get('storage', {})
+    min_latency = storage.get('min_latency', 5)
+    max_parallel = storage.get('max_parallel', 4)
+
+    if min_latency < 0:
+        errors.append(f"storage.min_latency must be >= 0, got {min_latency}")
+
+    if max_parallel <= 0:
+        errors.append(f"storage.max_parallel must be > 0, got {max_parallel}")
+
+    # Validate CAS latency
+    if 'T_CAS' in storage:
+        cas_mean = storage['T_CAS'].get('mean', 100)
+        cas_stddev = storage['T_CAS'].get('stddev', 10)
+
+        if cas_mean <= 0:
+            errors.append(f"T_CAS.mean must be > 0, got {cas_mean}")
+
+        if cas_stddev < 0:
+            errors.append(f"T_CAS.stddev must be >= 0, got {cas_stddev}")
+
+        if min_latency > cas_mean:
+            errors.append(f"storage.min_latency ({min_latency}) should not exceed T_CAS.mean ({cas_mean})")
+
+    # Validate transaction configuration
+    txn = config.get('transaction', {})
+    retry = txn.get('retry', 10)
+
+    if retry < 0:
+        errors.append(f"transaction.retry must be >= 0, got {retry}")
+
+    # Validate inter-arrival distribution
+    if 'inter_arrival' in txn:
+        dist = txn['inter_arrival'].get('distribution', 'exponential')
+        if dist not in ['fixed', 'exponential', 'uniform', 'normal']:
+            errors.append(f"inter_arrival.distribution must be one of [fixed, exponential, uniform, normal], got '{dist}'")
+
+        if dist == 'exponential' and 'scale' in txn['inter_arrival']:
+            scale = txn['inter_arrival']['scale']
+            if scale <= 0:
+                errors.append(f"inter_arrival.scale must be > 0, got {scale}")
+
+        if dist == 'fixed' and 'value' in txn['inter_arrival']:
+            value = txn['inter_arrival']['value']
+            if value <= 0:
+                errors.append(f"inter_arrival.value must be > 0, got {value}")
+
+        if dist == 'uniform':
+            ia_min = txn['inter_arrival'].get('min', 0)
+            ia_max = txn['inter_arrival'].get('max', 1000)
+            if ia_min >= ia_max:
+                errors.append(f"inter_arrival.min ({ia_min}) must be < inter_arrival.max ({ia_max})")
+
+    # Validate simulation configuration
+    sim = config.get('simulation', {})
+    duration = sim.get('duration_ms', 0)
+
+    if duration <= 0:
+        errors.append(f"simulation.duration_ms must be > 0, got {duration}")
+
+    return errors
+
+
 def generate_inter_arrival_time():
     """Generate inter-arrival time based on configured distribution."""
     if INTER_ARRIVAL_DIST == "fixed":
@@ -345,6 +457,87 @@ def confirm_run() -> bool:
     response = input("Proceed with simulation? [Y/n]: ").strip().lower()
     return response in ['', 'y', 'yes']
 
+
+class ConflictResolver:
+    """Handles conflict resolution for failed CAS operations.
+
+    When a transaction's CAS fails, this class orchestrates:
+    1. Calculating how many snapshots behind the transaction is
+    2. Reading the appropriate number of manifest lists
+    3. Merging conflicts for affected tables
+    4. Updating the transaction's write set for retry
+    """
+
+    @staticmethod
+    def calculate_snapshots_behind(txn: 'Txn', catalog: 'Catalog') -> int:
+        """Calculate how many snapshots the transaction is behind.
+
+        Returns: n where current catalog is at S_{i+n} and transaction is at S_i
+        """
+        return catalog.seq - txn.v_catalog_seq
+
+    @staticmethod
+    def read_manifest_lists(sim, n_snapshots: int, txn_id: int):
+        """Read n manifest lists in batches respecting MAX_PARALLEL limit.
+
+        Yields timeout events for simulating parallel I/O with batching.
+        """
+        if n_snapshots <= 0:
+            return
+
+        logger.debug(f"{sim.now} TXN {txn_id} Reading {n_snapshots} manifest lists (max_parallel={MAX_PARALLEL})")
+
+        # Process in batches of MAX_PARALLEL
+        for batch_start in range(0, n_snapshots, MAX_PARALLEL):
+            batch_size = min(MAX_PARALLEL, n_snapshots - batch_start)
+            # All reads in this batch happen in parallel, take max time
+            batch_latencies = [get_manifest_list_latency('read') for _ in range(batch_size)]
+            yield sim.timeout(max(batch_latencies))
+            logger.debug(f"{sim.now} TXN {txn_id} Read batch of {batch_size} manifest lists")
+
+    @staticmethod
+    def merge_table_conflicts(sim, txn: 'Txn', v_catalog: dict):
+        """Merge conflicts for tables that have changed.
+
+        For each dirty table that has a different version in the catalog,
+        performs the full merge operation: read metadata, read manifest list,
+        read manifest file, write merged manifest file, write manifest list.
+
+        Yields timeout events for each I/O operation.
+        """
+        for t, v in txn.v_dirty.items():
+            if v_catalog[t] != v:
+                # Table has changed - need to merge
+                logger.debug(f"{sim.now} TXN {txn.id} Merging table {t}")
+
+                # Read metadata root
+                yield sim.timeout(get_metadata_root_latency('read'))
+
+                # Read manifest list
+                yield sim.timeout(get_manifest_list_latency('read'))
+
+                # Read manifest file
+                yield sim.timeout(get_manifest_file_latency('read'))
+
+                # Write updated (merged) manifest file
+                yield sim.timeout(get_manifest_file_latency('write'))
+
+                # Write updated manifest list
+                yield sim.timeout(get_manifest_list_latency('write'))
+
+                # Update validation to current version
+                txn.v_dirty[t] = v_catalog[t]
+
+    @staticmethod
+    def update_write_set(txn: 'Txn', v_catalog: dict):
+        """Update transaction's write set to next available version per table.
+
+        Sets each written table to current_version + 1, preparing the
+        transaction to attempt installing the next snapshot.
+        """
+        for t in txn.v_tblw.keys():
+            txn.v_tblw[t] = v_catalog[t] + 1
+
 class Catalog:
     def __init__(self, sim):
         self.sim = sim
@@ -410,7 +603,16 @@ def txn_ml_w(sim, txn):
     logger.debug(f"{sim.now} TXN {txn.id} ML_W")
 
 def txn_commit(sim, txn, catalog):
-    """Attempt to commit transaction with conflict resolution."""
+    """Attempt to commit transaction with conflict resolution.
+
+    This function orchestrates the commit process:
+    1. Attempts CAS operation
+    2. On success, commits the transaction
+    3. On failure, uses ConflictResolver to:
+       - Read manifest lists for missed snapshots
+       - Merge table-level conflicts
+       - Update transaction state for retry
+    """
     # Attempt CAS operation
     yield sim.timeout(get_cas_latency())
 
@@ -421,7 +623,8 @@ def txn_commit(sim, txn, catalog):
         STATS.commit(txn)
     else:
         # CAS failed - need to resolve conflicts
-        n_snapshots_behind = catalog.seq - txn.v_catalog_seq
+        resolver = ConflictResolver()
+        n_snapshots_behind = resolver.calculate_snapshots_behind(txn, catalog)
         logger.debug(f"{sim.now} TXN {txn.id} CAS Fail - {n_snapshots_behind} snapshots behind")
 
         if txn.n_retries >= N_TXN_RETRY:
@@ -439,45 +642,13 @@ def txn_commit(sim, txn, catalog):
             v_catalog[t] = catalog.tbl[t]
 
         # Read manifest lists for all snapshots between our read and current
-        # Process with at most MAX_PARALLEL parallelism
-        if n_snapshots_behind > 0:
-            logger.debug(f"{sim.now} TXN {txn.id} Reading {n_snapshots_behind} manifest lists (max_parallel={MAX_PARALLEL})")
+        yield from resolver.read_manifest_lists(sim, n_snapshots_behind, txn.id)
 
-            # Process in batches of MAX_PARALLEL
-            for batch_start in range(0, n_snapshots_behind, MAX_PARALLEL):
-                batch_size = min(MAX_PARALLEL, n_snapshots_behind - batch_start)
-                # All reads in this batch happen in parallel, take max time
-                batch_latencies = [get_manifest_list_latency('read') for _ in range(batch_size)]
-                yield sim.timeout(max(batch_latencies))
-                logger.debug(f"{sim.now} TXN {txn.id} Read batch of {batch_size} manifest lists")
-
-        # Now resolve conflicts for each dirty table
-        for t, v in txn.v_dirty.items():
-            if not v_catalog[t] == v:
-                # Table has changed - need to merge
-                logger.debug(f"{sim.now} TXN {txn.id} Merging table {t}")
-
-                # Read metadata root
-                yield sim.timeout(get_metadata_root_latency('read'))
-
-                # Read manifest list
-                yield sim.timeout(get_manifest_list_latency('read'))
-
-                # Read manifest file
-                yield sim.timeout(get_manifest_file_latency('read'))
-
-                # Write updated (merged) manifest file
-                yield sim.timeout(get_manifest_file_latency('write'))
-
-                # Write updated manifest list
-                yield sim.timeout(get_manifest_list_latency('write'))
-
-                # Update validation to current version
-                txn.v_dirty[t] = v_catalog[t]
+        # Merge conflicts for affected tables
+        yield from resolver.merge_table_conflicts(sim, txn, v_catalog)
 
         # Update write set to the next available version per table
-        for t in txn.v_tblw.keys():
-            txn.v_tblw[t] = v_catalog[t] + 1
+        resolver.update_write_set(txn, v_catalog)
 
 
 def rand_tbl(catalog):
@@ -585,7 +756,18 @@ def cli():
     else:
         logging.basicConfig(level=logging.INFO, format='%(message)s')
 
-    # Load configuration
+    # Load and validate configuration
+    with open(args.config, "rb") as f:
+        config = tomllib.load(f)
+
+    # Validate configuration
+    validation_errors = validate_config(config)
+    if validation_errors:
+        print("Configuration validation failed:")
+        for error in validation_errors:
+            print(f"  ✗ {error}")
+        sys.exit(1)
+
     configure_from_toml(args.config)
 
     # Print configuration (unless quiet mode)
