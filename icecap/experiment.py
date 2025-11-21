@@ -37,7 +37,16 @@ def write_config(config: Dict[str, Any], output_path: str):
         # Write catalog section
         f.write("[catalog]\n")
         f.write(f"num_tables = {config['catalog']['num_tables']}\n")
+        f.write(f"num_groups = {config['catalog'].get('num_groups', 1)}\n")
+        f.write(f'group_size_distribution = "{config["catalog"].get("group_size_distribution", "uniform")}"\n')
         f.write("\n")
+
+        # Write longtail parameters if present
+        if "longtail" in config["catalog"]:
+            f.write(f"longtail.large_group_fraction = {config['catalog']['longtail'].get('large_group_fraction', 0.5)}\n")
+            f.write(f"longtail.medium_groups_count = {config['catalog']['longtail'].get('medium_groups_count', 3)}\n")
+            f.write(f"longtail.medium_group_fraction = {config['catalog']['longtail'].get('medium_group_fraction', 0.3)}\n")
+            f.write("\n")
 
         # Write transaction section
         f.write("[transaction]\n")

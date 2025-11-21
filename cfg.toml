@@ -9,6 +9,27 @@ output_path = "results.parquet"
 [catalog]
 num_tables = 10
 
+# Table grouping configuration
+# num_groups: Number of table groups (default: 1 for no grouping)
+# When num_groups = num_tables, conflicts only at table level
+# When num_groups < num_tables, tables are partitioned into groups
+# Transactions never span groups
+num_groups = 1
+
+# Group size distribution: "uniform" or "longtail"
+# uniform: all groups approximately the same size
+# longtail: one large group, few medium groups, long tail of small groups
+group_size_distribution = "uniform"
+
+# For longtail distribution:
+# large_group_fraction: fraction of tables in the largest group (e.g., 0.5)
+# medium_groups_count: number of medium-sized groups (e.g., 3)
+# medium_group_fraction: fraction of remaining tables in medium groups (e.g., 0.3)
+# The rest are divided into small groups
+longtail.large_group_fraction = 0.5
+longtail.medium_groups_count = 3
+longtail.medium_group_fraction = 0.3
+
 [transaction]
 retry = 10
 # Transaction runtime distribution (lognormal)

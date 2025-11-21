@@ -20,6 +20,11 @@ SIM_OUTPUT_PATH: str
 SIM_SEED: int | None
 
 N_TABLES: int
+N_GROUPS: int  # Number of table groups
+GROUP_SIZE_DIST: str  # Distribution of group sizes
+LONGTAIL_PARAMS: dict  # Parameters for longtail distribution
+TABLE_TO_GROUP: dict  # Mapping from table ID to group ID
+GROUP_TO_TABLES: dict  # Mapping from group ID to list of table IDs
 N_TXN_RETRY: int
 # Storage operation latencies (normal distributions with mean and stddev)
 T_CAS: dict  # {'mean': float, 'stddev': float}
@@ -44,8 +49,92 @@ N_TBL_W_PMF: float
 
 STATS = Stats()
 
+def partition_tables_into_groups(n_tables: int, n_groups: int, distribution: str, longtail_params: dict) -> tuple[dict, dict]:
+    """Partition tables into groups.
+
+    Returns:
+        table_to_group: dict mapping table ID to group ID
+        group_to_tables: dict mapping group ID to list of table IDs
+    """
+    if n_groups > n_tables:
+        logger.warning(f"Number of groups ({n_groups}) exceeds number of tables ({n_tables}). Setting n_groups = n_tables.")
+        n_groups = n_tables
+
+    table_to_group = {}
+    group_to_tables = {g: [] for g in range(n_groups)}
+
+    if distribution == "uniform":
+        # Uniform distribution: distribute tables evenly across groups
+        tables_per_group = n_tables // n_groups
+        remainder = n_tables % n_groups
+
+        table_id = 0
+        for group_id in range(n_groups):
+            # Give extra table to first 'remainder' groups
+            group_size = tables_per_group + (1 if group_id < remainder else 0)
+            for _ in range(group_size):
+                table_to_group[table_id] = group_id
+                group_to_tables[group_id].append(table_id)
+                table_id += 1
+
+    elif distribution == "longtail":
+        # Longtail distribution: one large group, few medium groups, many small groups
+        large_frac = longtail_params.get("large_group_fraction", 0.5)
+        medium_count = longtail_params.get("medium_groups_count", 3)
+        medium_frac = longtail_params.get("medium_group_fraction", 0.3)
+
+        # Calculate sizes
+        large_size = int(n_tables * large_frac)
+        remaining_after_large = n_tables - large_size
+        medium_total_size = int(remaining_after_large * medium_frac)
+        small_total_size = remaining_after_large - medium_total_size
+
+        # Ensure we have enough groups
+        if n_groups < 1 + medium_count:
+            logger.warning(f"Not enough groups ({n_groups}) for longtail distribution (need at least {1 + medium_count}). Using uniform distribution.")
+            return partition_tables_into_groups(n_tables, n_groups, "uniform", {})
+
+        medium_size = medium_total_size // medium_count if medium_count > 0 else 0
+        small_groups_count = n_groups - 1 - medium_count
+        small_size = small_total_size // small_groups_count if small_groups_count > 0 else 0
+
+        table_id = 0
+        group_id = 0
+
+        # Large group
+        for _ in range(large_size):
+            table_to_group[table_id] = group_id
+            group_to_tables[group_id].append(table_id)
+            table_id += 1
+        group_id += 1
+
+        # Medium groups
+        for _ in range(medium_count):
+            for _ in range(medium_size):
+                if table_id < n_tables:
+                    table_to_group[table_id] = group_id
+                    group_to_tables[group_id].append(table_id)
+                    table_id += 1
+            group_id += 1
+
+        # Small groups (distribute remaining tables)
+        while table_id < n_tables:
+            for gid in range(group_id, n_groups):
+                if table_id < n_tables:
+                    table_to_group[table_id] = gid
+                    group_to_tables[gid].append(table_id)
+                    table_id += 1
+
+    else:
+        raise ValueError(f"Unknown group size distribution: {distribution}")
+
+    return table_to_group, group_to_tables
+
+
 def configure_from_toml(config_file: str):
-    global N_TABLES, T_CAS, T_METADATA_ROOT, T_MANIFEST_LIST, T_MANIFEST_FILE
+    global N_TABLES, N_GROUPS, GROUP_SIZE_DIST, LONGTAIL_PARAMS
+    global TABLE_TO_GROUP, GROUP_TO_TABLES
+    global T_CAS, T_METADATA_ROOT, T_MANIFEST_LIST, T_MANIFEST_FILE
     global T_MIN_RUNTIME, T_RUNTIME_MU, T_RUNTIME_SIGMA
     global N_TBL_PMF, TBL_R_PMF, N_TBL_W_PMF, N_TXN_RETRY
     global SIM_DURATION_MS, SIM_OUTPUT_PATH, SIM_SEED
@@ -62,6 +151,17 @@ def configure_from_toml(config_file: str):
 
     # Load basic integer configuration
     N_TABLES = config["catalog"]["num_tables"]
+    N_GROUPS = config["catalog"].get("num_groups", 1)
+    GROUP_SIZE_DIST = config["catalog"].get("group_size_distribution", "uniform")
+
+    # Load longtail parameters
+    LONGTAIL_PARAMS = {}
+    if "longtail" in config["catalog"]:
+        LONGTAIL_PARAMS = {
+            "large_group_fraction": config["catalog"]["longtail"].get("large_group_fraction", 0.5),
+            "medium_groups_count": config["catalog"]["longtail"].get("medium_groups_count", 3),
+            "medium_group_fraction": config["catalog"]["longtail"].get("medium_group_fraction", 0.3)
+        }
 
     # Load storage latencies (normal distributions)
     MAX_PARALLEL = config["storage"]["max_parallel"]
@@ -136,6 +236,8 @@ def configure_from_toml(config_file: str):
     TBL_R_PMF = truncated_zipf_pmf(N_TABLES, tblr_exponent)
     N_TBL_W_PMF = [truncated_zipf_pmf(k, ntblw_exponent) for k in range(0, N_TABLES + 1)]
 
+    # NOTE: Table partitioning is done in CLI after seed is set for determinism
+
 def generate_inter_arrival_time():
     """Generate inter-arrival time based on configured distribution."""
     if INTER_ARRIVAL_DIST == "fixed":
@@ -204,6 +306,12 @@ def print_configuration():
 
     print("\n[Catalog]")
     print(f"  Tables:       {N_TABLES}")
+    print(f"  Groups:       {N_GROUPS}")
+    if N_GROUPS > 1:
+        print(f"  Distribution: {GROUP_SIZE_DIST}")
+        # GROUP_TO_TABLES will be populated after seed is set
+        if N_GROUPS == N_TABLES:
+            print(f"  Conflicts:    Table-level only (no multi-table transactions)")
 
     print("\n[Transaction]")
     print(f"  Max Retries:  {N_TXN_RETRY}")
@@ -242,18 +350,44 @@ class Catalog:
         self.sim = sim
         self.seq = 0
         self.tbl = [0] * N_TABLES
+        # Track last committed transaction per group (for table-level conflicts when N_GROUPS == N_TABLES)
+        self.group_seq = [0] * N_GROUPS if N_GROUPS > 1 else None
 
-    # this is too coarse-grained for append/etc. but revisit later
     def try_CAS(self, sim, txn):
+        """Attempt compare-and-swap for transaction commit.
+
+        When N_GROUPS == N_TABLES, only check conflicts at table level.
+        Otherwise, check catalog-level conflicts.
+        """
         logger.debug(f"{sim.now} TXN {txn.id} CAS {self.seq} = {txn.v_catalog_seq} {txn.v_tblw}")
         logger.debug(f"{sim.now} TXN {txn.id} Catalog {self.tbl}")
-        if self.seq == txn.v_catalog_seq:
-            for off, val in txn.v_tblw.items():
-                self.tbl[off] = val
-            self.seq += 1
-            logger.debug(f"{sim.now} TXN {txn.id} CASOK   {self.tbl}")
-            return True
-        return False
+
+        # Table-level conflicts when each table is its own group
+        if N_GROUPS == N_TABLES:
+            # Check if any of the tables we read/wrote have changed
+            conflict = False
+            for t in txn.v_dirty.keys():
+                if self.tbl[t] != txn.v_dirty[t]:
+                    conflict = True
+                    break
+
+            if not conflict:
+                # No conflicts - commit
+                for off, val in txn.v_tblw.items():
+                    self.tbl[off] = val
+                self.seq += 1
+                logger.debug(f"{sim.now} TXN {txn.id} CASOK (table-level)   {self.tbl}")
+                return True
+            return False
+        else:
+            # Catalog-level conflicts (original behavior)
+            if self.seq == txn.v_catalog_seq:
+                for off, val in txn.v_tblw.items():
+                    self.tbl[off] = val
+                self.seq += 1
+                logger.debug(f"{sim.now} TXN {txn.id} CASOK   {self.tbl}")
+                return True
+            return False
 
 @dataclass
 class Txn:
@@ -347,12 +481,36 @@ def txn_commit(sim, txn, catalog):
 
 
 def rand_tbl(catalog):
-    # how many tables
-    ntbl = int(np.random.choice(np.arange(1, N_TABLES + 1), p=N_TBL_PMF))
+    """Select tables for transaction, respecting group boundaries."""
+    # If no grouping (N_GROUPS == 1), use all tables
+    if N_GROUPS == 1:
+        available_tables = list(range(N_TABLES))
+        table_pmf = TBL_R_PMF
+        max_tables = N_TABLES
+    else:
+        # Select a random group
+        group_id = np.random.choice(N_GROUPS)
+        available_tables = GROUP_TO_TABLES[group_id]
+        max_tables = len(available_tables)
+
+        # Create PMF for tables in this group
+        # Normalize the original PMF over the available tables
+        table_pmf = np.array([TBL_R_PMF[t] for t in available_tables])
+        table_pmf = table_pmf / table_pmf.sum()
+
+    # how many tables (limit to group size)
+    ntbl_requested = int(np.random.choice(np.arange(1, N_TABLES + 1), p=N_TBL_PMF))
+    ntbl = min(ntbl_requested, max_tables)
+
+    if ntbl_requested > max_tables and N_GROUPS > 1:
+        logger.warning(f"Transaction requested {ntbl_requested} tables but group {group_id} only has {max_tables} tables. "
+                      f"Using all {max_tables} tables in group.")
+
     # which tables read
-    tblr_idx = np.random.choice(np.arange(0, N_TABLES), size=ntbl, replace=False, p=TBL_R_PMF).astype(int).tolist()
+    tblr_idx = np.random.choice(available_tables, size=ntbl, replace=False, p=table_pmf).astype(int).tolist()
     tblr = {t: catalog.tbl[t] for t in tblr_idx}
     tblr_idx.sort()
+
     # write \subseteq read (not empty, read-only txn snapshot)
     ntblw = int(np.random.choice(np.arange(1, ntbl + 1), p=N_TBL_W_PMF[ntbl]))
     # uniform random from #tables to write
@@ -448,6 +606,20 @@ def cli():
         seed = np.random.randint(0, 2**32 - 1)
         logger.info(f"Using random seed: {seed}")
     np.random.seed(seed)
+
+    # Partition tables into groups (after seed is set for determinism)
+    global TABLE_TO_GROUP, GROUP_TO_TABLES
+    TABLE_TO_GROUP, GROUP_TO_TABLES = partition_tables_into_groups(
+        N_TABLES, N_GROUPS, GROUP_SIZE_DIST, LONGTAIL_PARAMS
+    )
+
+    # Print group size information if using multiple groups
+    if N_GROUPS > 1 and not args.quiet:
+        group_sizes = [len(tables) for tables in GROUP_TO_TABLES.values()]
+        print(f"[Group Partitioning]")
+        print(f"  Group sizes: min={min(group_sizes)}, max={max(group_sizes)}, "
+              f"mean={sum(group_sizes)/len(group_sizes):.1f}")
+        print()
 
     # Run simulation with progress bar
     logger.info(f"Starting simulation...")
