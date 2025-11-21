@@ -24,4 +24,5 @@ scipy==1.14.1
 simpy==4.1.1
 six==1.17.0
 statsmodels==0.14.4
+tqdm==4.67.1
 tzdata==2024.2

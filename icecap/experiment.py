@@ -158,7 +158,7 @@ def sweep_combined(
 
 def run_experiment(config_path: str, verbose: bool = False):
     """Run a single experiment with the given config."""
-    cmd = ["python", "-m", "icecap.main", config_path]
+    cmd = ["python", "-m", "icecap.main", config_path, "--yes", "--no-progress"]
     if verbose:
         cmd.append("-v")
     else:

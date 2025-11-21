@@ -49,7 +49,19 @@ python -m icecap.main -v
 
 # Quiet mode (errors only)
 python -m icecap.main -q
+
+# Skip confirmation prompt (for automation)
+python -m icecap.main -y
+
+# Disable progress bar
+python -m icecap.main --no-progress
 ```
+
+The simulator will:
+1. Display configuration summary
+2. Ask for confirmation (unless `-y` or `-q` is used)
+3. Show progress bar during simulation (unless `--no-progress`, `-v`, or `-q` is used)
+4. Export results and display summary statistics
 
 ### 2. Run experiments (parameter sweeps)
 
@@ -290,6 +302,35 @@ E[T] = RTT * (1 + (1-p) * sum_{k=1}^{N} (1-p)^k * delay(k))
 Where `delay(k)` is the backoff delay for retry k.
 
 This analytical model is implemented in `rtt.py` and `plot_rtt.py` for validation and quick parameter exploration without running full simulations.
+
+## Testing
+
+The simulator includes comprehensive tests to verify correctness and parameter effects.
+
+### Run Tests
+
+```bash
+# Run all tests
+pytest tests/ -v
+
+# Run specific test classes
+pytest tests/test_simulator.py::TestDeterminism -v
+pytest tests/test_simulator.py::TestParameterEffects -v
+```
+
+### Test Coverage
+
+**Determinism Tests:**
+- Verifies identical results with same random seed
+- Confirms different seeds produce different outcomes
+
+**Parameter Effect Tests:**
+- Lower inter-arrival time increases contention and retries
+- Higher CAS latency increases commit times
+- More retries improve success rates
+- Fewer tables increase contention (more overlapping transactions)
+
+These tests serve as both validation and documentation of expected simulator behavior.
 
 ## License
 
