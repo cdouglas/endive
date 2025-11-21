@@ -46,6 +46,10 @@ N_TBL_PMF: float
 TBL_R_PMF: float
 # number of tables written (subset read)
 N_TBL_W_PMF: float
+# Conflict resolution parameters
+REAL_CONFLICT_PROBABILITY: float  # Probability that a conflict is "real" (requires manifest file ops)
+CONFLICTING_MANIFESTS_DIST: str  # Distribution of conflicting manifests
+CONFLICTING_MANIFESTS_PARAMS: dict  # Parameters for conflicting manifests distribution
 
 STATS = Stats()
 
@@ -140,6 +144,7 @@ def configure_from_toml(config_file: str):
     global SIM_DURATION_MS, SIM_OUTPUT_PATH, SIM_SEED
     global INTER_ARRIVAL_DIST, INTER_ARRIVAL_PARAMS
     global MAX_PARALLEL, MIN_LATENCY
+    global REAL_CONFLICT_PROBABILITY, CONFLICTING_MANIFESTS_DIST, CONFLICTING_MANIFESTS_PARAMS
 
     with open(config_file, "rb") as f:
         config = tomllib.load(f)
@@ -235,6 +240,16 @@ def configure_from_toml(config_file: str):
     N_TBL_PMF = truncated_zipf_pmf(N_TABLES, ntbl_exponent)
     TBL_R_PMF = truncated_zipf_pmf(N_TABLES, tblr_exponent)
     N_TBL_W_PMF = [truncated_zipf_pmf(k, ntblw_exponent) for k in range(0, N_TABLES + 1)]
+
+    # Load conflict resolution parameters
+    REAL_CONFLICT_PROBABILITY = config.get("transaction", {}).get("real_conflict_probability", 0.0)
+    CONFLICTING_MANIFESTS_DIST = config.get("transaction", {}).get("conflicting_manifests", {}).get("distribution", "exponential")
+    CONFLICTING_MANIFESTS_PARAMS = {
+        "mean": config.get("transaction", {}).get("conflicting_manifests", {}).get("mean", 3.0),
+        "min": config.get("transaction", {}).get("conflicting_manifests", {}).get("min", 1),
+        "max": config.get("transaction", {}).get("conflicting_manifests", {}).get("max", 10),
+        "value": config.get("transaction", {}).get("conflicting_manifests", {}).get("value", 3),
+    }
 
     # NOTE: Table partitioning is done in CLI after seed is set for determinism
 
@@ -340,6 +355,37 @@ def validate_config(config: dict) -> list[str]:
             if ia_min >= ia_max:
                 errors.append(f"inter_arrival.min ({ia_min}) must be < inter_arrival.max ({ia_max})")
 
+    # Validate conflict resolution configuration
+    real_conflict_prob = txn.get('real_conflict_probability', 0.0)
+    if real_conflict_prob < 0 or real_conflict_prob > 1:
+        errors.append(f"transaction.real_conflict_probability must be in [0, 1], got {real_conflict_prob}")
+
+    if 'conflicting_manifests' in txn:
+        cm = txn['conflicting_manifests']
+        dist = cm.get('distribution', 'exponential')
+
+        if dist not in ['fixed', 'exponential', 'uniform']:
+            errors.append(f"conflicting_manifests.distribution must be one of [fixed, exponential, uniform], got '{dist}'")
+
+        cm_min = cm.get('min', 1)
+        cm_max = cm.get('max', 10)
+
+        if cm_min <= 0:
+            errors.append(f"conflicting_manifests.min must be > 0, got {cm_min}")
+
+        if cm_max < cm_min:
+            errors.append(f"conflicting_manifests.max ({cm_max}) must be >= min ({cm_min})")
+
+        if dist == 'exponential':
+            mean = cm.get('mean', 3.0)
+            if mean <= 0:
+                errors.append(f"conflicting_manifests.mean must be > 0, got {mean}")
+
+        if dist == 'fixed':
+            value = cm.get('value', 3)
+            if value <= 0:
+                errors.append(f"conflicting_manifests.value must be > 0, got {value}")
+
     # Validate simulation configuration
     sim = config.get('simulation', {})
     duration = sim.get('duration_ms', 0)
@@ -400,6 +446,27 @@ def get_manifest_file_latency(operation: str) -> float:
     """Get manifest file latency for read or write operation."""
     params = T_MANIFEST_FILE[operation]
     return generate_latency(params['mean'], params['stddev'])
+
+
+def sample_conflicting_manifests() -> int:
+    """Sample number of conflicting manifest files from configured distribution.
+
+    Returns:
+        Number of manifest files that need to be read and merged during
+        real conflict resolution.
+    """
+    dist = CONFLICTING_MANIFESTS_DIST
+    params = CONFLICTING_MANIFESTS_PARAMS
+
+    if dist == "fixed":
+        return int(params['value'])
+    elif dist == "exponential":
+        value = np.random.exponential(params['mean'])
+        return max(params['min'], min(params['max'], int(value)))
+    elif dist == "uniform":
+        return np.random.randint(params['min'], params['max'] + 1)
+    else:
+        raise ValueError(f"Unknown conflicting_manifests distribution: {dist}")
 
 
 def print_configuration():
@@ -500,33 +567,95 @@ class ConflictResolver:
         """Merge conflicts for tables that have changed.
 
         For each dirty table that has a different version in the catalog,
-        performs the full merge operation: read metadata, read manifest list,
-        read manifest file, write merged manifest file, write manifest list.
+        determines if this is a false conflict (version changed but no data overlap)
+        or a real conflict (overlapping data changes), and resolves accordingly.
 
         Yields timeout events for each I/O operation.
         """
         for t, v in txn.v_dirty.items():
             if v_catalog[t] != v:
-                # Table has changed - need to merge
-                logger.debug(f"{sim.now} TXN {txn.id} Merging table {t}")
+                # Determine if this is a real conflict
+                is_real_conflict = np.random.random() < REAL_CONFLICT_PROBABILITY
 
-                # Read metadata root
-                yield sim.timeout(get_metadata_root_latency('read'))
+                if is_real_conflict:
+                    yield from ConflictResolver.resolve_real_conflict(sim, txn, t, v_catalog)
+                    STATS.real_conflicts += 1
+                else:
+                    yield from ConflictResolver.resolve_false_conflict(sim, txn, t, v_catalog)
+                    STATS.false_conflicts += 1
 
-                # Read manifest list
-                yield sim.timeout(get_manifest_list_latency('read'))
+    @staticmethod
+    def resolve_false_conflict(sim, txn, table_id: int, v_catalog: dict):
+        """Resolve false conflict (version changed, no data overlap).
 
-                # Read manifest file
-                yield sim.timeout(get_manifest_file_latency('read'))
+        Manifest lists were already read in read_manifest_lists().
+        Only need to read metadata to understand the new snapshot state.
+        No manifest file operations required.
 
-                # Write updated (merged) manifest file
-                yield sim.timeout(get_manifest_file_latency('write'))
+        Args:
+            sim: SimPy environment
+            txn: Transaction object
+            table_id: Table with conflict
+            v_catalog: Current catalog state
+        """
+        logger.debug(f"{sim.now} TXN {txn.id} Resolving false conflict for table {table_id}")
 
-                # Write updated manifest list
-                yield sim.timeout(get_manifest_list_latency('write'))
+        # Read metadata root to understand new snapshot
+        yield sim.timeout(get_metadata_root_latency('read'))
 
-                # Update validation to current version
-                txn.v_dirty[t] = v_catalog[t]
+        # Update validation version (no file operations needed)
+        txn.v_dirty[table_id] = v_catalog[table_id]
+
+    @staticmethod
+    def resolve_real_conflict(sim, txn, table_id: int, v_catalog: dict):
+        """Resolve real conflict (overlapping data changes).
+
+        Must read and rewrite manifest files to merge conflicting changes.
+        The number of conflicting manifests is sampled from configuration.
+
+        Args:
+            sim: SimPy environment
+            txn: Transaction object
+            table_id: Table with conflict
+            v_catalog: Current catalog state
+        """
+        # Determine number of conflicting manifest files
+        n_conflicting = sample_conflicting_manifests()
+
+        logger.debug(f"{sim.now} TXN {txn.id} Resolving real conflict for table {table_id} "
+                    f"({n_conflicting} conflicting manifests)")
+
+        # Read metadata root
+        yield sim.timeout(get_metadata_root_latency('read'))
+
+        # Read manifest list (to get pointers to manifest files)
+        yield sim.timeout(get_manifest_list_latency('read'))
+
+        # Read conflicting manifest files (respects MAX_PARALLEL)
+        for batch_start in range(0, n_conflicting, MAX_PARALLEL):
+            batch_size = min(MAX_PARALLEL, n_conflicting - batch_start)
+            batch_latencies = [get_manifest_file_latency('read') for _ in range(batch_size)]
+            yield sim.timeout(max(batch_latencies))
+            logger.debug(f"{sim.now} TXN {txn.id} Read batch of {batch_size} manifest files")
+
+        # Track manifest file operations
+        STATS.manifest_files_read += n_conflicting
+
+        # Write merged manifest files (respects MAX_PARALLEL)
+        for batch_start in range(0, n_conflicting, MAX_PARALLEL):
+            batch_size = min(MAX_PARALLEL, n_conflicting - batch_start)
+            batch_latencies = [get_manifest_file_latency('write') for _ in range(batch_size)]
+            yield sim.timeout(max(batch_latencies))
+            logger.debug(f"{sim.now} TXN {txn.id} Wrote batch of {batch_size} merged manifest files")
+
+        # Track manifest file operations
+        STATS.manifest_files_written += n_conflicting
+
+        # Write updated manifest list
+        yield sim.timeout(get_manifest_list_latency('write'))
+
+        # Update validation version
+        txn.v_dirty[table_id] = v_catalog[table_id]
 
     @staticmethod
     def update_write_set(txn: 'Txn', v_catalog: dict):

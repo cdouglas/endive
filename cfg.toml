@@ -58,6 +58,20 @@ seltbl.zipf = 1.4
 # number of tables written (subset read)
 seltblw.zipf = 1.2
 
+# Conflict resolution configuration
+# Probability that a conflict is "real" (requires manifest file operations)
+# 0.0 = all false conflicts (version changed, no data overlap)
+# 1.0 = all real conflicts (overlapping data changes)
+real_conflict_probability = 0.0
+
+# For real conflicts: distribution of number of manifest files needing merge
+# distribution: "fixed", "exponential", "uniform"
+conflicting_manifests.distribution = "exponential"
+conflicting_manifests.mean = 3.0      # Mean for exponential distribution
+conflicting_manifests.min = 1         # Minimum number of conflicting manifests
+conflicting_manifests.max = 10        # Maximum number of conflicting manifests
+conflicting_manifests.value = 3       # Value for fixed distribution
+
 [storage]
 # Parallelism limit for manifest operations during conflict resolution
 max_parallel = 4
