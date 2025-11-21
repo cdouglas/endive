@@ -152,13 +152,45 @@ seltblw.zipf = 1.2           # Number of tables written (subset of read)
 
 ### Storage Latencies
 
+Storage operations use normal distributions with mean and standard deviation:
+
 ```toml
 [storage]
-T_CAS = 100                  # CAS operation latency (ms)
-T_METADATA_ROOT = 100        # Metadata root read latency (ms)
-T_MANIFEST_LIST = 100        # Manifest list read latency (ms)
-T_MANIFEST_FILE = 100        # Manifest file read latency (ms)
+# Maximum parallel manifest operations during conflict resolution
+max_parallel = 4
+
+# Minimum latency for any storage operation (ms) - prevents unrealistic zeros
+min_latency = 5
+
+# CAS operation latency (ms) - normal distribution
+T_CAS.mean = 100
+T_CAS.stddev = 10
+
+# Metadata root read/write latency (ms)
+T_METADATA_ROOT.read.mean = 100
+T_METADATA_ROOT.read.stddev = 10
+T_METADATA_ROOT.write.mean = 120
+T_METADATA_ROOT.write.stddev = 15
+
+# Manifest list read/write latency (ms)
+T_MANIFEST_LIST.read.mean = 100
+T_MANIFEST_LIST.read.stddev = 10
+T_MANIFEST_LIST.write.mean = 120
+T_MANIFEST_LIST.write.stddev = 15
+
+# Manifest file read/write latency (ms)
+T_MANIFEST_FILE.read.mean = 100
+T_MANIFEST_FILE.read.stddev = 10
+T_MANIFEST_FILE.write.mean = 120
+T_MANIFEST_FILE.write.stddev = 15
 ```
+
+**Conflict Resolution:**
+When a CAS fails because the catalog has moved from snapshot s_k to s_{k+n}, the simulator:
+1. Reads n manifest lists (one for each intermediate snapshot)
+2. Processes at most `max_parallel` manifest lists in parallel
+3. Merges conflicts for each affected table
+4. Retries the commit with updated snapshot version
 
 ## Understanding Inter-Arrival Time
 
@@ -320,15 +352,26 @@ pytest tests/test_simulator.py::TestParameterEffects -v
 
 ### Test Coverage
 
-**Determinism Tests:**
+**Determinism Tests** (`test_simulator.py`):
 - Verifies identical results with same random seed
 - Confirms different seeds produce different outcomes
 
-**Parameter Effect Tests:**
+**Parameter Effect Tests** (`test_simulator.py`):
 - Lower inter-arrival time increases contention and retries
 - Higher CAS latency increases commit times
 - More retries improve success rates
 - Fewer tables increase contention (more overlapping transactions)
+
+**Conflict Resolution Tests** (`test_conflict_resolution.py`):
+- High contention causes CAS failures and retries
+- Commit latency increases with number of retries
+- Different parallelism limits affect performance under contention
+
+**Storage Latency Tests** (`test_conflict_resolution.py`):
+- Minimum latency is enforced (prevents unrealistic zeros)
+- Latencies follow approximately normal distribution
+- Read and write latencies are differentiated
+- Stochastic latencies work correctly in simulation
 
 These tests serve as both validation and documentation of expected simulator behavior.
 

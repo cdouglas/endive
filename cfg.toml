@@ -38,7 +38,30 @@ seltbl.zipf = 1.4
 seltblw.zipf = 1.2
 
 [storage]
-T_CAS = 100
-T_METADATA_ROOT = 100
-T_MANIFEST_LIST = 100
-T_MANIFEST_FILE = 100
+# Parallelism limit for manifest operations during conflict resolution
+max_parallel = 4
+
+# Minimum latency for any storage operation (ms) - prevents unrealistic zero latencies
+min_latency = 5
+
+# CAS operation latency (ms) - normal distribution
+T_CAS.mean = 100
+T_CAS.stddev = 10
+
+# Metadata root read/write latency (ms) - normal distribution
+T_METADATA_ROOT.read.mean = 100
+T_METADATA_ROOT.read.stddev = 10
+T_METADATA_ROOT.write.mean = 120
+T_METADATA_ROOT.write.stddev = 15
+
+# Manifest list read/write latency (ms) - normal distribution
+T_MANIFEST_LIST.read.mean = 100
+T_MANIFEST_LIST.read.stddev = 10
+T_MANIFEST_LIST.write.mean = 120
+T_MANIFEST_LIST.write.stddev = 15
+
+# Manifest file read/write latency (ms) - normal distribution
+T_MANIFEST_FILE.read.mean = 100
+T_MANIFEST_FILE.read.stddev = 10
+T_MANIFEST_FILE.write.mean = 120
+T_MANIFEST_FILE.write.stddev = 15

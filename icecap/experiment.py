@@ -64,10 +64,34 @@ def write_config(config: Dict[str, Any], output_path: str):
 
         # Write storage section
         f.write("[storage]\n")
-        f.write(f"T_CAS = {config['storage']['T_CAS']}\n")
-        f.write(f"T_METADATA_ROOT = {config['storage']['T_METADATA_ROOT']}\n")
-        f.write(f"T_MANIFEST_LIST = {config['storage']['T_MANIFEST_LIST']}\n")
-        f.write(f"T_MANIFEST_FILE = {config['storage']['T_MANIFEST_FILE']}\n")
+        f.write(f"max_parallel = {config['storage']['max_parallel']}\n")
+        f.write(f"min_latency = {config['storage']['min_latency']}\n")
+        f.write("\n")
+
+        # CAS latency
+        f.write(f"T_CAS.mean = {config['storage']['T_CAS']['mean']}\n")
+        f.write(f"T_CAS.stddev = {config['storage']['T_CAS']['stddev']}\n")
+        f.write("\n")
+
+        # Metadata root latencies
+        f.write(f"T_METADATA_ROOT.read.mean = {config['storage']['T_METADATA_ROOT']['read']['mean']}\n")
+        f.write(f"T_METADATA_ROOT.read.stddev = {config['storage']['T_METADATA_ROOT']['read']['stddev']}\n")
+        f.write(f"T_METADATA_ROOT.write.mean = {config['storage']['T_METADATA_ROOT']['write']['mean']}\n")
+        f.write(f"T_METADATA_ROOT.write.stddev = {config['storage']['T_METADATA_ROOT']['write']['stddev']}\n")
+        f.write("\n")
+
+        # Manifest list latencies
+        f.write(f"T_MANIFEST_LIST.read.mean = {config['storage']['T_MANIFEST_LIST']['read']['mean']}\n")
+        f.write(f"T_MANIFEST_LIST.read.stddev = {config['storage']['T_MANIFEST_LIST']['read']['stddev']}\n")
+        f.write(f"T_MANIFEST_LIST.write.mean = {config['storage']['T_MANIFEST_LIST']['write']['mean']}\n")
+        f.write(f"T_MANIFEST_LIST.write.stddev = {config['storage']['T_MANIFEST_LIST']['write']['stddev']}\n")
+        f.write("\n")
+
+        # Manifest file latencies
+        f.write(f"T_MANIFEST_FILE.read.mean = {config['storage']['T_MANIFEST_FILE']['read']['mean']}\n")
+        f.write(f"T_MANIFEST_FILE.read.stddev = {config['storage']['T_MANIFEST_FILE']['read']['stddev']}\n")
+        f.write(f"T_MANIFEST_FILE.write.mean = {config['storage']['T_MANIFEST_FILE']['write']['mean']}\n")
+        f.write(f"T_MANIFEST_FILE.write.stddev = {config['storage']['T_MANIFEST_FILE']['write']['stddev']}\n")
 
 
 def sweep_inter_arrival(
@@ -110,7 +134,9 @@ def sweep_catalog_latency(
     configs = []
     for cas_latency in cas_latencies:
         config = dict(base_config)
-        config['storage']['T_CAS'] = cas_latency
+        # Update mean CAS latency (keep stddev proportional)
+        config['storage']['T_CAS']['mean'] = cas_latency
+        config['storage']['T_CAS']['stddev'] = cas_latency * 0.1  # 10% stddev
 
         # Update output path
         config['simulation']['output_path'] = f"{output_dir}/cas_{cas_latency}.parquet"
@@ -141,7 +167,9 @@ def sweep_combined(
             elif distribution == "fixed":
                 config['transaction']['inter_arrival']['value'] = ia_time
 
-            config['storage']['T_CAS'] = cas_latency
+            # Update mean CAS latency (keep stddev proportional)
+            config['storage']['T_CAS']['mean'] = cas_latency
+            config['storage']['T_CAS']['stddev'] = cas_latency * 0.1  # 10% stddev
 
             # Update output path
             config['simulation']['output_path'] = (

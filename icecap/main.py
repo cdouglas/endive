@@ -21,10 +21,13 @@ SIM_SEED: int | None
 
 N_TABLES: int
 N_TXN_RETRY: int
-T_CAS: int
-T_METADATA_ROOT: int
-T_MANIFEST_LIST: int
-T_MANIFEST_FILE: int
+# Storage operation latencies (normal distributions with mean and stddev)
+T_CAS: dict  # {'mean': float, 'stddev': float}
+T_METADATA_ROOT: dict  # {'read': {'mean': float, 'stddev': float}, 'write': {...}}
+T_MANIFEST_LIST: dict
+T_MANIFEST_FILE: dict
+MAX_PARALLEL: int  # Maximum parallel manifest operations during conflict resolution
+MIN_LATENCY: float  # Minimum latency for any storage operation (prevents unrealistic zeros)
 # lognormal distribution of transaction runtimes
 T_MIN_RUNTIME: int
 T_RUNTIME_MU: float
@@ -47,6 +50,7 @@ def configure_from_toml(config_file: str):
     global N_TBL_PMF, TBL_R_PMF, N_TBL_W_PMF, N_TXN_RETRY
     global SIM_DURATION_MS, SIM_OUTPUT_PATH, SIM_SEED
     global INTER_ARRIVAL_DIST, INTER_ARRIVAL_PARAMS
+    global MAX_PARALLEL, MIN_LATENCY
 
     with open(config_file, "rb") as f:
         config = tomllib.load(f)
@@ -59,11 +63,47 @@ def configure_from_toml(config_file: str):
     # Load basic integer configuration
     N_TABLES = config["catalog"]["num_tables"]
 
-    # Load storage latencies
-    T_CAS = config["storage"]["T_CAS"]
-    T_METADATA_ROOT = config["storage"]["T_METADATA_ROOT"]
-    T_MANIFEST_LIST = config["storage"]["T_MANIFEST_LIST"]
-    T_MANIFEST_FILE = config["storage"]["T_MANIFEST_FILE"]
+    # Load storage latencies (normal distributions)
+    MAX_PARALLEL = config["storage"]["max_parallel"]
+    MIN_LATENCY = config["storage"]["min_latency"]
+
+    T_CAS = {
+        'mean': config["storage"]["T_CAS"]["mean"],
+        'stddev': config["storage"]["T_CAS"]["stddev"]
+    }
+
+    T_METADATA_ROOT = {
+        'read': {
+            'mean': config["storage"]["T_METADATA_ROOT"]["read"]["mean"],
+            'stddev': config["storage"]["T_METADATA_ROOT"]["read"]["stddev"]
+        },
+        'write': {
+            'mean': config["storage"]["T_METADATA_ROOT"]["write"]["mean"],
+            'stddev': config["storage"]["T_METADATA_ROOT"]["write"]["stddev"]
+        }
+    }
+
+    T_MANIFEST_LIST = {
+        'read': {
+            'mean': config["storage"]["T_MANIFEST_LIST"]["read"]["mean"],
+            'stddev': config["storage"]["T_MANIFEST_LIST"]["read"]["stddev"]
+        },
+        'write': {
+            'mean': config["storage"]["T_MANIFEST_LIST"]["write"]["mean"],
+            'stddev': config["storage"]["T_MANIFEST_LIST"]["write"]["stddev"]
+        }
+    }
+
+    T_MANIFEST_FILE = {
+        'read': {
+            'mean': config["storage"]["T_MANIFEST_FILE"]["read"]["mean"],
+            'stddev': config["storage"]["T_MANIFEST_FILE"]["read"]["stddev"]
+        },
+        'write': {
+            'mean': config["storage"]["T_MANIFEST_FILE"]["write"]["mean"],
+            'stddev': config["storage"]["T_MANIFEST_FILE"]["write"]["stddev"]
+        }
+    }
 
     # Load runtime-related configuration
     N_TXN_RETRY = config["transaction"]["retry"]
@@ -117,6 +157,37 @@ def generate_inter_arrival_time():
         raise ValueError(f"Unknown inter-arrival distribution: {INTER_ARRIVAL_DIST}")
 
 
+def generate_latency(mean: float, stddev: float) -> float:
+    """Generate storage operation latency from normal distribution.
+
+    Enforces minimum latency to prevent unrealistic zero or near-zero values.
+    """
+    return max(MIN_LATENCY, np.random.normal(loc=mean, scale=stddev))
+
+
+def get_cas_latency() -> float:
+    """Get CAS operation latency."""
+    return generate_latency(T_CAS['mean'], T_CAS['stddev'])
+
+
+def get_metadata_root_latency(operation: str) -> float:
+    """Get metadata root latency for read or write operation."""
+    params = T_METADATA_ROOT[operation]
+    return generate_latency(params['mean'], params['stddev'])
+
+
+def get_manifest_list_latency(operation: str) -> float:
+    """Get manifest list latency for read or write operation."""
+    params = T_MANIFEST_LIST[operation]
+    return generate_latency(params['mean'], params['stddev'])
+
+
+def get_manifest_file_latency(operation: str) -> float:
+    """Get manifest file latency for read or write operation."""
+    params = T_MANIFEST_FILE[operation]
+    return generate_latency(params['mean'], params['stddev'])
+
+
 def print_configuration():
     """Print configuration summary."""
     print("\n" + "="*70)
@@ -147,10 +218,16 @@ def print_configuration():
         print(f"    Value:      {INTER_ARRIVAL_PARAMS['value']:.1f}ms")
         print(f"    (Rate:      {1000/INTER_ARRIVAL_PARAMS['value']:.2f} txn/sec)")
 
-    print("\n[Storage Latencies]")
-    print(f"  CAS:          {T_CAS}ms")
-    print(f"  Metadata:     {T_METADATA_ROOT}ms")
-    print(f"  Manifest:     {T_MANIFEST_LIST}ms / {T_MANIFEST_FILE}ms")
+    print("\n[Storage Latencies (ms, mean±stddev)]")
+    print(f"  Min Latency:  {MIN_LATENCY:.1f}ms")
+    print(f"  CAS:          {T_CAS['mean']:.1f}±{T_CAS['stddev']:.1f}")
+    print(f"  Metadata R/W: {T_METADATA_ROOT['read']['mean']:.1f}±{T_METADATA_ROOT['read']['stddev']:.1f} / "
+          f"{T_METADATA_ROOT['write']['mean']:.1f}±{T_METADATA_ROOT['write']['stddev']:.1f}")
+    print(f"  Manifest L:   {T_MANIFEST_LIST['read']['mean']:.1f}±{T_MANIFEST_LIST['read']['stddev']:.1f} / "
+          f"{T_MANIFEST_LIST['write']['mean']:.1f}±{T_MANIFEST_LIST['write']['stddev']:.1f}")
+    print(f"  Manifest F:   {T_MANIFEST_FILE['read']['mean']:.1f}±{T_MANIFEST_FILE['read']['stddev']:.1f} / "
+          f"{T_MANIFEST_FILE['write']['mean']:.1f}±{T_MANIFEST_FILE['write']['stddev']:.1f}")
+    print(f"  Max Parallel: {MAX_PARALLEL}")
 
     print("\n" + "="*70 + "\n")
 
@@ -192,48 +269,79 @@ class Txn:
     v_dirty: dict[int, int] = field(default_factory=lambda: defaultdict(dict)) # versions validated (init union(v_tblr, v_tblw))
 
 def txn_ml_w(sim, txn):
-    # write each manifest list TODO: not sequential?
+    """Write manifest lists for all tables written in transaction."""
+    # Write each manifest list with latency from normal distribution
     for _ in txn.v_tblw:
-        yield sim.timeout(T_MANIFEST_LIST) # TODO: distr
+        yield sim.timeout(get_manifest_list_latency('write'))
     logger.debug(f"{sim.now} TXN {txn.id} ML_W")
 
 def txn_commit(sim, txn, catalog):
-    # TODO move commit to Catalog to test CASCatalog, AppendCatalog?
-    yield sim.timeout(T_CAS) # CAS >
-    if catalog.try_CAS(sim, txn): # txn.v_catalog_seq, txn.v_tblw): # success?
+    """Attempt to commit transaction with conflict resolution."""
+    # Attempt CAS operation
+    yield sim.timeout(get_cas_latency())
+
+    if catalog.try_CAS(sim, txn):
+        # Success - transaction committed
         logger.debug(f"{sim.now} TXN {txn.id} commit")
-        txn.t_commit = sim.now # known committed at this tick
+        txn.t_commit = sim.now
         STATS.commit(txn)
     else:
-        logger.debug(f"{sim.now} TXN {txn.id} CAS Fail")
+        # CAS failed - need to resolve conflicts
+        n_snapshots_behind = catalog.seq - txn.v_catalog_seq
+        logger.debug(f"{sim.now} TXN {txn.id} CAS Fail - {n_snapshots_behind} snapshots behind")
+
         if txn.n_retries >= N_TXN_RETRY:
             txn.t_abort = sim.now
             STATS.abort(txn)
             return
-        yield sim.timeout(T_CAS / 2) # CAS > failed, read catalog
-        # record catalog sequence number and versions read
+
+        # Read catalog to get current sequence number
+        yield sim.timeout(get_cas_latency() / 2)
+
+        # Update to current catalog state
         v_catalog = dict()
         txn.v_catalog_seq = catalog.seq
         for t in txn.v_dirty.keys():
             v_catalog[t] = catalog.tbl[t]
-        yield sim.timeout(T_CAS / 2) # < CAS
 
+        # Read manifest lists for all snapshots between our read and current
+        # Process with at most MAX_PARALLEL parallelism
+        if n_snapshots_behind > 0:
+            logger.debug(f"{sim.now} TXN {txn.id} Reading {n_snapshots_behind} manifest lists (max_parallel={MAX_PARALLEL})")
+
+            # Process in batches of MAX_PARALLEL
+            for batch_start in range(0, n_snapshots_behind, MAX_PARALLEL):
+                batch_size = min(MAX_PARALLEL, n_snapshots_behind - batch_start)
+                # All reads in this batch happen in parallel, take max time
+                batch_latencies = [get_manifest_list_latency('read') for _ in range(batch_size)]
+                yield sim.timeout(max(batch_latencies))
+                logger.debug(f"{sim.now} TXN {txn.id} Read batch of {batch_size} manifest lists")
+
+        # Now resolve conflicts for each dirty table
         for t, v in txn.v_dirty.items():
-            # optimistic, parallel version
             if not v_catalog[t] == v:
-                # TODO add noise to reads/writes (even in parallel, typ max)
-                # read
-                yield sim.timeout(T_METADATA_ROOT)
-                yield sim.timeout(T_MANIFEST_LIST)
-                # TODO skip T_MANIFEST_FILE with some prob
-                yield sim.timeout(T_MANIFEST_FILE) # min height of tree
-                # write updated (merged) metadata
-                yield sim.timeout(T_MANIFEST_FILE)
-                yield sim.timeout(T_MANIFEST_LIST)
+                # Table has changed - need to merge
+                logger.debug(f"{sim.now} TXN {txn.id} Merging table {t}")
 
-                # update validation to current
+                # Read metadata root
+                yield sim.timeout(get_metadata_root_latency('read'))
+
+                # Read manifest list
+                yield sim.timeout(get_manifest_list_latency('read'))
+
+                # Read manifest file
+                yield sim.timeout(get_manifest_file_latency('read'))
+
+                # Write updated (merged) manifest file
+                yield sim.timeout(get_manifest_file_latency('write'))
+
+                # Write updated manifest list
+                yield sim.timeout(get_manifest_list_latency('write'))
+
+                # Update validation to current version
                 txn.v_dirty[t] = v_catalog[t]
-        # update write set to the next available version per table (confluent w)
+
+        # Update write set to the next available version per table
         for t in txn.v_tblw.keys():
             txn.v_tblw[t] = v_catalog[t] + 1
 
