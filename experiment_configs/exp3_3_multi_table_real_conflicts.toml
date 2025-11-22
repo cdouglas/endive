@@ -1,0 +1,108 @@
+# Experiment 3.3: Multi-Table Saturation - Real Conflicts
+#
+# Research Question 2b: Show interaction between table count and conflict type
+#
+# Setup:
+# - Multiple tables with table-level conflicts (num_groups = num_tables)
+# - Variable probability of real conflicts
+# - Transactions access 2-3 tables on average (ntable.zipf = 1.5)
+# - Infinitely fast catalog (T_CAS = 1ms, T_METADATA_ROOT = 1ms)
+# - Realistic storage latencies for manifest lists/files
+#
+# Key Insight:
+# P(≥1 real conflict in multi-table txn) = 1 - (1 - p)^n_tables
+# This means real conflicts compound with more tables!
+#
+# Example: With p=0.3 and 3 tables per transaction:
+#   P(≥1 real conflict) = 1 - (1 - 0.3)^3 = 1 - 0.343 = 65.7%
+#
+# Expected Results:
+# - Real conflicts have multiplicative effect with table count
+# - Higher table count + higher real conflict probability → much lower saturation
+# - Heatmap will show non-linear interaction effects
+#
+# How to Run:
+# Sweep num_tables, real_conflict_probability, and inter_arrival.scale:
+#   num_tables = [1, 2, 5, 10, 20]
+#   real_conflict_probability = [0.0, 0.1, 0.3, 0.5]
+#   inter_arrival.scale = [10, 20, 50, 100, 200, 500, 1000, 2000, 5000]
+#
+# IMPORTANT: Set num_groups = num_tables for table-level conflicts
+#
+# This creates a 3D parameter space - generate heatmap of saturation throughput
+# vs (num_tables, real_conflict_probability) for analysis.
+#
+# For each combination, run multiple seeds:
+#   python -m icecap.main experiment_configs/exp3_3_multi_table_real_conflicts.toml
+
+[simulation]
+duration_ms = 100000  # 100 seconds
+output_path = "results.parquet"
+# seed = 42  # Uncomment to set specific seed, or leave unset for random
+
+[experiment]
+label = "exp3_3_multi_table_real"
+
+[catalog]
+# **SWEEP THIS PARAMETER** to study scaling with table count
+num_tables = 10  # MODIFY THIS: 1, 2, 5, 10, 20
+
+# IMPORTANT: Set num_groups = num_tables for table-level conflicts
+num_groups = 10  # MODIFY THIS: must equal num_tables
+
+[transaction]
+retry = 10
+
+# Transaction runtime (lognormal distribution)
+runtime.min = 5000
+runtime.mean = 10000
+runtime.sigma = 1.5
+
+# Inter-arrival time distribution
+# **SWEEP THIS PARAMETER** to vary offered load
+inter_arrival.distribution = "exponential"
+inter_arrival.scale = 500.0  # ~2 txn/sec (MODIFY THIS FOR LOAD SWEEP)
+
+# Multi-table workload: transactions access 2-3 tables on average
+ntable.zipf = 1.5  # Lower = more tables per transaction
+seltbl.zipf = 1.4  # Which tables selected (lower = more uniform)
+seltblw.zipf = 1.2  # Tables written vs read
+
+# Conflict resolution: VARIABLE REAL CONFLICT PROBABILITY
+# **SWEEP THIS PARAMETER** to study interaction with table count
+real_conflict_probability = 0.3  # MODIFY THIS: 0.0, 0.1, 0.3, 0.5
+
+# Distribution of conflicting manifest files (for real conflicts)
+conflicting_manifests.distribution = "exponential"
+conflicting_manifests.mean = 3.0  # Mean number of manifest files to merge
+conflicting_manifests.min = 1
+conflicting_manifests.max = 10
+
+[storage]
+# Parallelism limit for manifest operations during conflict resolution
+max_parallel = 4
+
+# Minimum latency for any storage operation (ms)
+min_latency = 1
+
+# ===== INFINITELY FAST CATALOG =====
+# Near-instant catalog operations to isolate conflict resolution costs
+T_CAS.mean = 1
+T_CAS.stddev = 0.1
+
+T_METADATA_ROOT.read.mean = 1
+T_METADATA_ROOT.read.stddev = 0.1
+T_METADATA_ROOT.write.mean = 1
+T_METADATA_ROOT.write.stddev = 0.1
+
+# ===== REALISTIC STORAGE LATENCIES =====
+# Typical S3 performance
+T_MANIFEST_LIST.read.mean = 50
+T_MANIFEST_LIST.read.stddev = 5
+T_MANIFEST_LIST.write.mean = 60
+T_MANIFEST_LIST.write.stddev = 6
+
+T_MANIFEST_FILE.read.mean = 50
+T_MANIFEST_FILE.read.stddev = 5
+T_MANIFEST_FILE.write.mean = 60
+T_MANIFEST_FILE.write.stddev = 6

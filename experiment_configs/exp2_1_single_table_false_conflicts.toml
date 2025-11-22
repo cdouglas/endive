@@ -1,0 +1,90 @@
+# Experiment 2.1: Single Table Saturation - False Conflicts Only
+#
+# Research Question 1a: Find saturation point for single table with false conflicts
+#
+# Setup:
+# - Single table with catalog-level conflicts
+# - All conflicts are "false" (version changed but no overlapping data)
+# - Infinitely fast catalog (T_CAS = 1ms, T_METADATA_ROOT = 1ms)
+# - Realistic storage latencies for manifest lists/files
+#
+# Expected Results:
+# - Low load: ~99% success, low latency (~150ms), linear throughput
+# - Medium load: Success drops to 90-95%, latency increases, throughput plateaus
+# - High load: Success < 50%, latency explodes, throughput may decrease
+#
+# How to Run:
+# Vary inter_arrival.scale to sweep offered load:
+#   inter_arrival.scale = [10, 20, 50, 100, 200, 500, 1000, 2000, 5000]
+#
+# For each load level, run multiple seeds:
+#   python -m icecap.main experiment_configs/exp2_1_single_table_false_conflicts.toml
+
+[simulation]
+duration_ms = 100000  # 100 seconds
+output_path = "results.parquet"
+# seed = 42  # Uncomment to set specific seed, or leave unset for random
+
+[experiment]
+label = "exp2_1_single_table_false"
+
+[catalog]
+num_tables = 1
+num_groups = 1  # Catalog-level conflicts
+
+[transaction]
+retry = 10
+
+# Transaction runtime (lognormal distribution)
+runtime.min = 5000
+runtime.mean = 10000
+runtime.sigma = 1.5
+
+# Inter-arrival time distribution
+# **SWEEP THIS PARAMETER** to vary offered load
+# Lower inter_arrival = more concurrent clients = higher contention
+inter_arrival.distribution = "exponential"
+inter_arrival.scale = 500.0  # ~2 txn/sec (MODIFY THIS FOR LOAD SWEEP)
+
+# Simple workload: single table access
+ntable.zipf = 10.0  # Ensure exactly 1 table per txn
+seltbl.zipf = 1.4
+seltblw.zipf = 1.2
+
+# Conflict resolution: FALSE CONFLICTS ONLY
+real_conflict_probability = 0.0  # All conflicts are false
+
+# For real conflicts (not used in this experiment)
+conflicting_manifests.distribution = "exponential"
+conflicting_manifests.mean = 3.0
+conflicting_manifests.min = 1
+conflicting_manifests.max = 10
+
+[storage]
+# Parallelism limit for manifest operations during conflict resolution
+max_parallel = 4
+
+# Minimum latency for any storage operation (ms)
+min_latency = 1
+
+# ===== INFINITELY FAST CATALOG =====
+# Near-instant catalog operations to isolate conflict resolution costs
+T_CAS.mean = 1
+T_CAS.stddev = 0.1
+
+T_METADATA_ROOT.read.mean = 1
+T_METADATA_ROOT.read.stddev = 0.1
+T_METADATA_ROOT.write.mean = 1
+T_METADATA_ROOT.write.stddev = 0.1
+
+# ===== REALISTIC STORAGE LATENCIES =====
+# Typical S3 performance
+T_MANIFEST_LIST.read.mean = 50
+T_MANIFEST_LIST.read.stddev = 5
+T_MANIFEST_LIST.write.mean = 60
+T_MANIFEST_LIST.write.stddev = 6
+
+T_MANIFEST_FILE.read.mean = 50
+T_MANIFEST_FILE.read.stddev = 5
+T_MANIFEST_FILE.write.mean = 60
+T_MANIFEST_FILE.write.stddev = 6
