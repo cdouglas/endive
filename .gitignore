@@ -6,4 +6,5 @@ share/
 lib64
 pyvenv.cfg
 experiments/
+experiment_logs/
 plots/
