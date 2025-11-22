@@ -19,6 +19,9 @@ SIM_DURATION_MS: int
 SIM_OUTPUT_PATH: str
 SIM_SEED: int | None
 
+# Experiment parameters
+EXPERIMENT_LABEL: str | None
+
 N_TABLES: int
 N_GROUPS: int  # Number of table groups
 GROUP_SIZE_DIST: str  # Distribution of group sizes
@@ -135,6 +138,60 @@ def partition_tables_into_groups(n_tables: int, n_groups: int, distribution: str
     return table_to_group, group_to_tables
 
 
+def compute_experiment_hash(config: dict) -> str:
+    """Compute deterministic hash of config + simulator code.
+
+    The hash includes:
+    1. All config parameters except 'seed' and 'experiment.label'
+    2. Hash of simulator code files (icecap/*.py)
+
+    This ensures that:
+    - Same config → same hash (reproducible)
+    - Different seeds → same hash (seeds go in different dirs)
+    - Code changes → different hash (invalidates old results)
+
+    Returns:
+        8-character hex hash string
+    """
+    import hashlib
+    import json
+    from pathlib import Path
+
+    # 1. Hash configuration (excluding seed and label)
+    config_for_hash = dict(config)
+
+    # Remove seed from simulation section
+    if 'simulation' in config_for_hash and 'seed' in config_for_hash['simulation']:
+        config_for_hash = dict(config_for_hash)  # Copy
+        config_for_hash['simulation'] = dict(config_for_hash['simulation'])
+        del config_for_hash['simulation']['seed']
+
+    # Remove experiment section entirely (contains label)
+    if 'experiment' in config_for_hash:
+        config_for_hash = dict(config_for_hash)
+        del config_for_hash['experiment']
+
+    # Serialize config deterministically
+    config_str = json.dumps(config_for_hash, sort_keys=True)
+
+    # 2. Hash simulator code files
+    code_hash = hashlib.sha256()
+    icecap_dir = Path(__file__).parent
+
+    # Include all .py files in icecap/ directory
+    for py_file in sorted(icecap_dir.glob("*.py")):
+        with open(py_file, 'rb') as f:
+            code_hash.update(f.read())
+
+    # 3. Combine config and code hashes
+    combined = hashlib.sha256()
+    combined.update(config_str.encode('utf-8'))
+    combined.update(code_hash.digest())
+
+    # Return first 8 characters of hex digest
+    return combined.hexdigest()[:8]
+
+
 def configure_from_toml(config_file: str):
     global N_TABLES, N_GROUPS, GROUP_SIZE_DIST, LONGTAIL_PARAMS
     global TABLE_TO_GROUP, GROUP_TO_TABLES
@@ -145,6 +202,7 @@ def configure_from_toml(config_file: str):
     global INTER_ARRIVAL_DIST, INTER_ARRIVAL_PARAMS
     global MAX_PARALLEL, MIN_LATENCY
     global REAL_CONFLICT_PROBABILITY, CONFLICTING_MANIFESTS_DIST, CONFLICTING_MANIFESTS_PARAMS
+    global EXPERIMENT_LABEL
 
     with open(config_file, "rb") as f:
         config = tomllib.load(f)
@@ -153,6 +211,9 @@ def configure_from_toml(config_file: str):
     SIM_DURATION_MS = config["simulation"]["duration_ms"]
     SIM_OUTPUT_PATH = config["simulation"]["output_path"]
     SIM_SEED = config["simulation"].get("seed")
+
+    # Load experiment parameters
+    EXPERIMENT_LABEL = config.get("experiment", {}).get("label")
 
     # Load basic integer configuration
     N_TABLES = config["catalog"]["num_tables"]
@@ -844,6 +905,63 @@ def setup(sim):
         yield sim.timeout(int(generate_inter_arrival_time()))
         sim.process(txn_gen(sim, next(txn_ids), catalog))
 
+
+def prepare_experiment_output(config: dict, config_file: str, actual_seed: int) -> str:
+    """Prepare experiment output directory and return final output path.
+
+    If experiment.label is set:
+    - Creates: experiments/$label-$hash/$seed/
+    - Writes: experiments/$label-$hash/cfg.toml (copy of input config)
+    - Returns: experiments/$label-$hash/$seed/results.parquet
+
+    If experiment.label is not set:
+    - Returns: original output_path from config
+
+    Args:
+        config: Parsed TOML configuration dict
+        config_file: Path to original config file
+        actual_seed: The actual seed being used (either from config or randomly generated)
+
+    Returns:
+        Final output path for results
+    """
+    from pathlib import Path
+    import shutil
+
+    label = config.get("experiment", {}).get("label")
+
+    if label is None:
+        # No experiment label - use original output path
+        return config["simulation"]["output_path"]
+
+    # Compute experiment hash
+    exp_hash = compute_experiment_hash(config)
+
+    # Use actual seed (never "noseed" - always the real seed used)
+    seed_str = str(actual_seed)
+
+    # Construct paths
+    exp_dir = Path("experiments") / f"{label}-{exp_hash}"
+    run_dir = exp_dir / seed_str
+    output_path = run_dir / config["simulation"]["output_path"]
+
+    # Create directories
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    # Copy config to experiment directory (if not already there)
+    exp_config_path = exp_dir / "cfg.toml"
+    if not exp_config_path.exists():
+        shutil.copy2(config_file, exp_config_path)
+        logger.info(f"Wrote experiment config to {exp_config_path}")
+
+    logger.info(f"Experiment: {label}-{exp_hash}")
+    logger.info(f"  Config hash: {exp_hash}")
+    logger.info(f"  Seed: {seed_str}")
+    logger.info(f"  Output: {output_path}")
+
+    return str(output_path)
+
+
 def cli():
     """CLI entry point for icecap simulator."""
     parser = argparse.ArgumentParser(
@@ -918,6 +1036,9 @@ def cli():
         logger.info(f"Using random seed: {seed}")
     np.random.seed(seed)
 
+    # Prepare experiment output directory with actual seed
+    final_output_path = prepare_experiment_output(config, args.config, seed)
+
     # Partition tables into groups (after seed is set for determinism)
     global TABLE_TO_GROUP, GROUP_TO_TABLES
     TABLE_TO_GROUP, GROUP_TO_TABLES = partition_tables_into_groups(
@@ -959,8 +1080,8 @@ def cli():
     logger.info("Simulation complete")
 
     # Export results
-    logger.info(f"Exporting results to {SIM_OUTPUT_PATH}")
-    STATS.export_parquet(SIM_OUTPUT_PATH)
+    logger.info(f"Exporting results to {final_output_path}")
+    STATS.export_parquet(final_output_path)
     logger.info(f"Results exported successfully")
 
 if __name__ == "__main__":

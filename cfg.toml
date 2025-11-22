@@ -6,6 +6,12 @@ output_path = "results.parquet"
 # Random seed (omit for random seed)
 # seed = 42
 
+[experiment]
+# Optional experiment label for organized output
+# When set, output goes to: experiments/$label-$hash/$seed/results.parquet
+# where $hash is deterministic based on config + simulator code
+# label = "baseline"
+
 [catalog]
 num_tables = 10
 

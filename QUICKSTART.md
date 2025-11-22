@@ -151,6 +151,11 @@ duration_ms = 100000000  # 100 seconds of simulated time
 output_path = "results.parquet"
 seed = 42                # For reproducible results (omit for random)
 
+[experiment]
+# Optional: organize repeated runs with same config but different seeds
+# Output goes to: experiments/$label-$hash/$seed/results.parquet
+# label = "baseline"
+
 [catalog]
 num_tables = 10          # More tables = less contention
 num_groups = 1           # Number of table groups (1 = catalog-level conflicts)
@@ -159,7 +164,33 @@ num_groups = 1           # Number of table groups (1 = catalog-level conflicts)
 retry = 10               # Max retry attempts before abort
 inter_arrival.distribution = "exponential"
 inter_arrival.scale = 5000.0  # Mean ~0.2 txn/sec
+
+# Conflict resolution: false vs real conflicts
+real_conflict_probability = 0.0  # 0.0 = all false, 1.0 = all real
+conflicting_manifests.distribution = "exponential"
+conflicting_manifests.mean = 3.0
 ```
+
+**Experiment Organization:**
+
+Use the `experiment.label` parameter to organize repeated runs:
+
+```bash
+# Run same config with different seeds
+python -m icecap.main my_config.toml  # First run (random seed)
+python -m icecap.main my_config.toml  # Second run (different random seed)
+
+# Results organized as:
+# experiments/baseline-a1b2c3d4/
+#   cfg.toml                    # Shared configuration
+#   12345/results.parquet       # First run (seed 12345)
+#   67890/results.parquet       # Second run (seed 67890)
+```
+
+Benefits:
+- Same config + code → same hash for easy organization
+- Run multiple seeds and average results
+- `cfg.toml` + seed fully specifies results (reproducible)
 
 ### Storage Configuration (Key Feature)
 
@@ -348,6 +379,8 @@ pytest tests/test_conflict_resolution.py::TestMinimumLatency -v
 - **Conflict resolution**: CAS failures trigger manifest list reads
 - **Storage latencies**: Minimum enforcement, distributions, read/write differences
 - **Parallelism**: max_parallel limits are respected
+- **Conflict types**: False vs real conflicts, distribution sampling
+- **Experiment structure**: Hash computation, directory organization, seed handling
 
 **Example test output:**
 ```
@@ -374,8 +407,42 @@ When a transaction's CAS fails because catalog moved from s_k to s_{k+n}:
 1. **Calculate snapshots behind**: `n = current_seq - txn_seq`
 2. **Read n manifest lists**: One for each intermediate snapshot
 3. **Batch with parallelism**: Read at most `max_parallel` in parallel
-4. **Merge conflicts**: For each affected table, read and merge manifests
-5. **Retry commit**: With updated snapshot version
+4. **Determine conflict type**: False conflict (no data overlap) or real conflict (overlapping changes)
+5. **Resolve conflicts**:
+   - **False conflicts**: Read metadata only (~100ms)
+   - **Real conflicts**: Read and merge manifest files (~500ms+ per conflict)
+6. **Retry commit**: With updated snapshot version
+
+**False vs Real Conflicts:**
+
+Not all conflicts require expensive manifest file operations:
+
+- **False conflict** (version changed, no data overlap):
+  - Transaction A and B both modified the catalog but touched different data files
+  - Only need to read metadata to understand the new snapshot state
+  - Much faster resolution (~100ms)
+  - Configure with `real_conflict_probability = 0.0`
+
+- **Real conflict** (overlapping data changes):
+  - Transactions modified overlapping data files
+  - Must read, merge, and rewrite manifest files
+  - Number of conflicting files sampled from distribution
+  - More expensive resolution (~500ms+ depending on file count)
+  - Configure with `real_conflict_probability = 1.0`
+
+**Configuration:**
+
+```toml
+[transaction]
+# Probability a conflict is "real" (requires manifest file ops)
+real_conflict_probability = 0.0  # 0.0 = all false, 1.0 = all real
+
+# Distribution of conflicting manifest files (for real conflicts)
+conflicting_manifests.distribution = "exponential"  # or "fixed", "uniform"
+conflicting_manifests.mean = 3.0        # Mean for exponential
+conflicting_manifests.min = 1           # Minimum files
+conflicting_manifests.max = 10          # Maximum files
+```
 
 **Example log (verbose mode):**
 ```

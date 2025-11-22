@@ -117,6 +117,45 @@ output_path = "results.parquet"  # Output file path
 seed = null                  # Random seed (null = random)
 ```
 
+### Experiment Organization
+
+The simulator supports organizing repeated experiments with the same configuration but different seeds:
+
+```toml
+[experiment]
+# Optional experiment label for organized output
+# When set, output goes to: experiments/$label-$hash/$seed/results.parquet
+# where $hash is deterministic based on config (excluding seed/label) + simulator code
+label = "baseline"
+```
+
+**How it works:**
+- Without `experiment.label`: Output goes to the path specified in `output_path` (default behavior)
+- With `experiment.label`: Output is organized as `experiments/$label-$hash/$seed/results.parquet`
+  - `$label`: Your experiment name (e.g., "baseline", "high_contention")
+  - `$hash`: 8-character deterministic hash of config (excluding seed/label) + simulator code
+  - `$seed`: The actual random seed used (either from config or generated)
+  - `cfg.toml`: Shared config file written to `experiments/$label-$hash/cfg.toml`
+
+**Benefits:**
+- **Reproducibility**: Same config + code → same hash, making it easy to find related runs
+- **Multiple seeds**: Run with different seeds to average results, all organized under same experiment
+- **Code versioning**: Hash changes when simulator code changes, preventing confusion between runs
+- **Full specification**: `cfg.toml` + seed directory name fully specifies the results
+
+**Example workflow:**
+```bash
+# Run with same config but different seeds
+python -m icecap.main my_exp.toml  # uses seed from config or random
+python -m icecap.main my_exp.toml  # second run with different random seed
+
+# Results organized as:
+# experiments/baseline-a1b2c3d4/
+#   cfg.toml                    # Shared configuration
+#   12345/results.parquet       # First run (seed 12345)
+#   67890/results.parquet       # Second run (seed 67890)
+```
+
 ### Catalog Configuration
 
 ```toml
@@ -171,7 +210,42 @@ inter_arrival.std_dev = 1000.0              # For normal distribution
 ntable.zipf = 2.0            # Number of tables per transaction
 seltbl.zipf = 1.4            # Which tables are selected (0 most likely)
 seltblw.zipf = 1.2           # Number of tables written (subset of read)
+
+# Conflict resolution configuration
+real_conflict_probability = 0.0  # 0.0 = all false conflicts, 1.0 = all real conflicts
+
+# For real conflicts: distribution of number of manifest files needing merge
+conflicting_manifests.distribution = "exponential"
+conflicting_manifests.mean = 3.0
+conflicting_manifests.min = 1
+conflicting_manifests.max = 10
 ```
+
+**False vs Real Conflicts:**
+
+The simulator distinguishes between two types of conflicts:
+
+- **False conflicts** (version changed, no data overlap):
+  - Manifest lists were already read to detect conflict
+  - Only requires reading metadata to understand new snapshot state
+  - No manifest file operations needed
+  - Latency: ~100ms (metadata read only)
+
+- **Real conflicts** (overlapping data changes):
+  - Requires reading and rewriting manifest files to merge changes
+  - Number of conflicting manifests sampled from configured distribution
+  - Respects `max_parallel` for batched operations
+  - Latency: ~500ms+ depending on number of files
+
+Use `real_conflict_probability` to model different workload patterns:
+- `0.0`: Transactions touch disjoint data (false conflicts only)
+- `0.5`: Mixed workload
+- `1.0`: Transactions frequently overlap (all real conflicts)
+
+The `conflicting_manifests` parameters control how expensive real conflicts are:
+- `distribution = "fixed", value = 3`: Always 3 manifest files
+- `distribution = "uniform", min = 1, max = 10`: Uniformly distributed 1-10 files
+- `distribution = "exponential", mean = 3.0`: Exponentially distributed (most ~1-5, occasional larger)
 
 ### Storage Latencies
 
@@ -451,6 +525,23 @@ pytest tests/test_simulator.py::TestParameterEffects -v
 - Latencies follow approximately normal distribution
 - Read and write latencies are differentiated
 - Stochastic latencies work correctly in simulation
+
+**Conflict Type Tests** (`test_conflict_types.py`):
+- False conflicts only (no manifest file operations)
+- Real conflicts only (manifest file read/write)
+- Mixed conflicts (correct ratio verification)
+- Distribution sampling (fixed, uniform, exponential)
+- Latency difference between conflict types
+
+**Experiment Structure Tests** (`test_experiment_structure.py`):
+- Hash computation excludes seed and label
+- Hash changes when config changes
+- Hash includes simulator code (deterministic)
+- Without label uses original output path
+- With label creates proper directory structure
+- Different seeds share same experiment directory
+- Actual seed (not "noseed") used in directory name
+- Config written once per experiment
 
 These tests serve as both validation and documentation of expected simulator behavior.
 
