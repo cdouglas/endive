@@ -10,7 +10,9 @@
       "Bash(git -C /home/chris/work/est status)",
       "Bash(chmod:*)",
       "Bash(./run_baseline_experiments.sh:*)",
-      "Bash(tee:*)"
+      "Bash(tee:*)",
+      "Bash(python -m icecap.saturation_analysis:*)",
+      "Bash(pip install:*)"
     ],
     "deny": [],
     "ask": []
