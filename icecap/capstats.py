@@ -107,8 +107,13 @@ class Stats:
         # Also print summary statistics
         print(f"\nSimulation Summary:")
         print(f"  Total transactions: {self.txn_total}")
-        print(f"  Committed: {self.txn_committed} ({100*self.txn_committed/self.txn_total:.1f}%)")
-        print(f"  Aborted: {self.txn_aborted} ({100*self.txn_aborted/self.txn_total:.1f}%)")
+
+        if self.txn_total > 0:
+            print(f"  Committed: {self.txn_committed} ({100*self.txn_committed/self.txn_total:.1f}%)")
+            print(f"  Aborted: {self.txn_aborted} ({100*self.txn_aborted/self.txn_total:.1f}%)")
+        else:
+            print(f"  Committed: 0")
+            print(f"  Aborted: 0")
         if self.txn_committed > 0:
             committed_df = df[df['status'] == 'committed']
             print(f"  Commit latency (ms):")

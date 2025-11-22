@@ -1079,9 +1079,20 @@ def cli():
 
     logger.info("Simulation complete")
 
-    # Export results
-    logger.info(f"Exporting results to {final_output_path}")
-    STATS.export_parquet(final_output_path)
+    # Export results to temporary file first, then rename to final path
+    # This allows distinguishing complete runs from interrupted/partial runs
+    from pathlib import Path
+    import shutil
+
+    output_dir = Path(final_output_path).parent
+    temp_output_path = output_dir / ".running.parquet"
+
+    logger.info(f"Exporting results to temporary file {temp_output_path}")
+    STATS.export_parquet(str(temp_output_path))
+
+    # Rename to final output path on success
+    logger.info(f"Moving results to {final_output_path}")
+    shutil.move(str(temp_output_path), final_output_path)
     logger.info(f"Results exported successfully")
 
 if __name__ == "__main__":

@@ -14,7 +14,9 @@
       "Bash(python -m icecap.saturation_analysis:*)",
       "Bash(pip install:*)",
       "Bash(sort:*)",
-      "Bash(python -c:*)"
+      "Bash(python -c:*)",
+      "Bash(./scripts/run_baseline_experiments.sh:*)",
+      "Bash(find:*)"
     ],
     "deny": [],
     "ask": []

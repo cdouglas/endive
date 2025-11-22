@@ -8,6 +8,7 @@
 #
 # Options:
 #   --seeds N          Number of seeds per configuration (default: 3)
+#   --parallel N       Number of concurrent experiments (default: # of CPU cores)
 #   --exp2.1           Run only Experiment 2.1 (single table)
 #   --exp2.2           Run only Experiment 2.2 (multi-table)
 #   --quick            Quick test mode (fewer configs, shorter duration)
@@ -16,6 +17,9 @@
 # Examples:
 #   # Run all baseline experiments with 5 seeds each
 #   ./run_baseline_experiments.sh --seeds 5
+#
+#   # Run with 8 parallel jobs
+#   ./run_baseline_experiments.sh --parallel 8
 #
 #   # Run in background with logging
 #   nohup ./run_baseline_experiments.sh --seeds 3 > experiments.log 2>&1 &
@@ -31,6 +35,7 @@ set -e  # Exit on error
 
 # Default values
 NUM_SEEDS=3
+NUM_PARALLEL=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)
 RUN_EXP2_1=true
 RUN_EXP2_2=true
 QUICK_MODE=false
@@ -55,6 +60,12 @@ LOG_DIR="experiment_logs"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 LOG_FILE="$LOG_DIR/baseline_experiments_${TIMESTAMP}.log"
 
+# Job tracking
+declare -a JOB_PIDS=()
+declare -a JOB_CONFIGS=()
+JOB_SUCCESS=0
+JOB_FAILED=0
+
 # ============================================================================
 # Parse command line arguments
 # ============================================================================
@@ -63,6 +74,10 @@ while [[ $# -gt 0 ]]; do
     case $1 in
         --seeds)
             NUM_SEEDS="$2"
+            shift 2
+            ;;
+        --parallel)
+            NUM_PARALLEL="$2"
             shift 2
             ;;
         --exp2.1)
@@ -84,7 +99,7 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         --help|-h)
-            head -n 20 "$0" | tail -n +2
+            head -n 25 "$0" | tail -n +2
             exit 0
             ;;
         *)
@@ -134,7 +149,10 @@ log_section() {
 estimate_duration() {
     local num_runs=$1
     local avg_time_per_run=$2  # in seconds
-    local total_seconds=$((num_runs * avg_time_per_run))
+    local num_parallel=$3
+
+    # Calculate wall-clock time with parallelism
+    local total_seconds=$(( (num_runs * avg_time_per_run + num_parallel - 1) / num_parallel ))
 
     local hours=$((total_seconds / 3600))
     local minutes=$(((total_seconds % 3600) / 60))
@@ -146,25 +164,83 @@ estimate_duration() {
     fi
 }
 
-run_experiment() {
+run_experiment_background() {
     local config_file=$1
     local output_file=$2
+    local description=$3
 
     if [ "$DRY_RUN" = true ]; then
         log "[DRY RUN] Would run: python -m icecap.main $output_file"
         return 0
     fi
 
-    # Run simulation (auto-confirm with 'Y')
-    echo "Y" | python -m icecap.main "$output_file" >> "$LOG_FILE" 2>&1
+    # Run simulation in background (auto-confirm with 'Y')
+    {
+        echo "Y" | python -m icecap.main "$output_file" >> "$LOG_FILE" 2>&1
+        exit_code=$?
 
-    if [ $? -eq 0 ]; then
-        log "  ✓ Success"
-        return 0
-    else
-        log "  ✗ Failed (check log for details)"
-        return 1
-    fi
+        # Write result to temp file
+        echo "$exit_code|$description" > "$output_file.status"
+        exit $exit_code
+    } &
+
+    local pid=$!
+    JOB_PIDS+=($pid)
+    JOB_CONFIGS+=("$description")
+}
+
+wait_for_job_slot() {
+    # Wait until we have fewer than NUM_PARALLEL running jobs
+    while [ ${#JOB_PIDS[@]} -ge $NUM_PARALLEL ]; do
+        check_completed_jobs
+        sleep 1
+    done
+}
+
+check_completed_jobs() {
+    local new_pids=()
+    local new_configs=()
+
+    for i in "${!JOB_PIDS[@]}"; do
+        local pid=${JOB_PIDS[$i]}
+        local config="${JOB_CONFIGS[$i]}"
+
+        if ! kill -0 $pid 2>/dev/null; then
+            # Job has finished, check status
+            wait $pid
+            local exit_code=$?
+
+            if [ $exit_code -eq 0 ]; then
+                log "  ✓ Success: $config"
+                JOB_SUCCESS=$((JOB_SUCCESS + 1))
+            else
+                log "  ✗ Failed: $config"
+                JOB_FAILED=$((JOB_FAILED + 1))
+            fi
+        else
+            # Job still running, keep it in the list
+            new_pids+=($pid)
+            new_configs+=("$config")
+        fi
+    done
+
+    JOB_PIDS=("${new_pids[@]}")
+    JOB_CONFIGS=("${new_configs[@]}")
+}
+
+wait_for_all_jobs() {
+    log ""
+    log "Waiting for all jobs to complete..."
+
+    while [ ${#JOB_PIDS[@]} -gt 0 ]; do
+        check_completed_jobs
+        if [ ${#JOB_PIDS[@]} -gt 0 ]; then
+            log "  ${#JOB_PIDS[@]} jobs still running..."
+            sleep 5
+        fi
+    done
+
+    log "All jobs complete"
 }
 
 create_config_variant() {
@@ -212,9 +288,10 @@ fi
 # Print Summary
 # ============================================================================
 
-log_section "BASELINE EXPERIMENTS - PHASE 2"
+log_section "BASELINE EXPERIMENTS - PHASE 2 (PARALLEL EXECUTION)"
 log "Configuration:"
 log "  Number of seeds per config: $NUM_SEEDS"
+log "  Parallel jobs: $NUM_PARALLEL"
 log "  Run Experiment 2.1: $RUN_EXP2_1"
 log "  Run Experiment 2.2: $RUN_EXP2_2"
 log "  Quick mode: $QUICK_MODE"
@@ -225,11 +302,11 @@ log "Total simulations to run: $TOTAL_RUNS"
 if [ "$QUICK_MODE" = true ]; then
     AVG_TIME=15  # 15 seconds per quick run
 else
-    AVG_TIME=180  # 3 minutes per full run (conservative estimate)
+    AVG_TIME=3600  # 1 hour per full run (updated for new duration)
 fi
 
-ESTIMATED_TIME=$(estimate_duration $TOTAL_RUNS $AVG_TIME)
-log "Estimated total time: $ESTIMATED_TIME"
+ESTIMATED_TIME=$(estimate_duration $TOTAL_RUNS $AVG_TIME $NUM_PARALLEL)
+log "Estimated wall-clock time: $ESTIMATED_TIME (with $NUM_PARALLEL parallel jobs)"
 log ""
 log "Log file: $LOG_FILE"
 log "Output directory: experiments/"
@@ -250,11 +327,10 @@ if [ "$RUN_EXP2_1" = true ]; then
     log ""
     log "Sweeping inter_arrival.scale: ${EXP2_1_LOADS[*]}"
     log "Seeds per configuration: $NUM_SEEDS"
+    log "Running up to $NUM_PARALLEL experiments in parallel"
     log ""
 
     CURRENT_RUN=0
-    EXP2_1_SUCCESS=0
-    EXP2_1_FAILED=0
 
     for load in "${EXP2_1_LOADS[@]}"; do
         log "Load: inter_arrival.scale = ${load}ms (~$((1000/load)) txn/sec offered)"
@@ -262,8 +338,6 @@ if [ "$RUN_EXP2_1" = true ]; then
         for seed_num in $(seq 1 $NUM_SEEDS); do
             CURRENT_RUN=$((CURRENT_RUN + 1))
             PROGRESS="[$CURRENT_RUN/$TOTAL_RUNS]"
-
-            log "$PROGRESS  Seed $seed_num/$NUM_SEEDS"
 
             # Create temporary config with modified parameters
             TEMP_CONFIG=$(mktemp)
@@ -277,20 +351,18 @@ if [ "$RUN_EXP2_1" = true ]; then
                     "inter_arrival.scale=${load}"
             fi
 
-            # Run experiment
-            if run_experiment "$EXP2_1_CONFIG" "$TEMP_CONFIG"; then
-                EXP2_1_SUCCESS=$((EXP2_1_SUCCESS + 1))
-            else
-                EXP2_1_FAILED=$((EXP2_1_FAILED + 1))
-            fi
+            # Wait for available job slot
+            wait_for_job_slot
 
-            rm "$TEMP_CONFIG"
+            # Run experiment in background
+            DESC="$PROGRESS Exp2.1 load=$load seed=$seed_num"
+            log "  Starting: $DESC"
+            run_experiment_background "$EXP2_1_CONFIG" "$TEMP_CONFIG" "$DESC"
         done
-
-        log ""
     done
 
-    log "Experiment 2.1 complete: $EXP2_1_SUCCESS succeeded, $EXP2_1_FAILED failed"
+    log ""
+    log "All Experiment 2.1 jobs submitted"
 fi
 
 # ============================================================================
@@ -304,10 +376,8 @@ if [ "$RUN_EXP2_2" = true ]; then
     log "Sweeping num_tables: ${EXP2_2_TABLES[*]}"
     log "Sweeping inter_arrival.scale: ${EXP2_2_LOADS[*]}"
     log "Seeds per configuration: $NUM_SEEDS"
+    log "Running up to $NUM_PARALLEL experiments in parallel"
     log ""
-
-    EXP2_2_SUCCESS=0
-    EXP2_2_FAILED=0
 
     for num_tables in "${EXP2_2_TABLES[@]}"; do
         log "Tables: num_tables = $num_tables (num_groups = $num_tables)"
@@ -318,8 +388,6 @@ if [ "$RUN_EXP2_2" = true ]; then
             for seed_num in $(seq 1 $NUM_SEEDS); do
                 CURRENT_RUN=$((CURRENT_RUN + 1))
                 PROGRESS="[$CURRENT_RUN/$TOTAL_RUNS]"
-
-                log "  $PROGRESS  Seed $seed_num/$NUM_SEEDS"
 
                 # Create temporary config with modified parameters
                 TEMP_CONFIG=$(mktemp)
@@ -337,22 +405,26 @@ if [ "$RUN_EXP2_2" = true ]; then
                         "inter_arrival.scale=${load}"
                 fi
 
-                # Run experiment
-                if run_experiment "$EXP2_2_CONFIG" "$TEMP_CONFIG"; then
-                    EXP2_2_SUCCESS=$((EXP2_2_SUCCESS + 1))
-                else
-                    EXP2_2_FAILED=$((EXP2_2_FAILED + 1))
-                fi
+                # Wait for available job slot
+                wait_for_job_slot
 
-                rm "$TEMP_CONFIG"
+                # Run experiment in background
+                DESC="$PROGRESS Exp2.2 tables=$num_tables load=$load seed=$seed_num"
+                log "  Starting: $DESC"
+                run_experiment_background "$EXP2_2_CONFIG" "$TEMP_CONFIG" "$DESC"
             done
         done
-
-        log ""
     done
 
-    log "Experiment 2.2 complete: $EXP2_2_SUCCESS succeeded, $EXP2_2_FAILED failed"
+    log ""
+    log "All Experiment 2.2 jobs submitted"
 fi
+
+# ============================================================================
+# Wait for all jobs to complete
+# ============================================================================
+
+wait_for_all_jobs
 
 # ============================================================================
 # Final Summary
@@ -360,24 +432,20 @@ fi
 
 log_section "BASELINE EXPERIMENTS COMPLETE"
 log "Total runs: $TOTAL_RUNS"
-
-if [ "$RUN_EXP2_1" = true ]; then
-    log "  Experiment 2.1: $EXP2_1_SUCCESS succeeded, $EXP2_1_FAILED failed"
-fi
-
-if [ "$RUN_EXP2_2" = true ]; then
-    log "  Experiment 2.2: $EXP2_2_SUCCESS succeeded, $EXP2_2_FAILED failed"
-fi
-
+log "  Successful: $JOB_SUCCESS"
+log "  Failed: $JOB_FAILED"
 log ""
 log "Results stored in: experiments/"
 log "  exp2_1_single_table_false-*/"
 log "  exp2_2_multi_table_false-*/"
 log ""
+log "Note: Interrupted runs leave .running.parquet files that can be safely deleted"
+log ""
 log "Next steps:"
-log "  1. Verify results: ls -lh experiments/"
-log "  2. Run analysis: python -m icecap.analysis all -i experiments/exp2_1_* -o plots/exp2_1"
-log "  3. Generate visualizations for all experiments"
+log "  1. Verify results: find experiments/ -name 'results.parquet' | wc -l"
+log "  2. Check for incomplete runs: find experiments/ -name '.running.parquet'"
+log "  3. Run analysis: python -m icecap.saturation_analysis -i experiments -p 'exp2_1_*' -o plots/exp2_1"
+log "  4. Generate visualizations for all experiments"
 
 if [ "$DRY_RUN" = true ]; then
     log ""
