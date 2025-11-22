@@ -8,7 +8,7 @@ Quick reference guide for running Phase 2 baseline experiments.
 
 ```bash
 # Full baseline experiments (Phase 2) with 3 seeds per configuration
-nohup ./run_baseline_experiments.sh --seeds 3 > baseline.log 2>&1 &
+nohup ./scripts/run_baseline_experiments.sh --seeds 3 > baseline.log 2>&1 &
 
 # Save the process ID
 echo $! > experiments.pid
@@ -23,10 +23,10 @@ This will run:
 
 ```bash
 # Watch with auto-refresh every 5 seconds
-./monitor_experiments.sh --watch 5
+./scripts/monitor_experiments.sh --watch 5
 
 # One-time status check
-./monitor_experiments.sh --summary
+./scripts/monitor_experiments.sh --summary
 ```
 
 ### 3. Check if still running

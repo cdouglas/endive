@@ -2,6 +2,16 @@
 
 A discrete-event simulator for exploring commit latency tradeoffs in shared-storage catalog formats like Apache Iceberg. The simulator models the optimistic concurrency control (OCC) protocol with compare-and-swap (CAS) operations, conflict resolution, and retry logic.
 
+## 📚 Documentation
+
+Complete documentation is available in the [`docs/`](docs/) directory:
+
+- **[Quick Start Guide](QUICKSTART.md)** - Get started quickly
+- **[Running Experiments](docs/RUNNING_EXPERIMENTS.md)** - Execute baseline experiments
+- **[Analysis Guide](docs/ANALYSIS_GUIDE.md)** - Analyze results and generate plots
+- **[Documentation Index](docs/README.md)** - Complete documentation reference
+- **[Research Plan](ANALYSIS_PLAN.md)** - Research methodology and experiment design
+
 ## Overview
 
 When multiple writers attempt to commit changes to an Iceberg table simultaneously, conflicts can occur. A failed pointer swap at the catalog requires additional round trips to:
