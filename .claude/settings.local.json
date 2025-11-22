@@ -12,7 +12,9 @@
       "Bash(./run_baseline_experiments.sh:*)",
       "Bash(tee:*)",
       "Bash(python -m icecap.saturation_analysis:*)",
-      "Bash(pip install:*)"
+      "Bash(pip install:*)",
+      "Bash(sort:*)",
+      "Bash(python -c:*)"
     ],
     "deny": [],
     "ask": []

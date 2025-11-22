@@ -21,7 +21,7 @@
 #   python -m icecap.main experiment_configs/exp2_1_single_table_false_conflicts.toml
 
 [simulation]
-duration_ms = 100000  # 100 seconds
+duration_ms = 3600000  # 1 hour (extended for stable statistics)
 output_path = "results.parquet"
 # seed = 42  # Uncomment to set specific seed, or leave unset for random
 
@@ -36,8 +36,9 @@ num_groups = 1  # Catalog-level conflicts
 retry = 10
 
 # Transaction runtime (lognormal distribution)
-runtime.min = 5000
-runtime.mean = 10000
+# Realistic Iceberg transaction durations: 30s minimum, 3min mean
+runtime.min = 30000   # 30 seconds
+runtime.mean = 180000  # 3 minutes
 runtime.sigma = 1.5
 
 # Inter-arrival time distribution

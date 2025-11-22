@@ -277,17 +277,6 @@ def plot_latency_vs_throughput(
                 ax.plot(subset['throughput'], subset[percentile],
                        marker=marker, linewidth=2, markersize=8, alpha=alpha,
                        label=label)
-
-                # Annotate points with success rate
-                for _, row in subset.iterrows():
-                    if pd.notna(row[percentile]) and pd.notna(row['success_rate']):
-                        ax.annotate(f"{row['success_rate']:.0f}%",
-                                  (row['throughput'], row[percentile]),
-                                  textcoords="offset points",
-                                  xytext=(0, 5),
-                                  ha='center',
-                                  fontsize=7,
-                                  alpha=0.6)
     else:
         # Single series plot
         df_sorted = index_df.sort_values('throughput')
@@ -303,16 +292,6 @@ def plot_latency_vs_throughput(
             ax.plot(df_sorted['throughput'], df_sorted[col],
                    marker=marker, linewidth=2.5, markersize=10,
                    label=label, color=color)
-
-            # Annotate points with success rate
-            for _, row in df_sorted.iterrows():
-                if pd.notna(row[col]) and pd.notna(row['success_rate']):
-                    ax.annotate(f"{row['success_rate']:.0f}%",
-                              (row['throughput'], row[col]),
-                              textcoords="offset points",
-                              xytext=(0, 8),
-                              ha='center',
-                              fontsize=8)
 
     # Mark saturation point (50% success rate)
     saturation_points = index_df[index_df['success_rate'] < 55]  # Some tolerance
@@ -398,6 +377,60 @@ def plot_success_rate_vs_load(
     plt.close()
 
 
+def plot_success_rate_vs_throughput(
+    index_df: pd.DataFrame,
+    output_path: str,
+    title: str = "Transaction Success Rate vs Throughput",
+    group_by: str = None
+):
+    """
+    Plot success rate vs achieved throughput.
+
+    Args:
+        index_df: Experiment index DataFrame
+        output_path: Path to save plot
+        title: Plot title
+        group_by: Optional parameter to group by (e.g., 'num_tables')
+    """
+    fig, ax = plt.subplots(figsize=(12, 8))
+
+    if group_by and group_by in index_df.columns:
+        # Plot separate lines for each group
+        groups = sorted(index_df[group_by].unique())
+
+        for group_val in groups:
+            subset = index_df[index_df[group_by] == group_val].copy()
+            subset = subset.sort_values('throughput')
+
+            ax.plot(subset['throughput'], subset['success_rate'],
+                   marker='o', linewidth=2.5, markersize=8,
+                   label=f"{group_by}={group_val}")
+    else:
+        # Single series plot
+        df_sorted = index_df.sort_values('throughput')
+
+        ax.plot(df_sorted['throughput'], df_sorted['success_rate'],
+               marker='o', linewidth=3, markersize=10, color='#2E86AB')
+
+    # Mark 50% success rate
+    ax.axhline(50, color='red', linestyle='--', linewidth=2, alpha=0.5,
+              label='50% Saturation Threshold')
+
+    ax.set_xlabel('Achieved Throughput (commits/sec)', fontsize=14, fontweight='bold')
+    ax.set_ylabel('Success Rate (%)', fontsize=14, fontweight='bold')
+    ax.set_title(title, fontsize=16, fontweight='bold')
+    ax.legend(loc='best', fontsize=10, framealpha=0.9)
+    ax.grid(True, alpha=0.3, linestyle='--')
+
+    ax.set_xlim(left=0)
+    ax.set_ylim([0, 105])
+
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=300, bbox_inches='tight')
+    print(f"Saved success rate vs throughput plot to {output_path}")
+    plt.close()
+
+
 def save_experiment_index(index_df: pd.DataFrame, output_path: str):
     """Save experiment index to CSV for reference."""
     # Select relevant columns
@@ -475,6 +508,14 @@ def cli():
     if 'inter_arrival_scale' in index_df.columns:
         plot_path = os.path.join(args.output_dir, "success_rate_vs_load.png")
         plot_success_rate_vs_load(index_df, plot_path)
+
+    # Success rate vs throughput
+    plot_path = os.path.join(args.output_dir, "success_rate_vs_throughput.png")
+    plot_success_rate_vs_throughput(
+        index_df, plot_path,
+        title="Transaction Success Rate vs Throughput",
+        group_by=args.group_by
+    )
 
     print("\nAnalysis complete!")
 
