@@ -79,12 +79,18 @@ def scan_experiment_directories(base_dir: str, pattern: str) -> Dict[str, Dict]:
     return experiments
 
 
-def compute_warmup_duration(config: Dict) -> float:
+def compute_transient_period_duration(config: Dict) -> float:
     """
-    Compute warmup duration using transaction-runtime multiple approach.
+    Compute transient period duration using transaction-runtime multiple approach.
+
+    Used for both warmup (start) and cooldown (end) periods to exclude transient
+    behavior and focus on steady-state performance.
 
     The warmup period allows the system to reach steady-state by eliminating
     initial transient behavior (empty start, low contention, queue buildup).
+
+    The cooldown period excludes end-of-simulation artifacts where the arrival
+    process winds down, reducing contention and creating artificially low latencies.
 
     Approach: K_MIN_CYCLES × mean_transaction_runtime
     - Allows multiple transaction lifecycles for steady-state
@@ -94,25 +100,45 @@ def compute_warmup_duration(config: Dict) -> float:
         config: Parsed TOML configuration dict
 
     Returns:
-        Warmup duration in milliseconds
+        Transient period duration in milliseconds
     """
     K_MIN_CYCLES = 3  # Number of transaction cycles for steady-state
-    MIN_WARMUP_MS = 5 * 60 * 1000  # 5 minutes absolute minimum
-    MAX_WARMUP_MS = 15 * 60 * 1000  # 15 minutes maximum
+    MIN_PERIOD_MS = 5 * 60 * 1000  # 5 minutes absolute minimum
+    MAX_PERIOD_MS = 15 * 60 * 1000  # 15 minutes maximum
 
     # Get mean transaction runtime
     mean_runtime_ms = config.get("transaction", {}).get("runtime", {}).get("mean", 10000)
 
-    # Calculate warmup based on transaction cycles
-    warmup_ms = max(
-        MIN_WARMUP_MS,
+    # Calculate transient period based on transaction cycles
+    period_ms = max(
+        MIN_PERIOD_MS,
         min(
             K_MIN_CYCLES * mean_runtime_ms,
-            MAX_WARMUP_MS
+            MAX_PERIOD_MS
         )
     )
 
-    return warmup_ms
+    return period_ms
+
+
+def compute_warmup_duration(config: Dict) -> float:
+    """
+    Compute warmup duration (alias for compute_transient_period_duration).
+
+    Returns:
+        Warmup duration in milliseconds
+    """
+    return compute_transient_period_duration(config)
+
+
+def compute_cooldown_duration(config: Dict) -> float:
+    """
+    Compute cooldown duration (alias for compute_transient_period_duration).
+
+    Returns:
+        Cooldown duration in milliseconds
+    """
+    return compute_transient_period_duration(config)
 
 
 def extract_key_parameters(config: Dict) -> Dict:
@@ -147,18 +173,23 @@ def load_and_aggregate_results(exp_info: Dict) -> pd.DataFrame:
     """
     Load all seed results for an experiment and aggregate statistics.
 
-    Applies warmup period filter to exclude initial transient behavior
+    Applies warmup and cooldown period filters to exclude transient behavior
     and focus on steady-state performance.
 
     Returns:
-        DataFrame with aggregated statistics across all seeds (warmup excluded)
+        DataFrame with aggregated statistics across all seeds (warmup/cooldown excluded)
     """
-    # Compute warmup duration for this experiment
+    # Compute warmup and cooldown durations for this experiment
     warmup_ms = compute_warmup_duration(exp_info['config'])
+    cooldown_ms = compute_cooldown_duration(exp_info['config'])
+
+    # Get simulation duration to compute cooldown threshold
+    sim_duration_ms = exp_info['config'].get('simulation', {}).get('duration_ms', 3600000)
+    cooldown_start_ms = sim_duration_ms - cooldown_ms
 
     all_results = []
-    total_txns_before_warmup = 0
-    total_txns_after_warmup = 0
+    total_txns_before_filter = 0
+    total_txns_after_filter = 0
 
     for seed_dir in exp_info['seeds']:
         # Find results.parquet in seed directory
@@ -171,10 +202,10 @@ def load_and_aggregate_results(exp_info: Dict) -> pd.DataFrame:
         # Load results
         df = pd.read_parquet(parquet_path)
 
-        # Apply warmup filter - only keep transactions submitted after warmup period
-        total_txns_before_warmup += len(df)
-        df = df[df['t_submit'] >= warmup_ms].copy()
-        total_txns_after_warmup += len(df)
+        # Apply warmup and cooldown filters - only keep steady-state transactions
+        total_txns_before_filter += len(df)
+        df = df[(df['t_submit'] >= warmup_ms) & (df['t_submit'] < cooldown_start_ms)].copy()
+        total_txns_after_filter += len(df)
 
         # Add seed identifier
         seed = os.path.basename(seed_dir)
@@ -189,8 +220,10 @@ def load_and_aggregate_results(exp_info: Dict) -> pd.DataFrame:
     combined = pd.concat(all_results, ignore_index=True)
 
     # Report filtering statistics (only once per experiment)
-    pct_excluded = 100.0 * (1 - total_txns_after_warmup / total_txns_before_warmup) if total_txns_before_warmup > 0 else 0
-    print(f" (warmup: {warmup_ms/1000:.0f}s, excluded {total_txns_before_warmup - total_txns_after_warmup}/{total_txns_before_warmup} txns = {pct_excluded:.1f}%)", end='')
+    pct_excluded = 100.0 * (1 - total_txns_after_filter / total_txns_before_filter) if total_txns_before_filter > 0 else 0
+    active_window_ms = cooldown_start_ms - warmup_ms
+    print(f" (warmup: {warmup_ms/1000:.0f}s, cooldown: {cooldown_ms/1000:.0f}s, " +
+          f"active: {active_window_ms/1000:.0f}s, excluded {total_txns_before_filter - total_txns_after_filter}/{total_txns_before_filter} txns = {pct_excluded:.1f}%)", end='')
 
     return combined
 
