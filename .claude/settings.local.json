@@ -1,22 +1,8 @@
 {
   "permissions": {
     "allow": [
-      "Bash(source bin/activate)",
-      "Bash(python -m icecap.main:*)",
-      "Bash(python -m icecap.experiment:*)",
-      "Bash(python -m icecap.analysis:*)",
-      "Bash(cat:*)",
-      "Bash(python -m pytest:*)",
-      "Bash(git -C /home/chris/work/est status)",
-      "Bash(chmod:*)",
-      "Bash(./run_baseline_experiments.sh:*)",
-      "Bash(tee:*)",
-      "Bash(python -m icecap.saturation_analysis:*)",
-      "Bash(pip install:*)",
-      "Bash(sort:*)",
-      "Bash(python -c:*)",
-      "Bash(./scripts/run_baseline_experiments.sh:*)",
-      "Bash(find:*)"
+      "Bash(scripts/warmup_validation.py)",
+      "Bash(python scripts/warmup_validation.py:*)"
     ],
     "deny": [],
     "ask": []
