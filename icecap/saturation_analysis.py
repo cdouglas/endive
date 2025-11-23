@@ -102,7 +102,7 @@ def compute_transient_period_duration(config: Dict) -> float:
     Returns:
         Transient period duration in milliseconds
     """
-    K_MIN_CYCLES = 3  # Number of transaction cycles for steady-state
+    K_MIN_CYCLES = 5  # Number of transaction cycles for steady-state (increased from 3 to eliminate gradual decline)
     MIN_PERIOD_MS = 5 * 60 * 1000  # 5 minutes absolute minimum
     MAX_PERIOD_MS = 15 * 60 * 1000  # 15 minutes maximum
 
