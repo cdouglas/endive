@@ -1,14 +1,16 @@
 # Icecap: Iceberg Catalog Simulator
 
-A discrete-event simulator for exploring commit latency tradeoffs in shared-storage catalog formats like Apache Iceberg. The simulator models the optimistic concurrency control (OCC) protocol with compare-and-swap (CAS) operations, conflict resolution, and retry logic.
+A discrete-event simulator for exploring commit latency tradeoffs in shared-storage catalog formats like Apache Iceberg. The simulator models optimistic concurrency control (OCC) with compare-and-swap (CAS) operations, conflict resolution, and retry logic.
 
 ## 📚 Documentation
 
 Complete documentation is available in the [`docs/`](docs/) directory:
 
-- **[Quick Start Guide](QUICKSTART.md)** - Get started quickly
-- **[Running Experiments](docs/RUNNING_EXPERIMENTS.md)** - Execute baseline experiments
+- **[Quick Start Guide](QUICKSTART.md)** - Get started in minutes
+- **[Quick Reference](QUICK_REFERENCE.md)** - Common commands and file locations
+- **[Running Experiments](docs/RUNNING_EXPERIMENTS.md)** - Execute baseline experiments with parallel execution
 - **[Analysis Guide](docs/ANALYSIS_GUIDE.md)** - Analyze results and generate plots
+- **[Warmup Period Analysis](docs/WARMUP_PERIOD.md)** - Steady-state measurement methodology
 - **[Documentation Index](docs/README.md)** - Complete documentation reference
 - **[Research Plan](ANALYSIS_PLAN.md)** - Research methodology and experiment design
 
@@ -24,6 +26,15 @@ When multiple writers attempt to commit changes to an Iceberg table simultaneous
 6. Retry the pointer swap at the catalog
 
 This simulator helps explore how different parameters (number of concurrent clients, catalog latency, table distribution) affect end-to-end commit latency and success rates.
+
+## Key Features
+
+✅ **Parallel Execution** - Run experiments concurrently (8x faster with 8 cores)
+✅ **Warmup Period Analysis** - Steady-state measurement with transient filtering
+✅ **Saturation Analysis** - Identify throughput limits and latency scaling
+✅ **Experiment Organization** - Deterministic hashing with multi-seed support
+✅ **Comprehensive Testing** - 63 tests covering all major functionality
+✅ **Interruptible Runs** - Safe Ctrl+C with partial result detection
 
 ## Installation
 
@@ -45,520 +56,344 @@ pip install -e .
 
 ## Quick Start
 
-### 1. Run a single simulation
+### 1. Run a Single Simulation
 
 ```bash
 # Use default configuration (cfg.toml)
-python -m icecap.main
+python -m icecap.main cfg.toml
 
 # Use custom configuration
 python -m icecap.main my_config.toml
 
-# Verbose logging
-python -m icecap.main -v
-
-# Quiet mode (errors only)
-python -m icecap.main -q
-
 # Skip confirmation prompt (for automation)
-python -m icecap.main -y
-
-# Disable progress bar
-python -m icecap.main --no-progress
+echo "Y" | python -m icecap.main my_config.toml
 ```
 
-The simulator will:
-1. Display configuration summary
-2. Ask for confirmation (unless `-y` or `-q` is used)
-3. Show progress bar during simulation (unless `--no-progress`, `-v`, or `-q` is used)
-4. Export results and display summary statistics
+**Output:**
+- Results written to `.running.parquet` during execution
+- Renamed to `results.parquet` on successful completion
+- Interrupted runs leave `.running.parquet` for easy cleanup
 
-### 2. Run experiments (parameter sweeps)
+### 2. Run Baseline Experiments (Parallel)
 
 ```bash
-# Sweep over different client loads (inter-arrival times)
-python -m icecap.experiment sweep-clients \
-    --times 100 500 1000 2000 5000 10000
+# Run all baseline experiments with default parallelism (# of CPU cores)
+./scripts/run_baseline_experiments.sh --seeds 3
 
-# Sweep over different catalog latencies
-python -m icecap.experiment sweep-latency \
-    --latencies 10 50 100 200 500 1000
+# Limit to 4 parallel jobs
+./scripts/run_baseline_experiments.sh --parallel 4 --seeds 3
 
-# Combined sweep (both parameters)
-python -m icecap.experiment sweep-combined \
-    --times 500 1000 5000 \
-    --latencies 50 100 200
+# Run in background
+nohup ./scripts/run_baseline_experiments.sh --seeds 3 > baseline.log 2>&1 &
 
-# Dry run (generate configs without running)
-python -m icecap.experiment sweep-clients --dry-run
-
-# Specify custom base config and output directory
-python -m icecap.experiment sweep-clients \
-    -b my_base_config.toml \
-    -o my_experiments
+# Quick test (shorter simulations, fewer configs)
+./scripts/run_baseline_experiments.sh --quick --seeds 1
 ```
 
-### 3. Analyze results and generate plots
+**Time Estimates:**
+- Full baseline (3 seeds): ~24 hours with 8 cores (~8 days sequential)
+- Quick test: ~2 minutes
+
+### 3. Analyze Results
 
 ```bash
-# Generate all plots and summary table
-python -m icecap.analysis all -i experiments -o plots
+# Generate saturation analysis for single-table experiments
+python -m icecap.saturation_analysis \
+    -i experiments \
+    -p "exp2_1_*" \
+    -o plots/exp2_1
 
-# Generate specific plots
-python -m icecap.analysis cdf -i experiments -o plots
-python -m icecap.analysis success-rate -i experiments -o plots
-python -m icecap.analysis latency-impact -i experiments -o plots
+# Generate saturation analysis for multi-table experiments (grouped)
+python -m icecap.saturation_analysis \
+    -i experiments \
+    -p "exp2_2_*" \
+    -o plots/exp2_2 \
+    --group-by num_tables
 
-# Analyze specific parameter
-python -m icecap.analysis cdf --param cas_latency
-python -m icecap.analysis success-rate --param inter_arrival
+# Validate warmup period for an experiment
+python -m icecap.warmup_validation \
+    experiments/exp2_1_single_table_false-abc123/12345
+```
+
+**Outputs:**
+- `experiment_index.csv` - Summary statistics for all experiments
+- `latency_vs_throughput.png` - P50/P95/P99 latency curves
+- `success_rate_vs_throughput.png` - Success rate degradation
+- `success_rate_vs_load.png` - Success rate vs offered load
+
+### 4. Verify Results
+
+```bash
+# Count completed experiments
+find experiments/ -name 'results.parquet' | wc -l
+
+# Check for incomplete runs (interrupted simulations)
+find experiments/ -name '.running.parquet'
+
+# Clean up incomplete runs
+find experiments/ -name '.running.parquet' -delete
 ```
 
 ## Configuration
 
-The simulator uses TOML configuration files. Here's an overview of the parameters:
+The simulator uses TOML configuration files. Key parameters:
 
 ### Simulation Parameters
 
 ```toml
 [simulation]
-duration_ms = 100000000      # Simulation duration (100 seconds)
-output_path = "results.parquet"  # Output file path
+duration_ms = 3600000        # 1 hour (for stable statistics)
+output_path = "results.parquet"
 seed = null                  # Random seed (null = random)
 ```
 
 ### Experiment Organization
 
-The simulator supports organizing repeated experiments with the same configuration but different seeds:
-
 ```toml
 [experiment]
 # Optional experiment label for organized output
-# When set, output goes to: experiments/$label-$hash/$seed/results.parquet
-# where $hash is deterministic based on config (excluding seed/label) + simulator code
-label = "baseline"
+# Output goes to: experiments/$label-$hash/$seed/results.parquet
+label = "exp2_1_single_table_false"
 ```
-
-**How it works:**
-- Without `experiment.label`: Output goes to the path specified in `output_path` (default behavior)
-- With `experiment.label`: Output is organized as `experiments/$label-$hash/$seed/results.parquet`
-  - `$label`: Your experiment name (e.g., "baseline", "high_contention")
-  - `$hash`: 8-character deterministic hash of config (excluding seed/label) + simulator code
-  - `$seed`: The actual random seed used (either from config or generated)
-  - `cfg.toml`: Shared config file written to `experiments/$label-$hash/cfg.toml`
 
 **Benefits:**
-- **Reproducibility**: Same config + code → same hash, making it easy to find related runs
-- **Multiple seeds**: Run with different seeds to average results, all organized under same experiment
-- **Code versioning**: Hash changes when simulator code changes, preventing confusion between runs
-- **Full specification**: `cfg.toml` + seed directory name fully specifies the results
-
-**Example workflow:**
-```bash
-# Run with same config but different seeds
-python -m icecap.main my_exp.toml  # uses seed from config or random
-python -m icecap.main my_exp.toml  # second run with different random seed
-
-# Results organized as:
-# experiments/baseline-a1b2c3d4/
-#   cfg.toml                    # Shared configuration
-#   12345/results.parquet       # First run (seed 12345)
-#   67890/results.parquet       # Second run (seed 67890)
-```
+- **Reproducibility**: Same config + code → same hash
+- **Multi-seed support**: Multiple runs organized under same experiment
+- **Code versioning**: Hash changes when simulator changes
 
 ### Catalog Configuration
 
 ```toml
 [catalog]
 num_tables = 10              # Number of tables in catalog
-
-# Table grouping (optional, default: num_groups = 1)
-num_groups = 1               # Number of table groups
-group_size_distribution = "uniform"  # "uniform" or "longtail"
-
-# Longtail distribution parameters
-longtail.large_group_fraction = 0.5
-longtail.medium_groups_count = 3
-longtail.medium_group_fraction = 0.3
+num_groups = 1               # Conflict detection granularity
+group_size_distribution = "uniform"  # or "longtail"
 ```
 
-**Table Grouping:**
-
-Tables can be partitioned into groups to model different conflict detection granularities:
-
-- **`num_groups = 1`** (default): Catalog-level conflicts - any concurrent writes conflict
-- **`num_groups = T`** (where T = num_tables): Table-level conflicts - transactions only conflict if they touch the same tables
-- **`1 < num_groups < T`**: Group-level isolation - useful for modeling multi-tenant scenarios
-
-Transactions never span group boundaries. The simulator enforces this by selecting all transaction tables from a single random group.
-
-**Distribution types:**
-- **`uniform`**: All groups have approximately equal size (T/G tables each)
-- **`longtail`**: One large group, a few medium groups, and many small groups (models skewed workloads)
+**Conflict Granularity:**
+- `num_groups = 1`: Catalog-level conflicts (all transactions conflict)
+- `num_groups = T`: Table-level conflicts (only same-table transactions conflict)
+- `1 < num_groups < T`: Group-level isolation (multi-tenant modeling)
 
 ### Transaction Parameters
 
 ```toml
 [transaction]
-retry = 10                   # Maximum number of retries
+retry = 10                   # Maximum retries
 
 # Transaction runtime (lognormal distribution)
-runtime.min = 5000           # Minimum runtime (ms)
-runtime.mean = 10000         # Mean runtime (ms)
-runtime.sigma = 1.5          # Sigma for lognormal distribution
+# Realistic Iceberg transactions: 30s - 3min
+runtime.min = 30000          # 30 seconds minimum
+runtime.mean = 180000        # 3 minutes mean
+runtime.sigma = 1.5
 
-# Inter-arrival time distribution
-inter_arrival.distribution = "exponential"  # Options: fixed, exponential, uniform, normal
-inter_arrival.scale = 5000.0                # For exponential (mean inter-arrival time)
-inter_arrival.value = 5000.0                # For fixed distribution
-inter_arrival.min = 1000.0                  # For uniform distribution
-inter_arrival.max = 10000.0                 # For uniform distribution
-inter_arrival.mean = 5000.0                 # For normal distribution
-inter_arrival.std_dev = 1000.0              # For normal distribution
+# Inter-arrival time (offered load)
+inter_arrival.distribution = "exponential"
+inter_arrival.scale = 500.0  # Mean inter-arrival (ms)
 
-# Table selection (Zipf distributions)
-ntable.zipf = 2.0            # Number of tables per transaction
-seltbl.zipf = 1.4            # Which tables are selected (0 most likely)
-seltblw.zipf = 1.2           # Number of tables written (subset of read)
-
-# Conflict resolution configuration
-real_conflict_probability = 0.0  # 0.0 = all false conflicts, 1.0 = all real conflicts
-
-# For real conflicts: distribution of number of manifest files needing merge
-conflicting_manifests.distribution = "exponential"
-conflicting_manifests.mean = 3.0
-conflicting_manifests.min = 1
-conflicting_manifests.max = 10
+# Conflict types
+real_conflict_probability = 0.0  # 0.0 = all false conflicts
 ```
 
 **False vs Real Conflicts:**
-
-The simulator distinguishes between two types of conflicts:
-
-- **False conflicts** (version changed, no data overlap):
-  - Manifest lists were already read to detect conflict
-  - Only requires reading metadata to understand new snapshot state
-  - No manifest file operations needed
-  - Latency: ~100ms (metadata read only)
-
-- **Real conflicts** (overlapping data changes):
-  - Requires reading and rewriting manifest files to merge changes
-  - Number of conflicting manifests sampled from configured distribution
-  - Respects `max_parallel` for batched operations
-  - Latency: ~500ms+ depending on number of files
-
-Use `real_conflict_probability` to model different workload patterns:
-- `0.0`: Transactions touch disjoint data (false conflicts only)
-- `0.5`: Mixed workload
-- `1.0`: Transactions frequently overlap (all real conflicts)
-
-The `conflicting_manifests` parameters control how expensive real conflicts are:
-- `distribution = "fixed", value = 3`: Always 3 manifest files
-- `distribution = "uniform", min = 1, max = 10`: Uniformly distributed 1-10 files
-- `distribution = "exponential", mean = 3.0`: Exponentially distributed (most ~1-5, occasional larger)
+- **False conflicts**: Version changed, no data overlap (~100ms to retry)
+- **Real conflicts**: Overlapping data changes, requires manifest merge (~500ms+)
 
 ### Storage Latencies
 
-Storage operations use normal distributions with mean and standard deviation:
-
 ```toml
 [storage]
-# Maximum parallel manifest operations during conflict resolution
-max_parallel = 4
+max_parallel = 4             # Parallel manifest operations
 
-# Minimum latency for any storage operation (ms) - prevents unrealistic zeros
-min_latency = 5
+# Infinitely fast catalog (baseline)
+T_CAS.mean = 1
+T_CAS.stddev = 0.1
 
-# CAS operation latency (ms) - normal distribution
-T_CAS.mean = 100
-T_CAS.stddev = 10
-
-# Metadata root read/write latency (ms)
-T_METADATA_ROOT.read.mean = 100
-T_METADATA_ROOT.read.stddev = 10
-T_METADATA_ROOT.write.mean = 120
-T_METADATA_ROOT.write.stddev = 15
-
-# Manifest list read/write latency (ms)
-T_MANIFEST_LIST.read.mean = 100
-T_MANIFEST_LIST.read.stddev = 10
-T_MANIFEST_LIST.write.mean = 120
-T_MANIFEST_LIST.write.stddev = 15
-
-# Manifest file read/write latency (ms)
-T_MANIFEST_FILE.read.mean = 100
-T_MANIFEST_FILE.read.stddev = 10
-T_MANIFEST_FILE.write.mean = 120
-T_MANIFEST_FILE.write.stddev = 15
+# Realistic S3 latencies
+T_MANIFEST_LIST.read.mean = 50
+T_MANIFEST_LIST.read.stddev = 5
+T_MANIFEST_FILE.read.mean = 50
+T_MANIFEST_FILE.read.stddev = 5
 ```
 
-**Conflict Resolution:**
-When a CAS fails because the catalog has moved from snapshot s_k to s_{k+n}, the simulator:
-1. Reads n manifest lists (one for each intermediate snapshot)
-2. Processes at most `max_parallel` manifest lists in parallel
-3. Merges conflicts for each affected table
-4. Retries the commit with updated snapshot version
+## Warmup Period Methodology
 
-## Understanding Inter-Arrival Time
+The simulator automatically applies a **warmup period filter** during analysis to exclude initial transient behavior:
 
-**Inter-arrival time controls the effective number of concurrent clients:**
+```python
+warmup_duration = max(5min, min(3 × mean_runtime, 15min))
+```
 
-- **Lower inter-arrival time** = More concurrent clients = Higher contention
-  - Example: `inter_arrival.scale = 100` means ~10 transactions/second with high concurrency
-- **Higher inter-arrival time** = Fewer concurrent clients = Lower contention
-  - Example: `inter_arrival.scale = 10000` means ~0.1 transactions/second with low concurrency
+**For baseline experiments** (runtime.mean = 180s):
+- Warmup: **9 minutes** (15% excluded)
+- Active window: **51 minutes** (85% analyzed)
 
-The `distribution` parameter controls the variability:
-- `"fixed"`: Transactions arrive at exact intervals (deterministic)
-- `"exponential"`: Poisson arrival process (most realistic for independent clients)
-- `"uniform"`: Uniformly distributed inter-arrival times
-- `"normal"`: Normally distributed inter-arrival times
+This ensures steady-state measurements by allowing:
+- Queue depths to stabilize
+- Contention to reach equilibrium
+- Latency distributions to converge
 
-## Output Format
+**Validation:**
+```bash
+python -m icecap.warmup_validation experiments/exp2_1_*/12345
+```
 
-Results are exported as Parquet files containing:
+See [`docs/WARMUP_PERIOD.md`](docs/WARMUP_PERIOD.md) for detailed methodology.
 
-| Column | Type | Description |
-|--------|------|-------------|
-| `txn_id` | int | Transaction ID |
-| `t_submit` | int | Submission time (ms) |
-| `t_runtime` | int | Transaction runtime (ms) |
-| `t_commit` | int | Commit time (ms) or -1 if aborted |
-| `commit_latency` | int | Time from ready to commit (ms) |
-| `total_latency` | int | Total time from submit to commit/abort |
-| `n_retries` | int | Number of retry attempts |
-| `n_tables_read` | int | Number of tables read |
-| `n_tables_written` | int | Number of tables written |
-| `status` | str | "committed" or "aborted" |
+## Analysis Capabilities
 
-## Generated Plots
+### Saturation Analysis
 
-The analysis tool generates several plots:
-
-### 1. CDF of Commit Latency
-Shows the cumulative distribution of commit latencies for different client loads or catalog latencies.
-
-**Interpretation:**
-- Steeper curves = more consistent latency
-- Longer tails = occasional high latencies
-- Compare curves to see impact of parameter changes
-
-### 2. Success Rate vs Client Load
-Shows how success rate and throughput change with different inter-arrival times.
-
-**Interpretation:**
-- Higher inter-arrival time (fewer clients) = higher success rate
-- Lower inter-arrival time (more clients) = more contention, more aborts
-- Throughput peaks at optimal concurrency level
-
-### 3. Catalog Latency Impact
-Multi-panel plot showing how catalog CAS latency affects:
-- Mean commit latency
-- P95 commit latency
-- Retry rate
-- Success rate
-
-**Interpretation:**
-- Higher CAS latency amplifies the cost of retries
-- Different inter-arrival times show how concurrency interacts with latency
-- Can identify optimal operating points
-
-### 4. Summary Table (CSV)
-Contains aggregated statistics for all experiments.
-
-## Table Grouping Use Cases
-
-### Catalog-Level vs Table-Level Conflicts
-
-Compare how different catalog designs affect performance:
+Generates latency vs throughput curves to identify system limits:
 
 ```bash
-# Catalog-level conflicts (like Iceberg v1)
-python -m icecap.main cfg.toml  # with num_groups = 1
-
-# Table-level conflicts (like Iceberg v2 with independent table commits)
-# Edit cfg.toml: set num_groups = num_tables
-python -m icecap.main cfg.toml
+python -m icecap.saturation_analysis -i experiments -p "exp2_*" -o plots
 ```
 
-With catalog-level conflicts, any two concurrent writes conflict. With table-level conflicts, only transactions touching the same tables conflict, reducing contention.
+**Metrics computed:**
+- Achieved throughput (commits/sec)
+- Success rate (% committed)
+- Commit latency (P50, P95, P99)
+- Mean retries per transaction
+- Saturation point (50% success threshold)
 
-### Multi-Tenant Workloads
+### Warmup Validation
 
-Model isolation between tenants using groups:
-
-```toml
-[catalog]
-num_tables = 100
-num_groups = 10              # 10 tenants
-group_size_distribution = "longtail"
-longtail.large_group_fraction = 0.4   # One large tenant
-longtail.medium_groups_count = 3       # Three medium tenants
-longtail.medium_group_fraction = 0.3   # Remainder split among small tenants
-```
-
-This models a realistic scenario where one large tenant dominates, a few medium tenants share resources, and many small tenants have minimal activity.
-
-### Hotspot Analysis
-
-Examine how table popularity affects contention:
-
-```toml
-[catalog]
-num_tables = 50
-num_groups = 5
-group_size_distribution = "uniform"
-
-[transaction]
-seltbl.zipf = 2.0   # High skew - group 0 is "hot"
-```
-
-Since table selection is Zipf-distributed and transactions are confined to groups, group 0 (containing tables 0-9) will experience the highest contention.
-
-## Example Workflow
+Visualizes metric convergence over time:
 
 ```bash
-# 1. Edit base configuration
-vim cfg.toml
-
-# 2. Run experiments sweeping over client loads
-python -m icecap.experiment sweep-clients \
-    --times 100 250 500 1000 2500 5000 10000 \
-    --dist exponential \
-    -o experiments/clients
-
-# 3. Run experiments sweeping over catalog latencies
-python -m icecap.experiment sweep-latency \
-    --latencies 10 25 50 100 250 500 1000 \
-    -o experiments/latency
-
-# 4. Run combined experiment for detailed analysis
-python -m icecap.experiment sweep-combined \
-    --times 500 1000 5000 \
-    --latencies 50 100 200 \
-    -o experiments/combined
-
-# 5. Generate plots
-python -m icecap.analysis all -i experiments/clients -o plots/clients
-python -m icecap.analysis all -i experiments/latency -o plots/latency
-python -m icecap.analysis all -i experiments/combined -o plots/combined
-
-# 6. View results
-open plots/clients/*.png
-open plots/clients/summary.csv
+python -m icecap.warmup_validation experiments/exp2_1_*/12345 --window-size 60
 ```
 
-## Architecture
+**Outputs:**
+- Throughput over time
+- Success rate over time
+- Latency convergence
+- Statistical stability analysis
 
-### Core Components
-
-- **`icecap/main.py`**: Simulator implementation using SimPy
-  - `Catalog`: Versioned catalog with CAS operations
-  - `Txn`: Transaction dataclass with metadata
-  - `txn_gen()`: Transaction generator
-  - `txn_commit()`: Commit logic with retry and conflict resolution
-
-- **`icecap/capstats.py`**: Statistics collection
-  - `Stats`: Collects transaction metrics and exports to Parquet
-  - Utility functions for distributions
-
-- **`icecap/experiment.py`**: Experiment runner
-  - Generates configuration files for parameter sweeps
-  - Runs experiments in batch
-
-- **`icecap/analysis.py`**: Analysis and plotting
-  - Loads Parquet results
-  - Generates CDF plots, success rate plots, latency impact analysis
-  - Exports summary tables
-
-## Markov Model Alternative
-
-The retry process can be modeled analytically as a Discrete-Time Markov Chain (DTMC):
-
-- **States**: {0, 1, 2, ..., N} representing retry attempts
-- **Transitions**:
-  - Success with probability `p`: transition to absorbing "committed" state
-  - Failure with probability `(1-p)`: transition to next retry state
-  - At state N: transition to absorbing "aborted" state
-
-The expected commit time can be calculated analytically:
+## Project Structure
 
 ```
-E[T] = RTT * (1 + (1-p) * sum_{k=1}^{N} (1-p)^k * delay(k))
+.
+├── icecap/                  # Core simulator code
+│   ├── main.py              # Simulation engine
+│   ├── capstats.py          # Statistics collection
+│   ├── saturation_analysis.py  # Saturation analysis
+│   └── warmup_validation.py    # Warmup validation
+├── scripts/                 # Automation scripts
+│   ├── run_baseline_experiments.sh  # Parallel experiment runner
+│   └── monitor_experiments.sh       # Progress monitoring
+├── experiment_configs/      # Experiment templates
+│   ├── exp2_1_single_table_false_conflicts.toml
+│   └── exp2_2_multi_table_false_conflicts.toml
+├── tests/                   # Test suite (63 tests)
+├── docs/                    # Documentation
+├── experiments/             # Results (created at runtime)
+└── plots/                   # Analysis outputs
+
 ```
-
-Where `delay(k)` is the backoff delay for retry k.
-
-This analytical model is implemented in `rtt.py` and `plot_rtt.py` for validation and quick parameter exploration without running full simulations.
 
 ## Testing
 
-The simulator includes comprehensive tests to verify correctness and parameter effects.
-
-### Run Tests
-
 ```bash
-# Run all tests
+# Run all tests (63 tests)
 pytest tests/ -v
 
-# Run specific test classes
-pytest tests/test_simulator.py::TestDeterminism -v
-pytest tests/test_simulator.py::TestParameterEffects -v
+# Run with coverage
+pytest tests/ --cov=icecap --cov-report=html
+
+# Run specific test module
+pytest tests/test_saturation_analysis.py -v
 ```
 
-### Test Coverage
+**Test coverage:**
+- Core simulation (determinism, conflict types)
+- Conflict resolution (CAS failures, retries)
+- Experiment organization (hashing, directory structure)
+- Analysis pipeline (parameter extraction, aggregation)
+- Warmup period calculation
 
-**Table Grouping Tests** (`test_table_groups.py`):
-- Uniform and longtail group size distributions
-- Transactions stay within single group
-- Table-level conflict detection when num_groups = num_tables
-- Warning emission when transaction exceeds group size
-- Deterministic group partitioning with seed
+## Architecture
 
-**Determinism Tests** (`test_simulator.py`):
-- Verifies identical results with same random seed
-- Confirms different seeds produce different outcomes
+### Simulation Engine (SimPy)
 
-**Parameter Effect Tests** (`test_simulator.py`):
-- Lower inter-arrival time increases contention and retries
-- Higher CAS latency increases commit times
-- More retries improve success rates
-- Fewer tables increase contention (more overlapping transactions)
+- **Discrete-event simulation** using SimPy framework
+- **Transaction lifecycle**: Submit → Execute → Commit (with retries)
+- **Conflict detection**: CAS failures trigger retry logic
+- **Resource modeling**: Catalog operations with configurable latencies
 
-**Conflict Resolution Tests** (`test_conflict_resolution.py`):
-- High contention causes CAS failures and retries
-- Commit latency increases with number of retries
-- Different parallelism limits affect performance under contention
+### Experiment Organization
 
-**Storage Latency Tests** (`test_conflict_resolution.py`):
-- Minimum latency is enforced (prevents unrealistic zeros)
-- Latencies follow approximately normal distribution
-- Read and write latencies are differentiated
-- Stochastic latencies work correctly in simulation
+- **Deterministic hashing**: Config + code → 8-char hash
+- **Multi-seed support**: Multiple runs under same experiment
+- **Atomic writes**: `.running.parquet` → `results.parquet` on completion
 
-**Conflict Type Tests** (`test_conflict_types.py`):
-- False conflicts only (no manifest file operations)
-- Real conflicts only (manifest file read/write)
-- Mixed conflicts (correct ratio verification)
-- Distribution sampling (fixed, uniform, exponential)
-- Latency difference between conflict types
+### Analysis Pipeline
 
-**Experiment Structure Tests** (`test_experiment_structure.py`):
-- Hash computation excludes seed and label
-- Hash changes when config changes
-- Hash includes simulator code (deterministic)
-- Without label uses original output path
-- With label creates proper directory structure
-- Different seeds share same experiment directory
-- Actual seed (not "noseed") used in directory name
-- Config written once per experiment
+1. **Scan experiments**: Find all matching experiment directories
+2. **Extract parameters**: Parse `cfg.toml` from each experiment
+3. **Load results**: Aggregate across seeds with warmup filtering
+4. **Compute statistics**: Throughput, latency percentiles, success rates
+5. **Generate visualizations**: Latency curves, saturation points
 
-These tests serve as both validation and documentation of expected simulator behavior.
+## Research Applications
 
-## License
+The simulator supports investigating:
 
-This is a research prototype. Use at your own risk.
+1. **Saturation analysis**: When does throughput plateau?
+2. **Latency scaling**: How does P99 latency grow with load?
+3. **Multi-table scaling**: Does parallelism reduce contention?
+4. **Conflict resolution costs**: Impact of false vs real conflicts
+5. **Catalog performance**: Sensitivity to catalog latencies
+
+See [`ANALYSIS_PLAN.md`](ANALYSIS_PLAN.md) for full research methodology.
+
+## Experimental Results
+
+**Baseline experiments** (Phase 2) characterize:
+- Single table saturation with false conflicts
+- Multi-table scaling (1, 2, 5, 10, 20, 50 tables)
+- Load sweep (10ms to 5000ms inter-arrival)
+- 3 seeds per configuration for statistical confidence
+
+**Key findings** (example):
+- Single table saturates at ~75 commits/sec (50% success)
+- Multi-table provides ~linear scaling up to contention threshold
+- P99 latency increases exponentially approaching saturation
+
+## Performance
+
+**Simulation speed:**
+- ~100,000 transactions in 100 seconds simulated time
+- Real-time factor: ~1000x (100s simulation in 0.1s wall-clock)
+
+**Parallel execution:**
+- 8 cores: 189 experiments in ~24 hours
+- Sequential: Same experiments in ~8 days
+- Speedup: ~8x (linear scaling)
 
 ## Contributing
 
-This is a personal research project. Feel free to fork and experiment!
+Run tests before committing:
+```bash
+pytest tests/ -v
+```
+
+Update documentation for:
+- New configuration parameters
+- Analysis methods
+- Experiment templates
+
+## License
+
+(Add license information here)
+
+## Citation
+
+(Add citation information here)
+
+## References
+
+- **Apache Iceberg**: https://iceberg.apache.org/
+- **SimPy**: https://simpy.readthedocs.io/
+- **Optimistic Concurrency Control**: https://en.wikipedia.org/wiki/Optimistic_concurrency_control

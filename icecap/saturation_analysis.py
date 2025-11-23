@@ -79,6 +79,42 @@ def scan_experiment_directories(base_dir: str, pattern: str) -> Dict[str, Dict]:
     return experiments
 
 
+def compute_warmup_duration(config: Dict) -> float:
+    """
+    Compute warmup duration using transaction-runtime multiple approach.
+
+    The warmup period allows the system to reach steady-state by eliminating
+    initial transient behavior (empty start, low contention, queue buildup).
+
+    Approach: K_MIN_CYCLES × mean_transaction_runtime
+    - Allows multiple transaction lifecycles for steady-state
+    - Clamped to [5min, 15min] for practical bounds
+
+    Args:
+        config: Parsed TOML configuration dict
+
+    Returns:
+        Warmup duration in milliseconds
+    """
+    K_MIN_CYCLES = 3  # Number of transaction cycles for steady-state
+    MIN_WARMUP_MS = 5 * 60 * 1000  # 5 minutes absolute minimum
+    MAX_WARMUP_MS = 15 * 60 * 1000  # 15 minutes maximum
+
+    # Get mean transaction runtime
+    mean_runtime_ms = config.get("transaction", {}).get("runtime", {}).get("mean", 10000)
+
+    # Calculate warmup based on transaction cycles
+    warmup_ms = max(
+        MIN_WARMUP_MS,
+        min(
+            K_MIN_CYCLES * mean_runtime_ms,
+            MAX_WARMUP_MS
+        )
+    )
+
+    return warmup_ms
+
+
 def extract_key_parameters(config: Dict) -> Dict:
     """Extract key parameters from config for grouping/plotting."""
     params = {}
@@ -111,10 +147,18 @@ def load_and_aggregate_results(exp_info: Dict) -> pd.DataFrame:
     """
     Load all seed results for an experiment and aggregate statistics.
 
+    Applies warmup period filter to exclude initial transient behavior
+    and focus on steady-state performance.
+
     Returns:
-        DataFrame with aggregated statistics across all seeds
+        DataFrame with aggregated statistics across all seeds (warmup excluded)
     """
+    # Compute warmup duration for this experiment
+    warmup_ms = compute_warmup_duration(exp_info['config'])
+
     all_results = []
+    total_txns_before_warmup = 0
+    total_txns_after_warmup = 0
 
     for seed_dir in exp_info['seeds']:
         # Find results.parquet in seed directory
@@ -127,6 +171,11 @@ def load_and_aggregate_results(exp_info: Dict) -> pd.DataFrame:
         # Load results
         df = pd.read_parquet(parquet_path)
 
+        # Apply warmup filter - only keep transactions submitted after warmup period
+        total_txns_before_warmup += len(df)
+        df = df[df['t_submit'] >= warmup_ms].copy()
+        total_txns_after_warmup += len(df)
+
         # Add seed identifier
         seed = os.path.basename(seed_dir)
         df['seed'] = seed
@@ -138,6 +187,10 @@ def load_and_aggregate_results(exp_info: Dict) -> pd.DataFrame:
 
     # Combine all seeds
     combined = pd.concat(all_results, ignore_index=True)
+
+    # Report filtering statistics (only once per experiment)
+    pct_excluded = 100.0 * (1 - total_txns_after_warmup / total_txns_before_warmup) if total_txns_before_warmup > 0 else 0
+    print(f" (warmup: {warmup_ms/1000:.0f}s, excluded {total_txns_before_warmup - total_txns_after_warmup}/{total_txns_before_warmup} txns = {pct_excluded:.1f}%)", end='')
 
     return combined
 
