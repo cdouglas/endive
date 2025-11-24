@@ -37,7 +37,7 @@
 #   python -m icecap.main experiment_configs/exp3_2_manifest_count_distribution.toml
 
 [simulation]
-duration_ms = 100000  # 100 seconds
+duration_ms = 3600000  # 1 hour (matches baseline for proper comparison)
 output_path = "results.parquet"
 # seed = 42  # Uncomment to set specific seed, or leave unset for random
 
@@ -52,8 +52,9 @@ num_groups = 1  # Catalog-level conflicts
 retry = 10
 
 # Transaction runtime (lognormal distribution)
-runtime.min = 5000
-runtime.mean = 10000
+# Realistic Iceberg transaction durations: 30s minimum, 3min mean (matches baseline)
+runtime.min = 30000   # 30 seconds
+runtime.mean = 180000  # 3 minutes
 runtime.sigma = 1.5
 
 # Inter-arrival time distribution
