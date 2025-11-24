@@ -863,9 +863,9 @@ def rand_tbl(catalog):
     ntbl_requested = int(np.random.choice(np.arange(1, N_TABLES + 1), p=N_TBL_PMF))
     ntbl = min(ntbl_requested, max_tables)
 
-    if ntbl_requested > max_tables and N_GROUPS > 1:
-        logger.warning(f"Transaction requested {ntbl_requested} tables but group {group_id} only has {max_tables} tables. "
-                      f"Using all {max_tables} tables in group.")
+    # Note: When num_groups == num_tables (table-level conflicts), groups have 1 table each.
+    # Transactions requesting multiple tables are automatically capped to group size.
+    # This is expected behavior, not an error.
 
     # which tables read
     tblr_idx = np.random.choice(available_tables, size=ntbl, replace=False, p=table_pmf).astype(int).tolist()
