@@ -607,6 +607,150 @@ def plot_overhead_vs_throughput(
     plt.close()
 
 
+def generate_latency_vs_throughput_table(
+    index_df: pd.DataFrame,
+    output_path: str,
+    group_by: str = None
+):
+    """Generate markdown table for latency vs throughput data."""
+    with open(output_path, 'w') as f:
+        f.write("# Commit Latency vs Throughput\n\n")
+        f.write("Analysis of how commit latency scales with achieved throughput.\n\n")
+
+        if group_by and group_by in index_df.columns:
+            groups = sorted(index_df[group_by].unique())
+
+            for group_val in groups:
+                subset = index_df[index_df[group_by] == group_val].copy()
+                subset = subset.sort_values('throughput')
+
+                f.write(f"## {group_by} = {group_val}\n\n")
+                f.write("| Throughput (c/s) | Success Rate (%) | P50 Latency (s) | P95 Latency (s) | P99 Latency (s) | Mean Retries |\n")
+                f.write("|------------------|------------------|-----------------|-----------------|-----------------|---------------|\n")
+
+                for _, row in subset.iterrows():
+                    f.write(f"| {row['throughput']:.1f} | {row['success_rate']:.1f} | "
+                           f"{row['p50_commit_latency']/1000:.1f} | {row['p95_commit_latency']/1000:.1f} | "
+                           f"{row['p99_commit_latency']/1000:.1f} | {row['mean_retries']:.1f} |\n")
+                f.write("\n")
+        else:
+            df_sorted = index_df.sort_values('throughput')
+
+            f.write("| Throughput (c/s) | Success Rate (%) | P50 Latency (s) | P95 Latency (s) | P99 Latency (s) | Mean Retries |\n")
+            f.write("|------------------|------------------|-----------------|-----------------|-----------------|---------------|\n")
+
+            for _, row in df_sorted.iterrows():
+                f.write(f"| {row['throughput']:.1f} | {row['success_rate']:.1f} | "
+                       f"{row['p50_commit_latency']/1000:.1f} | {row['p95_commit_latency']/1000:.1f} | "
+                       f"{row['p99_commit_latency']/1000:.1f} | {row['mean_retries']:.1f} |\n")
+
+        f.write("\n## Notes\n\n")
+        f.write("- Latencies reported in seconds (converted from milliseconds)\n")
+        f.write("- Throughput = commits per second during steady-state window\n")
+        f.write("- Success rate = percentage of transactions that committed successfully\n")
+        f.write("- Mean retries = average number of retry attempts per committed transaction\n")
+
+    print(f"Saved latency vs throughput table to {output_path}")
+
+
+def generate_success_rate_table(
+    index_df: pd.DataFrame,
+    output_path: str,
+    group_by: str = None
+):
+    """Generate markdown table for success rate data."""
+    with open(output_path, 'w') as f:
+        f.write("# Transaction Success Rate vs Load\n\n")
+        f.write("Analysis of how success rate changes with offered load (inter-arrival time).\n\n")
+
+        if group_by and group_by in index_df.columns:
+            groups = sorted(index_df[group_by].unique())
+
+            for group_val in groups:
+                subset = index_df[index_df[group_by] == group_val].copy()
+                subset = subset.sort_values('inter_arrival_scale')
+
+                f.write(f"## {group_by} = {group_val}\n\n")
+                f.write("| Inter-Arrival (ms) | Arrival Rate (txn/s) | Throughput (c/s) | Success Rate (%) | Committed | Total |\n")
+                f.write("|--------------------|----------------------|------------------|------------------|-----------|-------|\n")
+
+                for _, row in subset.iterrows():
+                    arrival_rate = 1000.0 / row['inter_arrival_scale']
+                    f.write(f"| {row['inter_arrival_scale']:.0f} | {arrival_rate:.2f} | "
+                           f"{row['throughput']:.1f} | {row['success_rate']:.1f} | "
+                           f"{row['committed']} | {row['total_txns']} |\n")
+                f.write("\n")
+        else:
+            df_sorted = index_df.sort_values('inter_arrival_scale')
+
+            f.write("| Inter-Arrival (ms) | Arrival Rate (txn/s) | Throughput (c/s) | Success Rate (%) | Committed | Total |\n")
+            f.write("|--------------------|----------------------|------------------|------------------|-----------|-------|\n")
+
+            for _, row in df_sorted.iterrows():
+                arrival_rate = 1000.0 / row['inter_arrival_scale']
+                f.write(f"| {row['inter_arrival_scale']:.0f} | {arrival_rate:.2f} | "
+                       f"{row['throughput']:.1f} | {row['success_rate']:.1f} | "
+                       f"{row['committed']} | {row['total_txns']} |\n")
+
+        f.write("\n## Notes\n\n")
+        f.write("- Lower inter-arrival time = higher offered load\n")
+        f.write("- Arrival rate = 1000 / inter_arrival_scale (transactions per second)\n")
+        f.write("- Throughput may be less than arrival rate due to aborts\n")
+        f.write("- Success rate typically drops as load increases due to contention\n")
+
+    print(f"Saved success rate table to {output_path}")
+
+
+def generate_overhead_table(
+    index_df: pd.DataFrame,
+    output_path: str,
+    group_by: str = None
+):
+    """Generate markdown table for overhead percentage data."""
+    with open(output_path, 'w') as f:
+        f.write("# Commit Overhead vs Throughput\n\n")
+        f.write("Analysis of commit protocol overhead as percentage of total transaction time.\n\n")
+        f.write("**Overhead** = (commit_latency / total_latency) × 100\n\n")
+        f.write("This represents time spent in retries, exponential backoff, and manifest I/O.\n\n")
+
+        if group_by and group_by in index_df.columns:
+            groups = sorted(index_df[group_by].unique())
+
+            for group_val in groups:
+                subset = index_df[index_df[group_by] == group_val].copy()
+                subset = subset.sort_values('throughput')
+
+                f.write(f"## {group_by} = {group_val}\n\n")
+                f.write("| Throughput (c/s) | Success Rate (%) | Mean Overhead (%) | P50 Overhead (%) | P95 Overhead (%) | P99 Overhead (%) |\n")
+                f.write("|------------------|------------------|-------------------|------------------|------------------|------------------|\n")
+
+                for _, row in subset.iterrows():
+                    f.write(f"| {row['throughput']:.1f} | {row['success_rate']:.1f} | "
+                           f"{row['mean_overhead_pct']:.1f} | {row['p50_overhead_pct']:.1f} | "
+                           f"{row['p95_overhead_pct']:.1f} | {row['p99_overhead_pct']:.1f} |\n")
+                f.write("\n")
+        else:
+            df_sorted = index_df.sort_values('throughput')
+
+            f.write("| Throughput (c/s) | Success Rate (%) | Mean Overhead (%) | P50 Overhead (%) | P95 Overhead (%) | P99 Overhead (%) |\n")
+            f.write("|------------------|------------------|-------------------|------------------|------------------|------------------|\n")
+
+            for _, row in df_sorted.iterrows():
+                f.write(f"| {row['throughput']:.1f} | {row['success_rate']:.1f} | "
+                       f"{row['mean_overhead_pct']:.1f} | {row['p50_overhead_pct']:.1f} | "
+                       f"{row['p95_overhead_pct']:.1f} | {row['p99_overhead_pct']:.1f} |\n")
+
+        f.write("\n## Interpretation\n\n")
+        f.write("- **Low overhead (<10%)**: System operating efficiently, minimal contention\n")
+        f.write("- **Medium overhead (10-30%)**: Moderate contention, acceptable performance\n")
+        f.write("- **High overhead (30-50%)**: High contention, commit protocol becoming significant\n")
+        f.write("- **Very high overhead (>50%)**: Commit protocol dominates, system saturated\n\n")
+        f.write("At saturation, overhead can exceed 50%, meaning more time is spent retrying\n")
+        f.write("commits than executing transactions!\n")
+
+    print(f"Saved overhead table to {output_path}")
+
+
 def save_experiment_index(index_df: pd.DataFrame, output_path: str):
     """Save experiment index to CSV for reference."""
     # Select relevant columns
@@ -671,35 +815,49 @@ def cli():
     index_path = os.path.join(args.output_dir, "experiment_index.csv")
     save_experiment_index(index_df, index_path)
 
-    # Generate plots
-    print("\nGenerating plots...")
+    # Generate plots and tables
+    print("\nGenerating plots and tables...")
 
     # Latency vs Throughput
     plot_path = os.path.join(args.output_dir, "latency_vs_throughput.png")
+    table_path = os.path.join(args.output_dir, "latency_vs_throughput.md")
     plot_latency_vs_throughput(
         index_df, plot_path,
         title="Commit Latency vs Throughput",
+        group_by=args.group_by
+    )
+    generate_latency_vs_throughput_table(
+        index_df, table_path,
         group_by=args.group_by
     )
 
     # Success rate vs load (if inter_arrival_scale present)
     if 'inter_arrival_scale' in index_df.columns:
         plot_path = os.path.join(args.output_dir, "success_rate_vs_load.png")
+        table_path = os.path.join(args.output_dir, "success_rate_vs_load.md")
         plot_success_rate_vs_load(index_df, plot_path)
+        generate_success_rate_table(index_df, table_path, group_by=args.group_by)
 
     # Success rate vs throughput
     plot_path = os.path.join(args.output_dir, "success_rate_vs_throughput.png")
+    table_path = os.path.join(args.output_dir, "success_rate_vs_throughput.md")
     plot_success_rate_vs_throughput(
         index_df, plot_path,
         title="Transaction Success Rate vs Throughput",
         group_by=args.group_by
     )
+    generate_success_rate_table(index_df, table_path, group_by=args.group_by)
 
     # Overhead vs throughput
     plot_path = os.path.join(args.output_dir, "overhead_vs_throughput.png")
+    table_path = os.path.join(args.output_dir, "overhead_vs_throughput.md")
     plot_overhead_vs_throughput(
         index_df, plot_path,
         title="Commit Overhead vs Throughput",
+        group_by=args.group_by
+    )
+    generate_overhead_table(
+        index_df, table_path,
         group_by=args.group_by
     )
 
