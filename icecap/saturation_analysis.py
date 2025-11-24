@@ -251,11 +251,24 @@ def compute_aggregate_statistics(df: pd.DataFrame) -> Dict:
             'p95_commit_latency': None,
             'p99_commit_latency': None,
             'mean_retries': None,
-            'throughput': 0.0
+            'throughput': 0.0,
+            'mean_overhead_pct': None,
+            'p50_overhead_pct': None,
+            'p95_overhead_pct': None,
+            'p99_overhead_pct': None
         }
 
     # Calculate duration (in seconds)
     duration_s = df['t_submit'].max() / 1000.0 if len(df) > 0 else 1.0
+
+    # Compute overhead percentage for committed transactions
+    # Overhead = (commit_latency / total_latency) * 100
+    # This represents the percentage of time spent in commit protocol (retries, backoff, manifest I/O)
+    # vs total transaction time (runtime + commit)
+    committed_with_overhead = committed.copy()
+    committed_with_overhead['overhead_pct'] = (
+        100.0 * committed_with_overhead['commit_latency'] / committed_with_overhead['total_latency']
+    )
 
     stats = {
         'total_txns': total,
@@ -269,7 +282,11 @@ def compute_aggregate_statistics(df: pd.DataFrame) -> Dict:
         'p99_commit_latency': committed['commit_latency'].quantile(0.99),
         'mean_retries': committed['n_retries'].mean(),
         'max_retries': committed['n_retries'].max(),
-        'throughput': len(committed) / duration_s  # commits per second
+        'throughput': len(committed) / duration_s,  # commits per second
+        'mean_overhead_pct': committed_with_overhead['overhead_pct'].mean(),
+        'p50_overhead_pct': committed_with_overhead['overhead_pct'].quantile(0.50),
+        'p95_overhead_pct': committed_with_overhead['overhead_pct'].quantile(0.95),
+        'p99_overhead_pct': committed_with_overhead['overhead_pct'].quantile(0.99)
     }
 
     return stats
@@ -517,6 +534,79 @@ def plot_success_rate_vs_throughput(
     plt.close()
 
 
+def plot_overhead_vs_throughput(
+    index_df: pd.DataFrame,
+    output_path: str,
+    title: str = "Commit Overhead vs Throughput",
+    group_by: str = None
+):
+    """
+    Generate overhead percentage vs throughput plot.
+
+    Overhead = (commit_latency / total_latency) * 100
+
+    This represents the percentage of total transaction time spent in the commit
+    protocol (retries, exponential backoff, manifest I/O operations) vs actual
+    transaction execution.
+
+    Args:
+        index_df: Experiment index DataFrame
+        output_path: Path to save plot
+        title: Plot title
+        group_by: Optional parameter to group by (e.g., 'num_tables')
+    """
+    fig, ax = plt.subplots(figsize=(12, 8))
+
+    if group_by and group_by in index_df.columns:
+        # Plot separate lines for each group
+        groups = sorted(index_df[group_by].unique())
+
+        for group_val in groups:
+            subset = index_df[index_df[group_by] == group_val].copy()
+            subset = subset.sort_values('throughput')
+
+            # Plot P50, P95, P99 overhead
+            for percentile, marker, alpha in [
+                ('p50_overhead_pct', 'o', 1.0),
+                ('p95_overhead_pct', 's', 0.7),
+                ('p99_overhead_pct', '^', 0.5)
+            ]:
+                label = f"{group_by}={group_val}, {percentile.replace('_overhead_pct', '').upper()}"
+                ax.plot(subset['throughput'], subset[percentile],
+                       marker=marker, linewidth=2, markersize=8, alpha=alpha,
+                       label=label)
+    else:
+        # Single series plot
+        df_sorted = index_df.sort_values('throughput')
+
+        # Plot P50, P95, P99 overhead
+        percentiles = [
+            ('p50_overhead_pct', 'P50', 'o', '#2E86AB'),
+            ('p95_overhead_pct', 'P95', 's', '#A23B72'),
+            ('p99_overhead_pct', 'P99', '^', '#F18F01')
+        ]
+
+        for col, label, marker, color in percentiles:
+            ax.plot(df_sorted['throughput'], df_sorted[col],
+                   marker=marker, linewidth=2.5, markersize=10,
+                   label=label, color=color)
+
+    ax.set_xlabel('Achieved Throughput (commits/sec)', fontsize=14, fontweight='bold')
+    ax.set_ylabel('Commit Overhead (%)', fontsize=14, fontweight='bold')
+    ax.set_title(title, fontsize=16, fontweight='bold')
+    ax.legend(loc='best', fontsize=10, framealpha=0.9)
+    ax.grid(True, alpha=0.3, linestyle='--')
+
+    # Set reasonable axis limits
+    ax.set_xlim(left=0)
+    ax.set_ylim([0, 100])
+
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=300, bbox_inches='tight')
+    print(f"Saved overhead vs throughput plot to {output_path}")
+    plt.close()
+
+
 def save_experiment_index(index_df: pd.DataFrame, output_path: str):
     """Save experiment index to CSV for reference."""
     # Select relevant columns
@@ -528,7 +618,9 @@ def save_experiment_index(index_df: pd.DataFrame, output_path: str):
         'throughput',
         'mean_commit_latency', 'p50_commit_latency',
         'p95_commit_latency', 'p99_commit_latency',
-        'mean_retries'
+        'mean_retries',
+        'mean_overhead_pct', 'p50_overhead_pct',
+        'p95_overhead_pct', 'p99_overhead_pct'
     ]
 
     # Filter to only columns that exist
@@ -600,6 +692,14 @@ def cli():
     plot_success_rate_vs_throughput(
         index_df, plot_path,
         title="Transaction Success Rate vs Throughput",
+        group_by=args.group_by
+    )
+
+    # Overhead vs throughput
+    plot_path = os.path.join(args.output_dir, "overhead_vs_throughput.png")
+    plot_overhead_vs_throughput(
+        index_df, plot_path,
+        title="Commit Overhead vs Throughput",
         group_by=args.group_by
     )
 
