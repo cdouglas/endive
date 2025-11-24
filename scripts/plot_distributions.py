@@ -49,6 +49,69 @@ def generate_exponential_samples(scale: float, n_samples: int = 100000) -> np.nd
     return np.random.exponential(scale, n_samples)
 
 
+def generate_transaction_runtime_table(configs: List[Dict], output_path: str):
+    """Generate markdown table for transaction runtime distributions."""
+    # Collect unique runtime configurations
+    runtime_configs = {}
+    for config in configs:
+        if 'transaction' not in config or 'runtime' not in config['transaction']:
+            continue
+
+        runtime = config['transaction']['runtime']
+        mean = runtime.get('mean', 10000)
+        sigma = runtime.get('sigma', 1.5)
+        min_val = runtime.get('min', 1000)
+
+        key = (mean, sigma, min_val)
+        label = config.get('experiment', {}).get('label', 'unknown')
+
+        if key not in runtime_configs:
+            runtime_configs[key] = label
+
+    # Generate statistics for each configuration
+    table_rows = []
+    for (mean, sigma, min_val), label in runtime_configs.items():
+        samples = generate_lognormal_samples(mean, sigma, min_val) / 1000.0  # Convert to seconds
+
+        total_mean = (min_val + mean) / 1000.0
+        observed_mean = np.mean(samples)
+        p50 = np.percentile(samples, 50)
+        p95 = np.percentile(samples, 95)
+        p99 = np.percentile(samples, 99)
+
+        table_rows.append({
+            'label': label[:30],
+            'min_s': min_val / 1000.0,
+            'mean_lognorm_s': mean / 1000.0,
+            'sigma': sigma,
+            'total_mean_s': total_mean,
+            'observed_mean_s': observed_mean,
+            'p50_s': p50,
+            'p95_s': p95,
+            'p99_s': p99
+        })
+
+    # Write markdown table
+    with open(output_path, 'w') as f:
+        f.write("# Transaction Runtime Distribution\n\n")
+        f.write("Theoretical distribution based on configuration parameters.\n\n")
+        f.write("**Formula**: `runtime = MIN + lognormal(μ, σ)` where `μ = log(mean) - σ²/2`\n\n")
+        f.write("**Total Expected Mean**: `MIN + mean` (not just `mean`)\n\n")
+        f.write("## Configuration Parameters\n\n")
+        f.write("| Configuration | MIN (s) | Mean Lognorm (s) | Sigma | Total Mean (s) |\n")
+        f.write("|---------------|---------|------------------|-------|----------------|\n")
+        for row in table_rows:
+            f.write(f"| {row['label']} | {row['min_s']:.0f} | {row['mean_lognorm_s']:.0f} | {row['sigma']:.2f} | {row['total_mean_s']:.0f} |\n")
+
+        f.write("\n## Theoretical Statistics (100k samples)\n\n")
+        f.write("| Configuration | Observed Mean (s) | P50 (s) | P95 (s) | P99 (s) |\n")
+        f.write("|---------------|-------------------|---------|---------|----------|\n")
+        for row in table_rows:
+            f.write(f"| {row['label']} | {row['observed_mean_s']:.0f} | {row['p50_s']:.0f} | {row['p95_s']:.0f} | {row['p99_s']:.0f} |\n")
+
+    print(f"Saved transaction runtime table to {output_path}")
+
+
 def plot_transaction_runtime(configs: List[Dict], output_path: str):
     """Plot transaction runtime distributions for all experiments."""
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
@@ -110,6 +173,96 @@ def plot_transaction_runtime(configs: List[Dict], output_path: str):
     plt.savefig(output_path, dpi=300, bbox_inches='tight')
     print(f"Saved transaction runtime distribution to {output_path}")
     plt.close()
+
+
+def generate_inter_arrival_table(configs: List[Dict], output_path: str):
+    """Generate markdown table for inter-arrival time distributions."""
+    # Collect unique inter-arrival configurations
+    arrival_configs = {}
+    for config in configs:
+        if 'transaction' not in config or 'inter_arrival' not in config['transaction']:
+            continue
+
+        inter_arrival = config['transaction']['inter_arrival']
+        distribution = inter_arrival.get('distribution', 'exponential')
+
+        if distribution == 'exponential':
+            scale = inter_arrival.get('scale', 500)
+            if scale not in arrival_configs:
+                arrival_configs[scale] = []
+
+    # Generate statistics for each configuration
+    table_rows = []
+    for scale in sorted(arrival_configs.keys()):
+        samples = generate_exponential_samples(scale)
+
+        # Convert to appropriate units
+        if scale >= 1000:
+            samples_display = samples / 1000.0
+            unit = 's'
+        else:
+            samples_display = samples
+            unit = 'ms'
+
+        mean_val = np.mean(samples_display)
+        median_val = np.median(samples_display)
+        p95 = np.percentile(samples_display, 95)
+        p99 = np.percentile(samples_display, 99)
+
+        # Arrival rate (transactions per second)
+        arrival_rate = 1000.0 / scale
+
+        table_rows.append({
+            'scale_ms': scale,
+            'unit': unit,
+            'mean': mean_val,
+            'median': median_val,
+            'p95': p95,
+            'p99': p99,
+            'arrival_rate': arrival_rate
+        })
+
+    # Write markdown table
+    with open(output_path, 'w') as f:
+        f.write("# Inter-Arrival Time Distribution\n\n")
+        f.write("Theoretical distribution based on configuration parameters.\n\n")
+        f.write("**Formula**: `exponential(scale)`\n\n")
+        f.write("**Properties**: mean = scale, median = scale × ln(2) ≈ 0.693 × scale\n\n")
+        f.write("## Configuration Parameters\n\n")
+        f.write("| Scale (ms) | Arrival Rate (txn/s) | Mean | Median | P95 | P99 |\n")
+        f.write("|------------|----------------------|------|--------|-----|-----|\n")
+        for row in table_rows:
+            unit = row['unit']
+            f.write(f"| {row['scale_ms']} | {row['arrival_rate']:.2f} | "
+                   f"{row['mean']:.1f}{unit} | {row['median']:.1f}{unit} | "
+                   f"{row['p95']:.1f}{unit} | {row['p99']:.1f}{unit} |\n")
+
+        f.write("\n## Load Characterization\n\n")
+        f.write("| Scale (ms) | Arrival Rate | Load Level | Expected Concurrency* |\n")
+        f.write("|------------|--------------|------------|----------------------|\n")
+        for row in table_rows:
+            rate = row['arrival_rate']
+            if rate > 50:
+                load = "Very High"
+            elif rate > 20:
+                load = "High"
+            elif rate > 5:
+                load = "Medium"
+            elif rate > 1:
+                load = "Low"
+            else:
+                load = "Very Low"
+
+            # Expected concurrency using Little's Law (assuming 180s mean runtime)
+            mean_runtime_s = 180
+            expected_concurrency = rate * mean_runtime_s
+
+            f.write(f"| {row['scale_ms']} | {rate:.2f} txn/s | {load} | {expected_concurrency:.0f} |\n")
+
+        f.write("\n*Expected concurrency assumes mean transaction runtime = 180s (baseline config)\n")
+        f.write("\nLittle's Law: L = λ × W (concurrency = arrival_rate × mean_service_time)\n")
+
+    print(f"Saved inter-arrival time table to {output_path}")
 
 
 def plot_inter_arrival_times(configs: List[Dict], output_path: str):
@@ -179,6 +332,90 @@ def plot_inter_arrival_times(configs: List[Dict], output_path: str):
     plt.savefig(output_path, dpi=300, bbox_inches='tight')
     print(f"Saved inter-arrival time distribution to {output_path}")
     plt.close()
+
+
+def generate_overview_table(configs: List[Dict], output_path: str):
+    """Generate markdown table with combined distribution overview."""
+    # Collect runtime configs
+    runtime_configs = {}
+    for config in configs:
+        if 'transaction' not in config or 'runtime' not in config['transaction']:
+            continue
+        runtime = config['transaction']['runtime']
+        key = (runtime.get('mean', 10000), runtime.get('sigma', 1.5), runtime.get('min', 1000))
+        if key not in runtime_configs:
+            runtime_configs[key] = config.get('experiment', {}).get('label', 'unknown')
+
+    # Collect inter-arrival configs
+    arrival_configs = {}
+    for config in configs:
+        if 'transaction' not in config or 'inter_arrival' not in config['transaction']:
+            continue
+        inter_arrival = config['transaction']['inter_arrival']
+        scale = inter_arrival.get('scale', 500)
+        if scale not in arrival_configs:
+            arrival_configs[scale] = []
+
+    # Write markdown
+    with open(output_path, 'w') as f:
+        f.write("# Experiment Distribution Overview\n\n")
+        f.write("Summary of configured distributions across all experiments.\n\n")
+
+        # Runtime configuration
+        f.write("## Transaction Runtime Configuration\n\n")
+        if runtime_configs:
+            (mean, sigma, min_val) = list(runtime_configs.keys())[0]
+            total_mean = (min_val + mean) / 1000.0
+            f.write(f"**Distribution**: MIN + lognormal(μ, σ)\n\n")
+            f.write(f"- **MIN**: {min_val/1000:.0f}s\n")
+            f.write(f"- **Mean (lognormal part)**: {mean/1000:.0f}s\n")
+            f.write(f"- **Sigma**: {sigma}\n")
+            f.write(f"- **Total Expected Mean**: {total_mean:.0f}s\n\n")
+
+        # Inter-arrival summary
+        f.write("## Inter-Arrival Time Configurations\n\n")
+        f.write(f"**Distribution**: exponential(scale)\n\n")
+        f.write(f"**Number of load levels**: {len(arrival_configs)}\n\n")
+
+        f.write("| Scale (ms) | Arrival Rate (txn/s) | Expected Concurrency* | Load Level |\n")
+        f.write("|------------|----------------------|-----------------------|------------|\n")
+
+        mean_runtime_s = 180
+        for scale in sorted(arrival_configs.keys()):
+            rate = 1000.0 / scale
+            expected_concurrency = rate * mean_runtime_s
+
+            if rate > 50:
+                load = "Very High"
+            elif rate > 20:
+                load = "High"
+            elif rate > 5:
+                load = "Medium"
+            elif rate > 1:
+                load = "Low"
+            else:
+                load = "Very Low"
+
+            f.write(f"| {scale} | {rate:.2f} | {expected_concurrency:.0f} | {load} |\n")
+
+        f.write("\n*Expected concurrency using Little's Law: L = λ × W\n")
+        f.write(f"\nAssuming mean transaction runtime = {mean_runtime_s}s (baseline configuration)\n\n")
+
+        # Saturation analysis
+        f.write("## Load Characterization\n\n")
+        f.write("**Undersaturated** (L < 1): System has idle capacity, transactions complete immediately\n\n")
+        f.write("**Light load** (1 ≤ L < 10): Low contention, high success rate (>99%)\n\n")
+        f.write("**Medium load** (10 ≤ L < 100): Moderate contention, success rate 95-99%\n\n")
+        f.write("**High load** (100 ≤ L < 1000): High contention, success rate 50-95%\n\n")
+        f.write("**Very high load** (L ≥ 1000): Saturation, success rate <50%, exponential tail latency\n\n")
+
+        # Experiment counts
+        f.write("## Experiment Summary\n\n")
+        f.write(f"- **Total configurations**: {len(configs)}\n")
+        f.write(f"- **Runtime configurations**: {len(runtime_configs)}\n")
+        f.write(f"- **Load levels**: {len(arrival_configs)}\n")
+
+    print(f"Saved overview table to {output_path}")
 
 
 def plot_combined_overview(configs: List[Dict], output_path: str):
@@ -339,25 +576,40 @@ def main():
 
     print(f"Loaded {len(configs)} configurations")
 
-    # Generate plots
-    print("\nGenerating distribution plots...")
+    # Generate plots and tables
+    print("\nGenerating distribution plots and tables...")
 
+    # Transaction runtime
     plot_transaction_runtime(
         configs,
         os.path.join(args.output_dir, "transaction_runtime.png")
     )
+    generate_transaction_runtime_table(
+        configs,
+        os.path.join(args.output_dir, "transaction_runtime.md")
+    )
 
+    # Inter-arrival times
     plot_inter_arrival_times(
         configs,
         os.path.join(args.output_dir, "inter_arrival_times.png")
     )
+    generate_inter_arrival_table(
+        configs,
+        os.path.join(args.output_dir, "inter_arrival_times.md")
+    )
 
+    # Overview
     plot_combined_overview(
         configs,
         os.path.join(args.output_dir, "overview.png")
     )
+    generate_overview_table(
+        configs,
+        os.path.join(args.output_dir, "overview.md")
+    )
 
-    print("\nAll plots generated successfully!")
+    print("\nAll plots and tables generated successfully!")
 
 
 if __name__ == "__main__":
