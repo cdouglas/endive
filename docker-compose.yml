@@ -14,12 +14,17 @@ services:
       - ./experiment_configs:/app/experiment_configs:ro
     environment:
       - PYTHONUNBUFFERED=1
-    # Default: run baseline experiments
-    # Override with: docker-compose run icecap-sim <custom-command>
+      - DOCKER_CONTAINER=1
+      # Pass experiment suite selection (default: all experiments)
+      - EXP_ARGS=${EXP_ARGS:---seeds 3}
+    # Default: run all experiments (Phase 2 & 3)
+    # Override with: EXP_ARGS="--exp2.1 --exp2.2" docker-compose up
+    # Or: docker-compose run icecap-sim scripts/run_baseline_experiments.sh --exp3.1 --quick
     command: >
       bash -c "
-      echo 'Starting baseline experiments...' &&
-      scripts/run_baseline_experiments.sh 2>&1 | tee experiment_logs/run_$$(date +%Y%m%d_%H%M%S).log &&
+      echo 'Starting experiments...' &&
+      echo 'Arguments: $${EXP_ARGS}' &&
+      scripts/run_baseline_experiments.sh $${EXP_ARGS} 2>&1 | tee experiment_logs/run_$$(date +%Y%m%d_%H%M%S).log &&
       echo 'Experiments complete! Results in ./experiments/'
       "
 

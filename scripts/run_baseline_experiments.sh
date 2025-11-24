@@ -1,7 +1,7 @@
 #!/bin/bash
 # run_baseline_experiments.sh
 #
-# Runs baseline experiments (Phase 2) from ANALYSIS_PLAN.md
+# Unified driver for all experiment suites
 #
 # Usage:
 #   ./run_baseline_experiments.sh [OPTIONS]
@@ -9,23 +9,32 @@
 # Options:
 #   --seeds N          Number of seeds per configuration (default: 3)
 #   --parallel N       Number of concurrent experiments (default: # of CPU cores)
-#   --exp2.1           Run only Experiment 2.1 (single table)
-#   --exp2.2           Run only Experiment 2.2 (multi-table)
+#   --exp2.1           Run Experiment 2.1 (single table, false conflicts)
+#   --exp2.2           Run Experiment 2.2 (multi-table, false conflicts)
+#   --exp3.1           Run Experiment 3.1 (single table, real conflicts)
+#   --exp3.2           Run Experiment 3.2 (manifest count distribution)
+#   --exp3.3           Run Experiment 3.3 (multi-table, real conflicts)
 #   --quick            Quick test mode (fewer configs, shorter duration)
 #   --dry-run          Show what would be run without executing
+#   --help, -h         Show this help message
+#
+# If no --expM.N flags are specified, runs all experiments (Phase 2 & 3)
 #
 # Examples:
-#   # Run all baseline experiments with 5 seeds each
+#   # Run all experiments (Phase 2 & 3) with 5 seeds
 #   ./run_baseline_experiments.sh --seeds 5
 #
-#   # Run with 8 parallel jobs
-#   ./run_baseline_experiments.sh --parallel 8
+#   # Run only Phase 2 baseline experiments
+#   ./run_baseline_experiments.sh --exp2.1 --exp2.2
 #
-#   # Run in background with logging
-#   nohup ./run_baseline_experiments.sh --seeds 3 > experiments.log 2>&1 &
+#   # Run only Phase 3 real conflict experiments
+#   ./run_baseline_experiments.sh --exp3.1 --exp3.2 --exp3.3
 #
-#   # Quick test run
-#   ./run_baseline_experiments.sh --quick --seeds 1
+#   # Quick test of exp3.1
+#   ./run_baseline_experiments.sh --exp3.1 --quick --seeds 1
+#
+#   # Run with 8 parallel jobs in background
+#   nohup ./run_baseline_experiments.sh --parallel 8 --seeds 3 > experiments.log 2>&1 &
 
 set -e  # Exit on error
 
@@ -36,29 +45,52 @@ set -e  # Exit on error
 # Default values
 NUM_SEEDS=3
 NUM_PARALLEL=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)
-RUN_EXP2_1=true
-RUN_EXP2_2=true
 QUICK_MODE=false
 DRY_RUN=false
 
+# Experiment selection (if none specified, run all)
+RUN_EXP2_1=false
+RUN_EXP2_2=false
+RUN_EXP3_1=false
+RUN_EXP3_2=false
+RUN_EXP3_3=false
+ANY_EXP_SPECIFIED=false
+
 # Experiment parameters
+# Phase 2: False conflicts (baseline)
 EXP2_1_LOADS=(10 20 50 100 200 500 1000 2000 5000)
 EXP2_2_LOADS=(10 20 50 100 200 500 1000 2000 5000)
 EXP2_2_TABLES=(1 2 5 10 20 50)
 
+# Phase 3: Real conflicts
+EXP3_1_LOADS=(10 20 50 100 200 500 1000 2000 5000)
+EXP3_1_REAL_PROBS=(0.0 0.1 0.2 0.3 0.5 0.7 1.0)
+
+EXP3_2_LOADS=(10 20 50 100 200 500 1000 2000 5000)
+EXP3_2_DISTS=("fixed:1" "fixed:5" "fixed:10" "exponential:3")
+
+EXP3_3_LOADS=(10 20 50 100 200 500 1000 2000 5000)
+EXP3_3_TABLES=(1 2 5 10 20)
+EXP3_3_REAL_PROBS=(0.0 0.1 0.3 0.5)
+
 # Quick mode parameters (for testing)
 QUICK_LOADS=(100 500 2000)
 QUICK_TABLES=(1 5 10)
+QUICK_REAL_PROBS=(0.0 0.5 1.0)
+QUICK_DISTS=("fixed:1" "exponential:3")
 QUICK_DURATION=10000  # 10 seconds
 
 # Base config files
 EXP2_1_CONFIG="experiment_configs/exp2_1_single_table_false_conflicts.toml"
 EXP2_2_CONFIG="experiment_configs/exp2_2_multi_table_false_conflicts.toml"
+EXP3_1_CONFIG="experiment_configs/exp3_1_single_table_real_conflicts.toml"
+EXP3_2_CONFIG="experiment_configs/exp3_2_manifest_count_distribution.toml"
+EXP3_3_CONFIG="experiment_configs/exp3_3_multi_table_real_conflicts.toml"
 
 # Logging
 LOG_DIR="experiment_logs"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-LOG_FILE="$LOG_DIR/baseline_experiments_${TIMESTAMP}.log"
+LOG_FILE="$LOG_DIR/experiments_${TIMESTAMP}.log"
 
 # Job tracking
 declare -a JOB_PIDS=()
@@ -82,12 +114,27 @@ while [[ $# -gt 0 ]]; do
             ;;
         --exp2.1)
             RUN_EXP2_1=true
-            RUN_EXP2_2=false
+            ANY_EXP_SPECIFIED=true
             shift
             ;;
         --exp2.2)
-            RUN_EXP2_1=false
             RUN_EXP2_2=true
+            ANY_EXP_SPECIFIED=true
+            shift
+            ;;
+        --exp3.1)
+            RUN_EXP3_1=true
+            ANY_EXP_SPECIFIED=true
+            shift
+            ;;
+        --exp3.2)
+            RUN_EXP3_2=true
+            ANY_EXP_SPECIFIED=true
+            shift
+            ;;
+        --exp3.3)
+            RUN_EXP3_3=true
+            ANY_EXP_SPECIFIED=true
             shift
             ;;
         --quick)
@@ -99,7 +146,7 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         --help|-h)
-            head -n 25 "$0" | tail -n +2
+            head -n 35 "$0" | tail -n +2
             exit 0
             ;;
         *)
@@ -110,6 +157,15 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# If no experiments specified, run all
+if [ "$ANY_EXP_SPECIFIED" = false ]; then
+    RUN_EXP2_1=true
+    RUN_EXP2_2=true
+    RUN_EXP3_1=true
+    RUN_EXP3_2=true
+    RUN_EXP3_3=true
+fi
+
 # ============================================================================
 # Setup
 # ============================================================================
@@ -117,13 +173,17 @@ done
 # Create log directory
 mkdir -p "$LOG_DIR"
 
-# Activate virtual environment
-if [ ! -f "bin/activate" ]; then
-    echo "Error: Virtual environment not found. Please run from project root."
-    exit 1
+# Check if running in Docker (no virtual environment)
+if [ -f "/.dockerenv" ] || [ -n "$DOCKER_CONTAINER" ]; then
+    echo "Running in Docker container"
+else
+    # Activate virtual environment
+    if [ ! -f "bin/activate" ]; then
+        echo "Error: Virtual environment not found. Please run from project root."
+        exit 1
+    fi
+    source bin/activate
 fi
-
-source bin/activate
 
 # Verify icecap module is available
 if ! python -c "import icecap.main" 2>/dev/null; then
@@ -255,11 +315,12 @@ create_config_variant() {
     # Apply modifications
     for mod in "${modifications[@]}"; do
         local param=$(echo "$mod" | cut -d'=' -f1)
-        local value=$(echo "$mod" | cut -d'=' -f2)
+        local value=$(echo "$mod" | cut -d'=' -f2-)
 
         # Use sed to replace parameter value
         # Handle both "param = value" and "param=value" formats
-        sed -i "s/^${param}[[:space:]]*=.*/${param} = ${value}/" "$output_file"
+        sed -i.bak "s/^${param}[[:space:]]*=.*/${param} = ${value}/" "$output_file"
+        rm -f "$output_file.bak"
     done
 }
 
@@ -274,6 +335,13 @@ if [ "$QUICK_MODE" = true ]; then
     EXP2_1_LOADS=("${QUICK_LOADS[@]}")
     EXP2_2_LOADS=("${QUICK_LOADS[@]}")
     EXP2_2_TABLES=("${QUICK_TABLES[@]}")
+    EXP3_1_LOADS=("${QUICK_LOADS[@]}")
+    EXP3_1_REAL_PROBS=("${QUICK_REAL_PROBS[@]}")
+    EXP3_2_LOADS=("${QUICK_LOADS[@]}")
+    EXP3_2_DISTS=("${QUICK_DISTS[@]}")
+    EXP3_3_LOADS=("${QUICK_LOADS[@]}")
+    EXP3_3_TABLES=("${QUICK_TABLES[@]}")
+    EXP3_3_REAL_PROBS=("${QUICK_REAL_PROBS[@]}")
 fi
 
 if [ "$RUN_EXP2_1" = true ]; then
@@ -284,25 +352,44 @@ if [ "$RUN_EXP2_2" = true ]; then
     TOTAL_RUNS=$((TOTAL_RUNS + ${#EXP2_2_LOADS[@]} * ${#EXP2_2_TABLES[@]} * NUM_SEEDS))
 fi
 
+if [ "$RUN_EXP3_1" = true ]; then
+    TOTAL_RUNS=$((TOTAL_RUNS + ${#EXP3_1_LOADS[@]} * ${#EXP3_1_REAL_PROBS[@]} * NUM_SEEDS))
+fi
+
+if [ "$RUN_EXP3_2" = true ]; then
+    TOTAL_RUNS=$((TOTAL_RUNS + ${#EXP3_2_LOADS[@]} * ${#EXP3_2_DISTS[@]} * NUM_SEEDS))
+fi
+
+if [ "$RUN_EXP3_3" = true ]; then
+    TOTAL_RUNS=$((TOTAL_RUNS + ${#EXP3_3_LOADS[@]} * ${#EXP3_3_TABLES[@]} * ${#EXP3_3_REAL_PROBS[@]} * NUM_SEEDS))
+fi
+
 # ============================================================================
 # Print Summary
 # ============================================================================
 
-log_section "BASELINE EXPERIMENTS - PHASE 2 (PARALLEL EXECUTION)"
+log_section "EXPERIMENT SUITE - PARALLEL EXECUTION"
 log "Configuration:"
 log "  Number of seeds per config: $NUM_SEEDS"
 log "  Parallel jobs: $NUM_PARALLEL"
-log "  Run Experiment 2.1: $RUN_EXP2_1"
-log "  Run Experiment 2.2: $RUN_EXP2_2"
 log "  Quick mode: $QUICK_MODE"
 log "  Dry run: $DRY_RUN"
+log ""
+log "Experiments selected:"
+log "  Phase 2 (False Conflicts):"
+log "    Exp 2.1 (Single table): $RUN_EXP2_1"
+log "    Exp 2.2 (Multi-table): $RUN_EXP2_2"
+log "  Phase 3 (Real Conflicts):"
+log "    Exp 3.1 (Single table, varying prob): $RUN_EXP3_1"
+log "    Exp 3.2 (Manifest count distribution): $RUN_EXP3_2"
+log "    Exp 3.3 (Multi-table, real conflicts): $RUN_EXP3_3"
 log ""
 log "Total simulations to run: $TOTAL_RUNS"
 
 if [ "$QUICK_MODE" = true ]; then
     AVG_TIME=15  # 15 seconds per quick run
 else
-    AVG_TIME=3600  # 1 hour per full run (updated for new duration)
+    AVG_TIME=3600  # 1 hour per full run
 fi
 
 ESTIMATED_TIME=$(estimate_duration $TOTAL_RUNS $AVG_TIME $NUM_PARALLEL)
@@ -317,29 +404,25 @@ if [ "$DRY_RUN" = false ]; then
     sleep 3
 fi
 
+CURRENT_RUN=0
+
 # ============================================================================
 # Experiment 2.1: Single Table Saturation (False Conflicts)
 # ============================================================================
 
 if [ "$RUN_EXP2_1" = true ]; then
     log_section "EXPERIMENT 2.1: Single Table Saturation (False Conflicts)"
-    log "Research Question: What is the maximum throughput for a single table?"
+    log "Research Question 1a: Maximum throughput for single table?"
     log ""
     log "Sweeping inter_arrival.scale: ${EXP2_1_LOADS[*]}"
     log "Seeds per configuration: $NUM_SEEDS"
-    log "Running up to $NUM_PARALLEL experiments in parallel"
     log ""
 
-    CURRENT_RUN=0
-
     for load in "${EXP2_1_LOADS[@]}"; do
-        log "Load: inter_arrival.scale = ${load}ms (~$((1000/load)) txn/sec offered)"
-
         for seed_num in $(seq 1 $NUM_SEEDS); do
             CURRENT_RUN=$((CURRENT_RUN + 1))
             PROGRESS="[$CURRENT_RUN/$TOTAL_RUNS]"
 
-            # Create temporary config with modified parameters
             TEMP_CONFIG=$(mktemp)
 
             if [ "$QUICK_MODE" = true ]; then
@@ -351,17 +434,13 @@ if [ "$RUN_EXP2_1" = true ]; then
                     "inter_arrival.scale=${load}"
             fi
 
-            # Wait for available job slot
             wait_for_job_slot
-
-            # Run experiment in background
             DESC="$PROGRESS Exp2.1 load=$load seed=$seed_num"
             log "  Starting: $DESC"
             run_experiment_background "$EXP2_1_CONFIG" "$TEMP_CONFIG" "$DESC"
         done
     done
 
-    log ""
     log "All Experiment 2.1 jobs submitted"
 fi
 
@@ -371,25 +450,18 @@ fi
 
 if [ "$RUN_EXP2_2" = true ]; then
     log_section "EXPERIMENT 2.2: Multi-Table Saturation (False Conflicts)"
-    log "Research Question: How does table count affect throughput?"
+    log "Research Question 2a: How does table count affect throughput?"
     log ""
     log "Sweeping num_tables: ${EXP2_2_TABLES[*]}"
     log "Sweeping inter_arrival.scale: ${EXP2_2_LOADS[*]}"
-    log "Seeds per configuration: $NUM_SEEDS"
-    log "Running up to $NUM_PARALLEL experiments in parallel"
     log ""
 
     for num_tables in "${EXP2_2_TABLES[@]}"; do
-        log "Tables: num_tables = $num_tables (num_groups = $num_tables)"
-
         for load in "${EXP2_2_LOADS[@]}"; do
-            log "  Load: inter_arrival.scale = ${load}ms"
-
             for seed_num in $(seq 1 $NUM_SEEDS); do
                 CURRENT_RUN=$((CURRENT_RUN + 1))
                 PROGRESS="[$CURRENT_RUN/$TOTAL_RUNS]"
 
-                # Create temporary config with modified parameters
                 TEMP_CONFIG=$(mktemp)
 
                 if [ "$QUICK_MODE" = true ]; then
@@ -405,10 +477,7 @@ if [ "$RUN_EXP2_2" = true ]; then
                         "inter_arrival.scale=${load}"
                 fi
 
-                # Wait for available job slot
                 wait_for_job_slot
-
-                # Run experiment in background
                 DESC="$PROGRESS Exp2.2 tables=$num_tables load=$load seed=$seed_num"
                 log "  Starting: $DESC"
                 run_experiment_background "$EXP2_2_CONFIG" "$TEMP_CONFIG" "$DESC"
@@ -416,8 +485,159 @@ if [ "$RUN_EXP2_2" = true ]; then
         done
     done
 
-    log ""
     log "All Experiment 2.2 jobs submitted"
+fi
+
+# ============================================================================
+# Experiment 3.1: Single Table with Real Conflicts
+# ============================================================================
+
+if [ "$RUN_EXP3_1" = true ]; then
+    log_section "EXPERIMENT 3.1: Single Table with Real Conflicts"
+    log "Research Question 1b: How do real conflicts shift saturation?"
+    log ""
+    log "Sweeping real_conflict_probability: ${EXP3_1_REAL_PROBS[*]}"
+    log "Sweeping inter_arrival.scale: ${EXP3_1_LOADS[*]}"
+    log ""
+
+    for prob in "${EXP3_1_REAL_PROBS[@]}"; do
+        for load in "${EXP3_1_LOADS[@]}"; do
+            for seed_num in $(seq 1 $NUM_SEEDS); do
+                CURRENT_RUN=$((CURRENT_RUN + 1))
+                PROGRESS="[$CURRENT_RUN/$TOTAL_RUNS]"
+
+                TEMP_CONFIG=$(mktemp)
+
+                if [ "$QUICK_MODE" = true ]; then
+                    create_config_variant "$EXP3_1_CONFIG" "$TEMP_CONFIG" \
+                        "real_conflict_probability=${prob}" \
+                        "inter_arrival.scale=${load}" \
+                        "duration_ms=${QUICK_DURATION}"
+                else
+                    create_config_variant "$EXP3_1_CONFIG" "$TEMP_CONFIG" \
+                        "real_conflict_probability=${prob}" \
+                        "inter_arrival.scale=${load}"
+                fi
+
+                wait_for_job_slot
+                DESC="$PROGRESS Exp3.1 prob=$prob load=$load seed=$seed_num"
+                log "  Starting: $DESC"
+                run_experiment_background "$EXP3_1_CONFIG" "$TEMP_CONFIG" "$DESC"
+            done
+        done
+    done
+
+    log "All Experiment 3.1 jobs submitted"
+fi
+
+# ============================================================================
+# Experiment 3.2: Manifest Count Distribution
+# ============================================================================
+
+if [ "$RUN_EXP3_2" = true ]; then
+    log_section "EXPERIMENT 3.2: Manifest Count Distribution"
+    log "Research Question: How does manifest count variance affect performance?"
+    log ""
+    log "Sweeping conflicting_manifests distribution: ${EXP3_2_DISTS[*]}"
+    log "Sweeping inter_arrival.scale: ${EXP3_2_LOADS[*]}"
+    log ""
+
+    for dist_config in "${EXP3_2_DISTS[@]}"; do
+        IFS=':' read -r dist value <<< "$dist_config"
+
+        for load in "${EXP3_2_LOADS[@]}"; do
+            for seed_num in $(seq 1 $NUM_SEEDS); do
+                CURRENT_RUN=$((CURRENT_RUN + 1))
+                PROGRESS="[$CURRENT_RUN/$TOTAL_RUNS]"
+
+                TEMP_CONFIG=$(mktemp)
+
+                if [ "$dist" = "fixed" ]; then
+                    if [ "$QUICK_MODE" = true ]; then
+                        create_config_variant "$EXP3_2_CONFIG" "$TEMP_CONFIG" \
+                            "conflicting_manifests.distribution=\"${dist}\"" \
+                            "conflicting_manifests.value=${value}" \
+                            "inter_arrival.scale=${load}" \
+                            "duration_ms=${QUICK_DURATION}"
+                    else
+                        create_config_variant "$EXP3_2_CONFIG" "$TEMP_CONFIG" \
+                            "conflicting_manifests.distribution=\"${dist}\"" \
+                            "conflicting_manifests.value=${value}" \
+                            "inter_arrival.scale=${load}"
+                    fi
+                else  # exponential
+                    if [ "$QUICK_MODE" = true ]; then
+                        create_config_variant "$EXP3_2_CONFIG" "$TEMP_CONFIG" \
+                            "conflicting_manifests.distribution=\"${dist}\"" \
+                            "conflicting_manifests.mean=${value}" \
+                            "inter_arrival.scale=${load}" \
+                            "duration_ms=${QUICK_DURATION}"
+                    else
+                        create_config_variant "$EXP3_2_CONFIG" "$TEMP_CONFIG" \
+                            "conflicting_manifests.distribution=\"${dist}\"" \
+                            "conflicting_manifests.mean=${value}" \
+                            "inter_arrival.scale=${load}"
+                    fi
+                fi
+
+                wait_for_job_slot
+                DESC="$PROGRESS Exp3.2 dist=$dist_config load=$load seed=$seed_num"
+                log "  Starting: $DESC"
+                run_experiment_background "$EXP3_2_CONFIG" "$TEMP_CONFIG" "$DESC"
+            done
+        done
+    done
+
+    log "All Experiment 3.2 jobs submitted"
+fi
+
+# ============================================================================
+# Experiment 3.3: Multi-Table with Real Conflicts
+# ============================================================================
+
+if [ "$RUN_EXP3_3" = true ]; then
+    log_section "EXPERIMENT 3.3: Multi-Table with Real Conflicts"
+    log "Research Question 2b: How do real conflicts compound in multi-table txns?"
+    log ""
+    log "Sweeping num_tables: ${EXP3_3_TABLES[*]}"
+    log "Sweeping real_conflict_probability: ${EXP3_3_REAL_PROBS[*]}"
+    log "Sweeping inter_arrival.scale: ${EXP3_3_LOADS[*]}"
+    log ""
+
+    for num_tables in "${EXP3_3_TABLES[@]}"; do
+        for prob in "${EXP3_3_REAL_PROBS[@]}"; do
+            for load in "${EXP3_3_LOADS[@]}"; do
+                for seed_num in $(seq 1 $NUM_SEEDS); do
+                    CURRENT_RUN=$((CURRENT_RUN + 1))
+                    PROGRESS="[$CURRENT_RUN/$TOTAL_RUNS]"
+
+                    TEMP_CONFIG=$(mktemp)
+
+                    if [ "$QUICK_MODE" = true ]; then
+                        create_config_variant "$EXP3_3_CONFIG" "$TEMP_CONFIG" \
+                            "num_tables=${num_tables}" \
+                            "num_groups=${num_tables}" \
+                            "real_conflict_probability=${prob}" \
+                            "inter_arrival.scale=${load}" \
+                            "duration_ms=${QUICK_DURATION}"
+                    else
+                        create_config_variant "$EXP3_3_CONFIG" "$TEMP_CONFIG" \
+                            "num_tables=${num_tables}" \
+                            "num_groups=${num_tables}" \
+                            "real_conflict_probability=${prob}" \
+                            "inter_arrival.scale=${load}"
+                    fi
+
+                    wait_for_job_slot
+                    DESC="$PROGRESS Exp3.3 tables=$num_tables prob=$prob load=$load seed=$seed_num"
+                    log "  Starting: $DESC"
+                    run_experiment_background "$EXP3_3_CONFIG" "$TEMP_CONFIG" "$DESC"
+                done
+            done
+        done
+    done
+
+    log "All Experiment 3.3 jobs submitted"
 fi
 
 # ============================================================================
@@ -430,24 +650,50 @@ wait_for_all_jobs
 # Final Summary
 # ============================================================================
 
-log_section "BASELINE EXPERIMENTS COMPLETE"
+log_section "EXPERIMENTS COMPLETE"
 log "Total runs: $TOTAL_RUNS"
 log "  Successful: $JOB_SUCCESS"
 log "  Failed: $JOB_FAILED"
 log ""
 log "Results stored in: experiments/"
-log "  exp2_1_single_table_false-*/"
-log "  exp2_2_multi_table_false-*/"
-log ""
-log "Note: Interrupted runs leave .running.parquet files that can be safely deleted"
+
+if [ "$RUN_EXP2_1" = true ]; then
+    log "  exp2_1_single_table_false-*/"
+fi
+if [ "$RUN_EXP2_2" = true ]; then
+    log "  exp2_2_multi_table_false-*/"
+fi
+if [ "$RUN_EXP3_1" = true ]; then
+    log "  exp3_1_single_table_real-*/"
+fi
+if [ "$RUN_EXP3_2" = true ]; then
+    log "  exp3_2_manifest_count_distribution-*/"
+fi
+if [ "$RUN_EXP3_3" = true ]; then
+    log "  exp3_3_multi_table_real-*/"
+fi
+
 log ""
 log "Next steps:"
 log "  1. Verify results: find experiments/ -name 'results.parquet' | wc -l"
 log "  2. Check for incomplete runs: find experiments/ -name '.running.parquet'"
-log "  3. Run analysis: python -m icecap.saturation_analysis -i experiments -p 'exp2_1_*' -o plots/exp2_1"
-log "  4. Generate visualizations for all experiments"
+log "  3. Run analysis:"
+if [ "$RUN_EXP2_1" = true ]; then
+    log "     python -m icecap.saturation_analysis -i experiments -p 'exp2_1_*' -o plots/exp2_1"
+fi
+if [ "$RUN_EXP2_2" = true ]; then
+    log "     python -m icecap.saturation_analysis -i experiments -p 'exp2_2_*' -o plots/exp2_2 --group-by num_tables"
+fi
+if [ "$RUN_EXP3_1" = true ]; then
+    log "     python -m icecap.saturation_analysis -i experiments -p 'exp3_1_*' -o plots/exp3_1 --group-by real_conflict_probability"
+fi
+if [ "$RUN_EXP3_3" = true ]; then
+    log "     python -m icecap.saturation_analysis -i experiments -p 'exp3_3_*' -o plots/exp3_3 --group-by num_tables,real_conflict_probability"
+fi
 
 if [ "$DRY_RUN" = true ]; then
     log ""
     log "DRY RUN COMPLETE - No experiments were actually executed"
 fi
+
+exit 0
