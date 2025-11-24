@@ -2,7 +2,10 @@
   "permissions": {
     "allow": [
       "Bash(scripts/warmup_validation.py)",
-      "Bash(python scripts/warmup_validation.py:*)"
+      "Bash(python scripts/warmup_validation.py:*)",
+      "Bash(git log:*)",
+      "Bash(for commit in 976667a a3dc85f 2895a4f 861be8b)",
+      "Bash(do echo '=== $commit ===' git show $commit:icecap/main.py)"
     ],
     "deny": [],
     "ask": []
