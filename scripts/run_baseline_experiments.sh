@@ -174,9 +174,9 @@ run_experiment_background() {
         return 0
     fi
 
-    # Run simulation in background (auto-confirm with 'Y')
+    # Run simulation in background (auto-confirm with 'Y', disable progress bar for clean logs)
     {
-        echo "Y" | python -m icecap.main "$output_file" >> "$LOG_FILE" 2>&1
+        echo "Y" | python -m icecap.main --no-progress "$output_file" >> "$LOG_FILE" 2>&1
         exit_code=$?
 
         # Write result to temp file
