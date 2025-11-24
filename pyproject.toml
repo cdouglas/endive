@@ -1,4 +1,26 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "icecap"
+version = "0.1.0"
+description = "Iceberg Catalog Simulator - Saturation Experiments"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "numpy",
+    "pandas",
+    "matplotlib",
+    "pyarrow",
+    "scipy",
+    "pytest",
+]
+
 [project.scripts]
 icecap = "icecap.main:cli"
 icecap-experiment = "icecap.experiment:cli"
 icecap-analysis = "icecap.analysis:cli"
+
+[tool.setuptools]
+packages = ["icecap"]
