@@ -1,5 +1,49 @@
 # Analysis Plan: Iceberg Transaction Throughput Limits
 
+## Current Status (Updated 2025-01)
+
+### ✅ Completed
+
+**Phase 1 - Simulator Implementation:**
+- ✅ Real vs false conflict distinction implemented
+- ✅ Variable conflicting manifest distribution
+- ✅ Statistics tracking (false_conflicts, real_conflicts, manifest I/O)
+- ✅ Configuration parameters working
+
+**Phase 2 - Baseline Experiments (False Conflicts):**
+- ✅ Exp 2.1: Single-table saturation (9 loads × 5 seeds = 45 runs)
+- ✅ Exp 2.2: Multi-table scaling (54 configs × 5 seeds = 270 runs... but only 9+54 unique configs run)
+- ✅ Analysis: Saturation curves, overhead measurement, markdown tables
+- ✅ Docker support for containerized execution
+
+### 📊 Key Findings
+
+**Question 1a (Single-table, false conflicts)**: ✅ **ANSWERED**
+- Peak throughput: ~60 commits/sec
+- Saturation: 55-60 c/s (50% success rate)
+- Overhead at saturation: 26% (commit protocol takes 1/4 of time)
+- **Bottleneck**: Contention, not catalog speed
+
+**Question 2a (Multi-table, false conflicts)**: ✅ **ANSWERED**
+- Throughput scales sub-linearly: 50× tables → 2.3× throughput
+- Sweet spot: 10-20 tables
+- **Latency paradox**: More tables = higher throughput but WORSE tail latency
+- Overhead at 50 tables: 59% (commit takes MORE time than transaction!)
+
+### 🔬 Ready to Run
+
+**Phase 3 - Real Conflict Experiments:**
+- ⏳ Exp 3.1: Single-table real conflicts (Question 1b)
+- ⏳ Exp 3.2: Manifest count distribution variance
+- ⏳ Exp 3.3: Multi-table real conflicts (Question 2b)
+
+**Outstanding questions:**
+- How do real conflicts shift saturation point?
+- Cost difference: false (~1ms) vs real (~400ms)?
+- How do real conflicts compound in multi-table transactions?
+
+---
+
 ## Research Goal
 Characterize workloads that could (not) be supported by a storage-only catalog and understand the fundamental per-table throughput limits of Iceberg-style optimistic concurrency control.
 
@@ -46,55 +90,77 @@ Characterize workloads that could (not) be supported by a storage-only catalog a
 4. **Multi-table**: Transactions can access multiple tables with proper conflict detection
 5. **Configurable latencies**: All storage operations have realistic latency distributions
 
-### ⚠️ Critical Gaps Blocking Research Questions
+### ✅ Previously Identified Gaps (NOW IMPLEMENTED)
 
-#### Gap 1: Real vs False Conflict Distinction (CRITICAL)
+#### Gap 1: Real vs False Conflict Distinction → ✅ IMPLEMENTED
 
-**Current behavior** (`icecap/main.py:499-529`):
+**Implementation** (`icecap/main.py:627-719`):
 ```python
 def merge_table_conflicts(sim, txn, v_catalog):
     for t, v in txn.v_dirty.items():
         if v_catalog[t] != v:
-            # ALWAYS does full merge for any version mismatch:
-            yield sim.timeout(get_metadata_root_latency('read'))
-            yield sim.timeout(get_manifest_list_latency('read'))
-            yield sim.timeout(get_manifest_file_latency('read'))  # ← Real conflict
-            yield sim.timeout(get_manifest_file_latency('write')) # ← Real conflict
-            yield sim.timeout(get_manifest_list_latency('write'))
+            # Determine if this is a real conflict
+            is_real_conflict = np.random.random() < REAL_CONFLICT_PROBABILITY
+
+            if is_real_conflict:
+                yield from ConflictResolver.resolve_real_conflict(sim, txn, t, v_catalog)
+                STATS.real_conflicts += 1
+            else:
+                yield from ConflictResolver.resolve_false_conflict(sim, txn, t, v_catalog)
+                STATS.false_conflicts += 1
 ```
 
-**Problem**: This treats ALL conflicts as real conflicts requiring manifest file operations.
+**False conflict** (line 649):
+- Reads metadata root only
+- No manifest file operations
+- Cost: ~1ms (with infinitely fast catalog)
 
-**What should happen**:
-- **False conflict** (version changed, no data overlap):
-  - Manifest lists already read in `read_manifest_lists()`
-  - Just need to update metadata, no manifest file operations
-  - Cost: ~100ms (manifest list operations only)
+**Real conflict** (line 671):
+- Samples conflicting manifest count from distribution
+- Reads manifest list
+- Reads/writes N manifest files (respects MAX_PARALLEL)
+- Cost: ~400ms+ depending on N
 
-- **Real conflict** (overlapping data changes):
-  - Must read conflicting manifest files to merge
-  - Rewrite merged manifest files
-  - Update manifest lists
-  - Cost: ~500ms+ (depends on number of conflicting manifests)
+**Now can answer**:
+- ✅ Question 1a: False conflicts only (real_conflict_probability = 0.0)
+- ✅ Question 1b: Variable real conflict probability (0.0 to 1.0)
+- ✅ Cost measurement: Statistics track false vs real conflicts separately
 
-**Impact on research questions**:
-- ❌ Cannot answer 1a correctly: "false conflicts only" currently does too much work
-- ❌ Cannot answer 1b at all: no way to vary real conflict probability
-- ❌ Cannot measure cost difference between false and real conflicts
+#### Gap 2: Variable Conflict Resolution Cost → ✅ IMPLEMENTED
 
-#### Gap 2: Variable Conflict Resolution Cost
+**Implementation** (`icecap/main.py:235-250`):
+```python
+def sample_conflicting_manifests() -> int:
+    dist = CONFLICTING_MANIFESTS_DIST
+    params = CONFLICTING_MANIFESTS_PARAMS
 
-**Current**: Fixed number of manifest operations per conflict
-**Needed**: Distribution of conflicting manifests (e.g., exponential with mean=3)
-**Impact**: Cannot model realistic variance in retry costs
+    if dist == "fixed":
+        return int(params['value'])
+    elif dist == "exponential":
+        value = np.random.exponential(params['mean'])
+        return max(params['min'], min(params['max'], int(value)))
+    elif dist == "uniform":
+        return np.random.randint(params['min'], params['max'] + 1)
+```
 
-#### Gap 3: Manifest List Already Read
+**Configuration**:
+```toml
+conflicting_manifests.distribution = "exponential"  # or "uniform", "fixed"
+conflicting_manifests.mean = 3.0
+conflicting_manifests.min = 1
+conflicting_manifests.max = 10
+```
 
-**Current issue**: `merge_table_conflicts()` reads manifest lists AGAIN after `read_manifest_lists()` already read them
-**Should be**:
-- `read_manifest_lists()` reads n lists for n snapshots (once)
-- `merge_table_conflicts()` should skip manifest list read for false conflicts
-- Only read additional manifest files for real conflicts
+**Now can model**: Realistic variance in manifest merge cost
+
+#### Gap 3: Manifest List Already Read → ✅ RESOLVED
+
+**Current behavior**:
+- `read_manifest_lists()` reads n lists for n snapshots behind (line 443-452)
+- For **false conflicts**: Only read metadata root (line 665)
+- For **real conflicts**: Read manifest list for file pointers (line 693)
+
+**This is correct**: False conflicts skip redundant manifest list reads
 
 ### ✅ What Works for Baseline Experiments
 

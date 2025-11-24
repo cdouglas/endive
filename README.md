@@ -1,399 +1,245 @@
 # Icecap: Iceberg Catalog Simulator
 
-A discrete-event simulator for exploring commit latency tradeoffs in shared-storage catalog formats like Apache Iceberg. The simulator models optimistic concurrency control (OCC) with compare-and-swap (CAS) operations, conflict resolution, and retry logic.
+A discrete-event simulator for characterizing throughput limits and commit latency in Apache Iceberg's optimistic concurrency control under varying workloads.
 
-## 📚 Documentation
+## What This Simulates
 
-Complete documentation is available in the [`docs/`](docs/) directory:
+Apache Iceberg uses optimistic concurrency control (OCC) with compare-and-swap (CAS) operations. When multiple writers commit simultaneously to the same table:
 
-- **[Quick Start Guide](QUICKSTART.md)** - Get started in minutes
-- **[Quick Reference](QUICK_REFERENCE.md)** - Common commands and file locations
-- **[Running Experiments](docs/RUNNING_EXPERIMENTS.md)** - Execute baseline experiments with parallel execution
-- **[Analysis Guide](docs/ANALYSIS_GUIDE.md)** - Analyze results and generate plots
-- **[Warmup Period Analysis](docs/WARMUP_PERIOD.md)** - Steady-state measurement methodology
-- **[Documentation Index](docs/README.md)** - Complete documentation reference
-- **[Research Plan](ANALYSIS_PLAN.md)** - Research methodology and experiment design
+1. Failed CAS triggers conflict resolution
+2. Transaction reads manifest lists for missed snapshots
+3. For **false conflicts** (version changed, no data overlap): reads metadata only (~1ms)
+4. For **real conflicts** (overlapping changes): reads and rewrites manifest files (~400ms+)
+5. Transaction retries commit with exponential backoff
 
-## Overview
+This simulator explores: **When does commit throughput saturate? What causes latency to explode?**
 
-When multiple writers attempt to commit changes to an Iceberg table simultaneously, conflicts can occur. A failed pointer swap at the catalog requires additional round trips to:
+## Key Findings
 
-1. Read the manifest file (JSON)
-2. Merge the old snapshot and write a new manifest file
-3. Read the manifest list
-4. Merge the updated manifest list with changes in this transaction
-5. For all conflicts in manifest files: merge and rewrite manifest files
-6. Retry the pointer swap at the catalog
+### Single-Table Saturation (Question 1a ✅)
 
-This simulator helps explore how different parameters (number of concurrent clients, catalog latency, table distribution) affect end-to-end commit latency and success rates.
+**Peak throughput: ~60 commits/sec** with infinitely fast catalog (1ms CAS)
 
-## Key Features
+- **Efficient operating point**: 50 c/s @ 76% success rate, P95 latency = 131s
+- **Saturation threshold**: 55-60 c/s (50% success rate)
+- **At saturation**: 26% overhead (1/4 of time spent retrying commits)
+- **Bottleneck**: Contention, not catalog speed
 
-✅ **Parallel Execution** - Run experiments concurrently (8x faster with 8 cores)
-✅ **Warmup Period Analysis** - Steady-state measurement with transient filtering
-✅ **Saturation Analysis** - Identify throughput limits and latency scaling
-✅ **Experiment Organization** - Deterministic hashing with multi-seed support
-✅ **Comprehensive Testing** - 63 tests covering all major functionality
-✅ **Interruptible Runs** - Safe Ctrl+C with partial result detection
+### Multi-Table Scaling (Question 2a ✅)
 
-## Installation
+**Throughput scales sub-linearly** with table count
 
-```bash
-# Create virtual environment
-python3 -m venv .
+| Tables | Throughput | Scaling Efficiency | Overhead @ Saturation |
+|--------|------------|-------------------|----------------------|
+| 1 | 62 c/s | baseline | 26% |
+| 2 | 94 c/s | 76% | 39% |
+| 5 | 111 c/s | 32% | 46% |
+| 10 | 121 c/s | 19% | 50% |
+| 20 | 131 c/s | 11% | 54% |
+| 50 | 144 c/s | 5% | **59%** |
 
-# Activate virtual environment
-source bin/activate  # Linux/Mac
-# or
-.\Scripts\activate  # Windows
+**Key insight**: 50× more tables → only 2.3× throughput. Sweet spot: 10-20 tables.
 
-# Install dependencies
-pip install -r requirements.txt
+**The Latency Paradox**: More tables increase throughput but WORSEN tail latency
+- Why? Multi-table coordination cost dominates at high load
+- At 50 tables: Commit protocol takes MORE time than transaction execution (59% overhead)
 
-# Install package (for CLI tools)
-pip install -e .
-```
+### Outstanding Questions (Ready to Answer)
+
+**Questions 1b & 2b** (Real conflicts) - Simulator ready, experiments not yet run:
+- How do real conflicts shift saturation point?
+- Cost difference: false (~1ms) vs real (~400ms)?
+- How do real conflicts interact with table count?
 
 ## Quick Start
 
-### 1. Run a Single Simulation
-
 ```bash
-# Use default configuration (cfg.toml)
-python -m icecap.main cfg.toml
+# Setup
+python3 -m venv .
+source bin/activate
+pip install -r requirements.txt
+pip install -e .
 
-# Use custom configuration
-python -m icecap.main my_config.toml
-
-# Skip confirmation prompt (for automation)
-echo "Y" | python -m icecap.main my_config.toml
-```
-
-**Output:**
-- Results written to `.running.parquet` during execution
-- Renamed to `results.parquet` on successful completion
-- Interrupted runs leave `.running.parquet` for easy cleanup
-
-### 2. Run Baseline Experiments (Parallel)
-
-```bash
-# Run all baseline experiments with default parallelism (# of CPU cores)
+# Run baseline experiments (24 hours with 8 cores)
 ./scripts/run_baseline_experiments.sh --seeds 3
 
-# Limit to 4 parallel jobs
-./scripts/run_baseline_experiments.sh --parallel 4 --seeds 3
+# Analyze results
+python -m icecap.saturation_analysis -i experiments -p "exp2_1_*" -o plots/exp2_1
+python -m icecap.saturation_analysis -i experiments -p "exp2_2_*" -o plots/exp2_2 --group-by num_tables
 
-# Run in background
-nohup ./scripts/run_baseline_experiments.sh --seeds 3 > baseline.log 2>&1 &
+# View results
+open plots/exp2_1/latency_vs_throughput.png
+cat plots/exp2_1/experiment_index.csv
+```
 
-# Quick test (shorter simulations, fewer configs)
+**Quick test (2 minutes)**:
+```bash
 ./scripts/run_baseline_experiments.sh --quick --seeds 1
 ```
 
-**Time Estimates:**
-- Full baseline (3 seeds): ~24 hours with 8 cores (~8 days sequential)
-- Quick test: ~2 minutes
+## Docker
 
-### 3. Analyze Results
+Run experiments in containers:
 
 ```bash
-# Generate saturation analysis for single-table experiments
-python -m icecap.saturation_analysis \
-    -i experiments \
-    -p "exp2_1_*" \
-    -o plots/exp2_1
+# Build and run baseline experiments
+docker-compose up
 
-# Generate saturation analysis for multi-table experiments (grouped)
-python -m icecap.saturation_analysis \
-    -i experiments \
-    -p "exp2_2_*" \
-    -o plots/exp2_2 \
-    --group-by num_tables
+# Run analysis only (after experiments complete)
+docker-compose run --rm analyze
 
-# Validate warmup period for an experiment
-python -m icecap.warmup_validation \
-    experiments/exp2_1_single_table_false-abc123/12345
+# Run conformance tests
+docker-compose run --rm test
 ```
 
-**Outputs:**
-- `experiment_index.csv` - Summary statistics for all experiments
-- `latency_vs_throughput.png` - P50/P95/P99 latency curves
-- `success_rate_vs_throughput.png` - Success rate degradation
-- `success_rate_vs_load.png` - Success rate vs offered load
+See [docs/DOCKER.md](docs/DOCKER.md) for details.
 
-### 4. Verify Results
+## Documentation
 
-```bash
-# Count completed experiments
-find experiments/ -name 'results.parquet' | wc -l
+### Getting Started
+- **[docs/QUICKSTART.md](docs/QUICKSTART.md)** - Installation, first simulation, analysis
+- **[docs/DOCKER.md](docs/DOCKER.md)** - Container-based execution
 
-# Check for incomplete runs (interrupted simulations)
-find experiments/ -name '.running.parquet'
+### Understanding Results
+- **[docs/BASELINE_RESULTS.md](docs/BASELINE_RESULTS.md)** - Detailed findings from Exp 2.1 & 2.2
+- **[docs/OVERHEAD_ANALYSIS.md](docs/OVERHEAD_ANALYSIS.md)** - Commit protocol overhead breakdown
 
-# Clean up incomplete runs
-find experiments/ -name '.running.parquet' -delete
-```
+### Research & Design
+- **[docs/ANALYSIS_PLAN.md](docs/ANALYSIS_PLAN.md)** - Research questions and methodology
+- **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** - Simulator design and invariants
+- **[docs/SNAPSHOT_VERSIONING.md](docs/SNAPSHOT_VERSIONING.md)** - Version tracking details
 
-## Configuration
+### Configuration & Experiments
+- **[experiment_configs/README.md](experiment_configs/README.md)** - Experiment templates
+- **[docs/WARMUP_PERIOD.md](docs/WARMUP_PERIOD.md)** - Steady-state measurement methodology
 
-The simulator uses TOML configuration files. Key parameters:
-
-### Simulation Parameters
-
-```toml
-[simulation]
-duration_ms = 3600000        # 1 hour (for stable statistics)
-output_path = "results.parquet"
-seed = null                  # Random seed (null = random)
-```
-
-### Experiment Organization
-
-```toml
-[experiment]
-# Optional experiment label for organized output
-# Output goes to: experiments/$label-$hash/$seed/results.parquet
-label = "exp2_1_single_table_false"
-```
-
-**Benefits:**
-- **Reproducibility**: Same config + code → same hash
-- **Multi-seed support**: Multiple runs organized under same experiment
-- **Code versioning**: Hash changes when simulator changes
-
-### Catalog Configuration
-
-```toml
-[catalog]
-num_tables = 10              # Number of tables in catalog
-num_groups = 1               # Conflict detection granularity
-group_size_distribution = "uniform"  # or "longtail"
-```
-
-**Conflict Granularity:**
-- `num_groups = 1`: Catalog-level conflicts (all transactions conflict)
-- `num_groups = T`: Table-level conflicts (only same-table transactions conflict)
-- `1 < num_groups < T`: Group-level isolation (multi-tenant modeling)
-
-### Transaction Parameters
-
-```toml
-[transaction]
-retry = 10                   # Maximum retries
-
-# Transaction runtime (lognormal distribution)
-# Realistic Iceberg transactions: 30s - 3min
-runtime.min = 30000          # 30 seconds minimum
-runtime.mean = 180000        # 3 minutes mean
-runtime.sigma = 1.5
-
-# Inter-arrival time (offered load)
-inter_arrival.distribution = "exponential"
-inter_arrival.scale = 500.0  # Mean inter-arrival (ms)
-
-# Conflict types
-real_conflict_probability = 0.0  # 0.0 = all false conflicts
-```
-
-**False vs Real Conflicts:**
-- **False conflicts**: Version changed, no data overlap (~100ms to retry)
-- **Real conflicts**: Overlapping data changes, requires manifest merge (~500ms+)
-
-### Storage Latencies
-
-```toml
-[storage]
-max_parallel = 4             # Parallel manifest operations
-
-# Infinitely fast catalog (baseline)
-T_CAS.mean = 1
-T_CAS.stddev = 0.1
-
-# Realistic S3 latencies
-T_MANIFEST_LIST.read.mean = 50
-T_MANIFEST_LIST.read.stddev = 5
-T_MANIFEST_FILE.read.mean = 50
-T_MANIFEST_FILE.read.stddev = 5
-```
-
-## Warmup Period Methodology
-
-The simulator automatically applies a **warmup period filter** during analysis to exclude initial transient behavior:
-
-```python
-warmup_duration = max(5min, min(3 × mean_runtime, 15min))
-```
-
-**For baseline experiments** (runtime.mean = 180s):
-- Warmup: **9 minutes** (15% excluded)
-- Active window: **51 minutes** (85% analyzed)
-
-This ensures steady-state measurements by allowing:
-- Queue depths to stabilize
-- Contention to reach equilibrium
-- Latency distributions to converge
-
-**Validation:**
-```bash
-python -m icecap.warmup_validation experiments/exp2_1_*/12345
-```
-
-See [`docs/WARMUP_PERIOD.md`](docs/WARMUP_PERIOD.md) for detailed methodology.
-
-## Analysis Capabilities
-
-### Saturation Analysis
-
-Generates latency vs throughput curves to identify system limits:
-
-```bash
-python -m icecap.saturation_analysis -i experiments -p "exp2_*" -o plots
-```
-
-**Metrics computed:**
-- Achieved throughput (commits/sec)
-- Success rate (% committed)
-- Commit latency (P50, P95, P99)
-- Mean retries per transaction
-- Saturation point (50% success threshold)
-
-### Warmup Validation
-
-Visualizes metric convergence over time:
-
-```bash
-python -m icecap.warmup_validation experiments/exp2_1_*/12345 --window-size 60
-```
-
-**Outputs:**
-- Throughput over time
-- Success rate over time
-- Latency convergence
-- Statistical stability analysis
+### Complete Index
+- **[docs/README.md](docs/README.md)** - Full documentation index
 
 ## Project Structure
 
 ```
-.
-├── icecap/                  # Core simulator code
-│   ├── main.py              # Simulation engine
-│   ├── capstats.py          # Statistics collection
-│   ├── saturation_analysis.py  # Saturation analysis
-│   └── warmup_validation.py    # Warmup validation
-├── scripts/                 # Automation scripts
-│   ├── run_baseline_experiments.sh  # Parallel experiment runner
-│   └── monitor_experiments.sh       # Progress monitoring
-├── experiment_configs/      # Experiment templates
+icecap/
+├── icecap/                     # Core simulator
+│   ├── main.py                 # Simulation engine (OCC, CAS, conflict resolution)
+│   ├── capstats.py             # Statistics collection
+│   ├── saturation_analysis.py  # Saturation curve generation
+│   └── warmup_validation.py    # Steady-state validation
+├── experiment_configs/         # Experiment templates
 │   ├── exp2_1_single_table_false_conflicts.toml
-│   └── exp2_2_multi_table_false_conflicts.toml
-├── tests/                   # Test suite (63 tests)
-├── docs/                    # Documentation
-├── experiments/             # Results (created at runtime)
-└── plots/                   # Analysis outputs
+│   ├── exp2_2_multi_table_false_conflicts.toml
+│   ├── exp3_1_single_table_real_conflicts.toml   # Ready to run
+│   └── exp3_3_multi_table_real_conflicts.toml    # Ready to run
+├── scripts/                    # Automation
+│   ├── run_baseline_experiments.sh  # Parallel experiment runner
+│   └── plot_distributions.py        # Distribution visualization
+├── tests/                      # Test suite (63 tests)
+├── docs/                       # Documentation
+├── experiments/                # Results (189 baseline runs completed)
+└── plots/                      # Analysis outputs
+```
 
+## Current Status
+
+### ✅ Completed
+- Core simulator with real/false conflict distinction
+- Baseline experiments (Exp 2.1 & 2.2): 189 simulations across 5 seeds
+- Saturation analysis with overhead measurement
+- Distribution conformance tests
+- Comprehensive documentation
+- Docker support
+
+### 📊 Available Results
+- **Single-table saturation**: 60 c/s peak, 26% overhead
+- **Multi-table scaling**: Sub-linear with coordination cost paradox
+- **Latency curves**: P50/P95/P99 vs throughput with success rates
+- **Overhead analysis**: Commit protocol cost scaling with table count
+
+### 🔬 Ready to Run
+- **Exp 3.1**: Single-table real conflicts (Question 1b)
+- **Exp 3.2**: Manifest count distribution variance
+- **Exp 3.3**: Multi-table real conflicts (Question 2b)
+
+## Key Configuration Parameters
+
+```toml
+[catalog]
+num_tables = 10        # Number of tables
+num_groups = 10        # Conflict granularity (=num_tables for table-level)
+
+[transaction]
+retry = 10             # Maximum retries
+runtime.mean = 180000  # 3 minutes (realistic Iceberg transactions)
+inter_arrival.scale = 500.0  # Offered load (~2 txn/sec)
+
+# Conflict types
+real_conflict_probability = 0.0  # 0.0=false only, 1.0=real only
+
+# For real conflicts
+conflicting_manifests.distribution = "exponential"
+conflicting_manifests.mean = 3.0
+
+[storage]
+max_parallel = 4       # Parallel manifest operations
+
+# Infinitely fast catalog (baseline)
+T_CAS.mean = 1
+T_METADATA_ROOT.read.mean = 1
+
+# Realistic S3 storage
+T_MANIFEST_LIST.read.mean = 50
+T_MANIFEST_FILE.read.mean = 50
 ```
 
 ## Testing
 
 ```bash
-# Run all tests (63 tests)
-pytest tests/ -v
-
-# Run with coverage
-pytest tests/ --cov=icecap --cov-report=html
-
-# Run specific test module
-pytest tests/test_saturation_analysis.py -v
+pytest tests/ -v                    # All 63 tests
+pytest tests/ --cov=icecap          # With coverage
 ```
 
-**Test coverage:**
-- Core simulation (determinism, conflict types)
-- Conflict resolution (CAS failures, retries)
-- Experiment organization (hashing, directory structure)
-- Analysis pipeline (parameter extraction, aggregation)
-- Warmup period calculation
-
-## Architecture
-
-### Simulation Engine (SimPy)
-
-- **Discrete-event simulation** using SimPy framework
-- **Transaction lifecycle**: Submit → Execute → Commit (with retries)
-- **Conflict detection**: CAS failures trigger retry logic
-- **Resource modeling**: Catalog operations with configurable latencies
-
-### Experiment Organization
-
-- **Deterministic hashing**: Config + code → 8-char hash
-- **Multi-seed support**: Multiple runs under same experiment
-- **Atomic writes**: `.running.parquet` → `results.parquet` on completion
-
-### Analysis Pipeline
-
-1. **Scan experiments**: Find all matching experiment directories
-2. **Extract parameters**: Parse `cfg.toml` from each experiment
-3. **Load results**: Aggregate across seeds with warmup filtering
-4. **Compute statistics**: Throughput, latency percentiles, success rates
-5. **Generate visualizations**: Latency curves, saturation points
-
-## Research Applications
-
-The simulator supports investigating:
-
-1. **Saturation analysis**: When does throughput plateau?
-2. **Latency scaling**: How does P99 latency grow with load?
-3. **Multi-table scaling**: Does parallelism reduce contention?
-4. **Conflict resolution costs**: Impact of false vs real conflicts
-5. **Catalog performance**: Sensitivity to catalog latencies
-
-See [`ANALYSIS_PLAN.md`](ANALYSIS_PLAN.md) for full research methodology.
-
-## Experimental Results
-
-**Baseline experiments** (Phase 2) characterize:
-- Single table saturation with false conflicts
-- Multi-table scaling (1, 2, 5, 10, 20, 50 tables)
-- Load sweep (10ms to 5000ms inter-arrival)
-- 3 seeds per configuration for statistical confidence
-
-**Key findings** (example):
-- Single table saturates at ~75 commits/sec (50% success)
-- Multi-table provides ~linear scaling up to contention threshold
-- P99 latency increases exponentially approaching saturation
+**Test coverage**: Core simulation, conflict resolution, experiment organization, analysis pipeline, warmup calculation
 
 ## Performance
 
-**Simulation speed:**
-- ~100,000 transactions in 100 seconds simulated time
-- Real-time factor: ~1000x (100s simulation in 0.1s wall-clock)
+- **Simulation speed**: ~1000× real-time (1 hour simulated in ~3.6 seconds)
+- **Parallel execution**: ~8× speedup with 8 cores
+- **Baseline runtime**: 24 hours with 8 cores (vs 8 days sequential)
 
-**Parallel execution:**
-- 8 cores: 189 experiments in ~24 hours
-- Sequential: Same experiments in ~8 days
-- Speedup: ~8x (linear scaling)
+## Practical Implications
 
-## Contributing
+### For Iceberg Users
+- **Target load**: <30 commits/sec per table for good latency (P95 < 90s)
+- **Acceptable range**: 30-50 c/s with degrading performance
+- **Saturation zone**: 50-60 c/s (high retries, exponential latency growth)
+- **Thrashing**: >60 c/s (>80% abort rate)
 
-Run tests before committing:
-```bash
-pytest tests/ -v
-```
+### For Catalog Designers
+- **Faster catalogs help, but...** contention dominates above 50 c/s
+- **Multi-table helps, but...** coordination overhead limits scaling
+- **False conflicts cost less** but still expensive at scale (26% overhead @ saturation)
+- **Real conflicts will shift** saturation point significantly lower (experiments pending)
 
-Update documentation for:
-- New configuration parameters
-- Analysis methods
-- Experiment templates
+## Research Questions
 
-## License
+This simulator was designed to answer:
 
-(Add license information here)
+1. **When does a single table saturate?** ✅ ~60 c/s with false conflicts
+   - 1a. False conflicts only ✅ Answered (Exp 2.1)
+   - 1b. With real conflicts ⏳ Ready to run (Exp 3.1)
+
+2. **When do multi-table transactions saturate?** ✅ Sub-linear scaling
+   - 2a. False conflicts only ✅ Answered (Exp 2.2)
+   - 2b. With real conflicts ⏳ Ready to run (Exp 3.3)
+
+See [docs/ANALYSIS_PLAN.md](docs/ANALYSIS_PLAN.md) for complete methodology.
 
 ## Citation
 
-(Add citation information here)
+(Add citation information here when published)
 
 ## References
 
 - **Apache Iceberg**: https://iceberg.apache.org/
-- **SimPy**: https://simpy.readthedocs.io/
+- **SimPy Framework**: https://simpy.readthedocs.io/
 - **Optimistic Concurrency Control**: https://en.wikipedia.org/wiki/Optimistic_concurrency_control

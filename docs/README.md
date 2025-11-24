@@ -1,263 +1,294 @@
-# Icecap Documentation Index
+# Documentation Index
 
-Complete documentation for the Icecap simulator and saturation analysis framework.
+Complete documentation for the Iceberg Catalog Simulator.
 
-## Quick Start
+## Quick Navigation
 
-| Document | Purpose | When to Read |
-|----------|---------|--------------|
-| [QUICKSTART.md](../QUICKSTART.md) | Get started quickly | First time setup |
-| [Running Experiments](RUNNING_EXPERIMENTS.md) | Run baseline experiments | Before starting experiments |
-| [Analysis Guide](ANALYSIS_GUIDE.md) | Analyze results | After experiments complete |
+### 🚀 Getting Started
+- **[QUICKSTART.md](QUICKSTART.md)** - Installation, first simulation, analysis workflow
+- **[DOCKER.md](DOCKER.md)** - Container-based execution with docker-compose
 
-## Core Documentation
+### 📊 Understanding Results
+- **[BASELINE_RESULTS.md](BASELINE_RESULTS.md)** - Comprehensive findings from Exp 2.1 & 2.2
+- **[OVERHEAD_ANALYSIS.md](OVERHEAD_ANALYSIS.md)** - Commit protocol overhead deep dive
 
-### Getting Started
+### 🔬 Research & Methodology
+- **[ANALYSIS_PLAN.md](ANALYSIS_PLAN.md)** - Research questions, current status, and methodology
+- **[ARCHITECTURE.md](ARCHITECTURE.md)** - Simulator design, invariants, and implementation details
+- **[SNAPSHOT_VERSIONING.md](SNAPSHOT_VERSIONING.md)** - Version tracking mechanics
 
-1. **[QUICKSTART.md](../QUICKSTART.md)**
-   - Installation and setup
-   - First simulation
-   - Basic configuration
-   - Understanding results
-
-2. **[README.md](../README.md)**
-   - Complete feature overview
-   - Architecture details
-   - Configuration reference
-   - Testing guide
-
-### Running Experiments
-
-3. **[Running Experiments Guide](RUNNING_EXPERIMENTS.md)**
-   - Baseline experiment scripts
-   - Parameter sweeps
-   - Monitoring progress
-   - Troubleshooting
-
-4. **[Experiment Configs](../experiment_configs/README.md)**
-   - Configuration templates
-   - Parameter descriptions
-   - Experiment designs
-
-### Analysis and Visualization
-
-5. **[Analysis Guide](ANALYSIS_GUIDE.md)**
-   - Saturation analysis workflow
-   - Generating plots
-   - Interpreting results
-   - Custom analysis
-
-6. **[Analysis Summary](ANALYSIS_SUMMARY.md)**
-   - System overview
-   - Problem solved
-   - Output structure
-   - Commands reference
-
-### Research and Planning
-
-7. **[ANALYSIS_PLAN.md](../ANALYSIS_PLAN.md)**
-   - Research questions
-   - Experiment methodology
-   - Implementation phases
-   - Deliverables
+### 📝 Additional Guides
+- **[WARMUP_PERIOD.md](WARMUP_PERIOD.md)** - Steady-state measurement methodology
+- **[ANALYSIS_GUIDE.md](ANALYSIS_GUIDE.md)** - Analysis pipeline details
+- **[RUNNING_EXPERIMENTS.md](RUNNING_EXPERIMENTS.md)** - Parallel execution guide
+- **[ANALYSIS_SUMMARY.md](ANALYSIS_SUMMARY.md)** - Analysis capabilities overview
+- **[ORGANIZATION_SUMMARY.md](ORGANIZATION_SUMMARY.md)** - Experiment organization
 
 ## Documentation by Task
 
 ### I want to...
 
 **...get started with the simulator**
-→ Start with [QUICKSTART.md](../QUICKSTART.md)
+→ Start with [QUICKSTART.md](QUICKSTART.md)
 
-**...understand simulator features**
-→ Read [README.md](../README.md) sections on:
-- Configuration
-- Table Grouping
-- Conflict Resolution
-- Storage Latencies
+**...run experiments in Docker**
+→ Follow [DOCKER.md](DOCKER.md)
 
 **...run baseline experiments**
-→ Follow [RUNNING_EXPERIMENTS.md](RUNNING_EXPERIMENTS.md)
-
-**...create custom experiments**
-→ See [experiment_configs/README.md](../experiment_configs/README.md)
+→ Follow [RUNNING_EXPERIMENTS.md](RUNNING_EXPERIMENTS.md) or [QUICKSTART.md](QUICKSTART.md) "Run Baseline Experiments" section
 
 **...analyze experiment results**
-→ Follow [ANALYSIS_GUIDE.md](ANALYSIS_GUIDE.md)
+→ Follow [QUICKSTART.md](QUICKSTART.md) "Analyze Results" section or [ANALYSIS_GUIDE.md](ANALYSIS_GUIDE.md)
 
-**...generate latency vs throughput plots**
-→ Use saturation analysis (see [ANALYSIS_GUIDE.md](ANALYSIS_GUIDE.md#quick-start))
+**...understand the key findings**
+→ Read [BASELINE_RESULTS.md](BASELINE_RESULTS.md) and check [../README.md](../README.md) "Key Findings" section
+
+**...understand overhead scaling**
+→ Read [OVERHEAD_ANALYSIS.md](OVERHEAD_ANALYSIS.md)
+
+**...create custom experiments**
+→ See [../experiment_configs/README.md](../experiment_configs/README.md)
+
+**...understand simulator design**
+→ Read [ARCHITECTURE.md](ARCHITECTURE.md)
+
+**...understand version tracking**
+→ Read [SNAPSHOT_VERSIONING.md](SNAPSHOT_VERSIONING.md)
 
 **...understand the research plan**
-→ Read [ANALYSIS_PLAN.md](../ANALYSIS_PLAN.md)
+→ Read [ANALYSIS_PLAN.md](ANALYSIS_PLAN.md)
+
+**...validate warmup period**
+→ Read [WARMUP_PERIOD.md](WARMUP_PERIOD.md)
 
 **...troubleshoot issues**
-→ Check troubleshooting sections in:
-- [RUNNING_EXPERIMENTS.md](RUNNING_EXPERIMENTS.md#troubleshooting)
-- [ANALYSIS_GUIDE.md](ANALYSIS_GUIDE.md#troubleshooting)
-- [QUICKSTART.md](../QUICKSTART.md#troubleshooting)
+→ Check [QUICKSTART.md](QUICKSTART.md) "Troubleshooting" section
 
-## File Organization
+## Documentation Structure
 
 ```
-.
-├── README.md                          # Main project overview
-├── QUICKSTART.md                      # Quick start guide
-├── ANALYSIS_PLAN.md                   # Research methodology
+docs/
+├── README.md (this file)           # Documentation index
 │
-├── docs/                              # Documentation
-│   ├── README.md                      # This file (index)
-│   ├── RUNNING_EXPERIMENTS.md         # Experiment execution
-│   ├── ANALYSIS_GUIDE.md              # Analysis workflow
-│   └── ANALYSIS_SUMMARY.md            # System overview
+├── Getting Started
+│   ├── QUICKSTART.md               # Installation & first steps
+│   └── DOCKER.md                   # Container-based execution
 │
-├── experiment_configs/                # Experiment templates
-│   ├── README.md                      # Config guide
-│   ├── exp2_1_*.toml                  # Single table experiments
-│   ├── exp2_2_*.toml                  # Multi-table experiments
-│   └── exp3_*.toml                    # Real conflict experiments
+├── Results & Analysis
+│   ├── BASELINE_RESULTS.md         # Exp 2.1 & 2.2 findings
+│   ├── OVERHEAD_ANALYSIS.md        # Commit overhead deep dive
+│   ├── ANALYSIS_GUIDE.md           # Analysis workflow
+│   └── ANALYSIS_SUMMARY.md         # Analysis capabilities
 │
-├── icecap/                            # Simulator code
-│   ├── main.py                        # Core simulator
-│   ├── capstats.py                    # Statistics
-│   ├── analysis.py                    # Legacy analysis
-│   └── saturation_analysis.py         # New analysis module
+├── Research & Design
+│   ├── ANALYSIS_PLAN.md            # Research questions & status
+│   ├── ARCHITECTURE.md             # Simulator design & invariants
+│   └── SNAPSHOT_VERSIONING.md      # Version tracking mechanics
 │
-├── tests/                             # Test suite
-│   ├── test_simulator.py              # Core tests
-│   ├── test_conflict_types.py         # Conflict resolution
-│   ├── test_experiment_structure.py   # Organization tests
-│   └── test_saturation_analysis.py    # Analysis tests
-│
-└── scripts/                           # Automation scripts
-    ├── run_baseline_experiments.sh    # Experiment runner
-    └── monitor_experiments.sh         # Progress monitor
+└── Advanced Topics
+    ├── WARMUP_PERIOD.md            # Steady-state methodology
+    ├── RUNNING_EXPERIMENTS.md      # Parallel execution
+    └── ORGANIZATION_SUMMARY.md     # Experiment organization
 ```
 
-## Common Workflows
+## Project Structure
 
-### Workflow 1: First Time User
+```
+icecap/
+├── README.md                       # Project overview with key findings
+│
+├── docs/                           # Documentation (you are here)
+│   ├── README.md                   # This index
+│   ├── QUICKSTART.md               # Getting started guide
+│   ├── DOCKER.md                   # Docker execution
+│   ├── BASELINE_RESULTS.md         # Experimental results
+│   ├── OVERHEAD_ANALYSIS.md        # Overhead analysis
+│   ├── ANALYSIS_PLAN.md            # Research plan
+│   ├── ARCHITECTURE.md             # Simulator design
+│   ├── SNAPSHOT_VERSIONING.md      # Version tracking
+│   └── ... (other guides)
+│
+├── icecap/                         # Core simulator
+│   ├── main.py                     # Simulation engine
+│   ├── capstats.py                 # Statistics collection
+│   ├── saturation_analysis.py      # Saturation analysis
+│   └── warmup_validation.py        # Steady-state validation
+│
+├── experiment_configs/             # Experiment templates
+│   ├── README.md                   # Configuration guide
+│   ├── exp2_1_*.toml               # Single-table experiments
+│   ├── exp2_2_*.toml               # Multi-table experiments
+│   └── exp3_*.toml                 # Real conflict experiments (ready)
+│
+├── scripts/                        # Automation
+│   ├── run_baseline_experiments.sh # Parallel experiment runner
+│   └── plot_distributions.py       # Distribution visualization
+│
+├── tests/                          # Test suite (63 tests)
+├── experiments/                    # Results (created at runtime)
+└── plots/                          # Analysis outputs
+```
 
-1. Read [QUICKSTART.md](../QUICKSTART.md)
-2. Run a single simulation: `python -m icecap.main cfg.toml`
-3. Explore configuration: edit `cfg.toml`
-4. Run tests: `pytest tests/ -v`
+## Quick Reference
 
-### Workflow 2: Running Baseline Experiments
+### Common Commands
 
-1. Review [experiment_configs/README.md](../experiment_configs/README.md)
-2. Start experiments: `./run_baseline_experiments.sh --seeds 3`
-3. Monitor: `./monitor_experiments.sh --watch 5`
-4. Wait ~9.5 hours
-5. Analyze: Follow [ANALYSIS_GUIDE.md](ANALYSIS_GUIDE.md)
+```bash
+# Run experiments
+./scripts/run_baseline_experiments.sh --seeds 3         # Full baseline (24h with 8 cores)
+./scripts/run_baseline_experiments.sh --quick --seeds 1 # Quick test (2min)
 
-### Workflow 3: Analyzing Results
+# Analyze
+python -m icecap.saturation_analysis -i experiments -p "exp2_1_*" -o plots/exp2_1
+python -m icecap.saturation_analysis -i experiments -p "exp2_2_*" -o plots/exp2_2 --group-by num_tables
 
-1. Build experiment index:
-   ```bash
-   python -m icecap.saturation_analysis -i experiments -p "exp2_1_*" -o plots/exp2_1
-   ```
+# Validate
+python -m icecap.warmup_validation experiments/exp2_1_*/12345
 
-2. View generated files:
-   - `plots/exp2_1/experiment_index.csv` - Parameter index
-   - `plots/exp2_1/latency_vs_throughput.png` - Main plot
-   - `plots/exp2_1/success_rate_vs_load.png` - Secondary plot
+# Test
+pytest tests/ -v
+```
 
-3. Extract findings:
-   ```bash
-   cat plots/exp2_1/experiment_index.csv
-   ```
+### File Locations
 
-4. Custom analysis:
-   ```python
-   import pandas as pd
-   df = pd.read_csv('plots/exp2_1/experiment_index.csv')
-   # Your analysis here
-   ```
+| What | Where |
+|------|-------|
+| Documentation | `docs/` (you are here) |
+| Experiment configs | `../experiment_configs/` |
+| Scripts | `../scripts/` |
+| Results | `../experiments/` |
+| Plots | `../plots/` |
+| Tests | `../tests/` |
+| Core simulator | `../icecap/main.py` |
 
-### Workflow 4: Creating Custom Experiments
+### Key Metrics
 
-1. Copy a template:
-   ```bash
-   cp experiment_configs/exp2_1_*.toml my_experiment.toml
-   ```
+| Metric | Where to Find |
+|--------|---------------|
+| Success rate | `plots/*/experiment_index.csv` |
+| Throughput | `plots/*/experiment_index.csv` (commits/sec) |
+| Latency percentiles | `plots/*/latency_vs_throughput.{png,md}` |
+| Overhead % | `plots/*/overhead_vs_throughput.md` |
+| Retries | `plots/*/experiment_index.csv` (mean_retries) |
 
-2. Edit parameters:
-   - Modify `inter_arrival.scale`
-   - Adjust `real_conflict_probability`
-   - Change `num_tables`
+## Current Status
 
-3. Add experiment label:
-   ```toml
-   [experiment]
-   label = "my_custom_experiment"
-   ```
+### ✅ Completed
+- Core simulator with real/false conflict distinction
+- Baseline experiments (Exp 2.1 & 2.2): 189 simulations across 5 seeds
+- Saturation analysis with overhead measurement
+- Distribution conformance tests
+- Comprehensive documentation
+- Docker support
 
-4. Run:
-   ```bash
-   python -m icecap.main my_experiment.toml
-   ```
+### 📊 Key Findings Available
+- **Single-table saturation**: ~60 commits/sec peak, 26% overhead
+- **Multi-table scaling**: Sub-linear with coordination cost paradox
+- **Latency curves**: P50/P95/P99 vs throughput with success rates
+- **Overhead analysis**: Commit protocol cost scaling with table count
+
+### 🔬 Ready to Run
+- **Exp 3.1**: Single-table real conflicts (Question 1b)
+- **Exp 3.2**: Manifest count distribution variance
+- **Exp 3.3**: Multi-table real conflicts (Question 2b)
 
 ## Key Concepts
 
 ### Experiment Organization
 
-**Structure:** `experiments/$label-$hash/$seed/results.parquet`
+**Directory structure**: `experiments/$label-$hash/$seed/results.parquet`
 
 - **$label**: Experiment name (e.g., "exp2_1_single_table_false")
-- **$hash**: 8-character hash of config (excluding seed/label) + code
-- **$seed**: Random seed used for this run
+- **$hash**: 8-char hash of config + code (excludes seed/label)
+- **$seed**: Random seed for this run
 
-**Benefit:** Same config + code → same hash, making it easy to:
-- Find related runs
-- Run multiple seeds
-- Track code changes
+**Benefits**: Same config + code → same hash for easy organization and reproducibility
 
 ### Saturation Point
 
-The throughput at which success rate drops below 50%.
+Throughput at which success rate drops below 50%.
 
 **Key metrics:**
-- **Saturation throughput**: Max sustainable commits/sec
-- **P95 latency at saturation**: 95th percentile commit time
-- **Retry rate**: Average retries per transaction
+- Saturation throughput (max sustainable commits/sec)
+- P95 latency at saturation
+- Mean retries per transaction
 
 ### False vs Real Conflicts
 
 - **False conflict**: Version changed, no data overlap
-  - Cost: ~100ms (metadata read only)
+  - Cost: ~1ms (metadata read only with fast catalog)
   - No manifest file operations
 
 - **Real conflict**: Overlapping data changes
-  - Cost: ~500ms+ (read/merge/write manifest files)
-  - Number of files sampled from distribution
+  - Cost: ~400ms+ (read/write N manifest files)
+  - N sampled from configurable distribution
 
-### Latency vs Throughput Trade-off
+### Warmup Period
 
-- **Low load**: High success, low latency, low throughput
-- **Medium load**: Balanced success and throughput
-- **High load**: Low success, high latency, saturated throughput
+Transient exclusion for steady-state measurement:
+- Duration: `max(5min, min(3 × mean_runtime, 15min))`
+- Baseline: 9 minutes for 3-minute mean transactions
+- Purpose: Allow queue depths to stabilize
 
-## Version History
+## Common Workflows
 
-| Version | Date | Changes |
-|---------|------|---------|
-| 1.0 | 2025-11-21 | Initial documentation organization |
-| | | - Added saturation analysis module |
-| | | - Experiment runner scripts |
-| | | - Comprehensive guides |
+### Workflow 1: First Time Setup
+
+1. Read [QUICKSTART.md](QUICKSTART.md) installation section
+2. Install: `pip install -r requirements.txt && pip install -e .`
+3. Test: `pytest tests/ -v`
+4. Run single simulation: `echo "Y" | python -m icecap.main experiment_configs/exp2_1_single_table_false_conflicts.toml`
+
+### Workflow 2: Running Baseline Experiments
+
+1. Review [ANALYSIS_PLAN.md](ANALYSIS_PLAN.md) for context
+2. Start: `./scripts/run_baseline_experiments.sh --seeds 3`
+3. Monitor: `./scripts/monitor_experiments.sh --watch 5`
+4. Wait: ~24 hours with 8 cores
+5. Analyze: See Workflow 3
+
+### Workflow 3: Analyzing Results
+
+1. Generate saturation curves:
+   ```bash
+   python -m icecap.saturation_analysis -i experiments -p "exp2_1_*" -o plots/exp2_1
+   python -m icecap.saturation_analysis -i experiments -p "exp2_2_*" -o plots/exp2_2 --group-by num_tables
+   ```
+
+2. View outputs:
+   - `plots/*/experiment_index.csv` - Summary statistics
+   - `plots/*/latency_vs_throughput.{png,md}` - Main results
+   - `plots/*/overhead_vs_throughput.md` - Overhead analysis
+
+3. Review findings:
+   - Read generated markdown tables
+   - Compare [BASELINE_RESULTS.md](BASELINE_RESULTS.md)
+
+### Workflow 4: Docker Execution
+
+1. Read [DOCKER.md](DOCKER.md)
+2. Build and run: `docker-compose up`
+3. Analysis: `docker-compose run --rm analyze`
+4. Tests: `docker-compose run --rm test`
+
+## Getting Help
+
+1. **Installation issues**: [QUICKSTART.md](QUICKSTART.md) troubleshooting
+2. **Analysis questions**: [ANALYSIS_GUIDE.md](ANALYSIS_GUIDE.md)
+3. **Docker issues**: [DOCKER.md](DOCKER.md) troubleshooting
+4. **Understanding results**: [BASELINE_RESULTS.md](BASELINE_RESULTS.md)
+5. **Simulator details**: [ARCHITECTURE.md](ARCHITECTURE.md)
 
 ## Contributing
 
-When adding new features:
-1. Update relevant documentation
-2. Add tests in `tests/`
-3. Update this index if adding new docs
-4. Run full test suite: `pytest tests/ -v`
+Before making changes:
+1. Run `pytest tests/ -v` to ensure tests pass
+2. Review [ARCHITECTURE.md](ARCHITECTURE.md) for design invariants
+3. Update documentation for new features
+4. Add tests for new functionality
 
-## Support
+## External References
 
-For issues or questions:
-1. Check [troubleshooting sections](#i-want-to)
-2. Review [ANALYSIS_PLAN.md](../ANALYSIS_PLAN.md) for methodology
-3. Examine test files for usage examples
-4. Check experiment logs in `experiment_logs/`
+- **Apache Iceberg**: https://iceberg.apache.org/
+- **SimPy Documentation**: https://simpy.readthedocs.io/
+- **Optimistic Concurrency Control**: https://en.wikipedia.org/wiki/Optimistic_concurrency_control

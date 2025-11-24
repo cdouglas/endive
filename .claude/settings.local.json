@@ -10,7 +10,13 @@
       "Bash(python scripts/plot_distributions.py:*)",
       "Bash(docker build:*)",
       "Bash(docker run:*)",
-      "Bash(docker-compose config:*)"
+      "Bash(docker-compose config:*)",
+      "Bash(done)",
+      "Bash(paste:*)",
+      "Bash(for dir in experiments/exp2_1_*/)",
+      "Bash(do grep inter_arrival.scale $dir/cfg.toml)",
+      "Bash(for dir in experiments/exp2_2_*/)",
+      "Bash(do grep ^num_tables $dir/cfg.toml)"
     ],
     "deny": [],
     "ask": []
