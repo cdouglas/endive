@@ -22,8 +22,9 @@ pattern = "exp2_*"
 
 [analysis]
 # Parameter to group experiments by in plots
-# Common values: "num_tables", "real_conflict_probability", null (no grouping)
-group_by = null
+# Common values: "num_tables", "real_conflict_probability"
+# To disable grouping, comment out this line or leave it unset
+# group_by = "num_tables"
 
 # Minimum number of transaction cycles for steady-state measurement
 # Used to compute warmup period: K_MIN_CYCLES × mean_transaction_runtime
