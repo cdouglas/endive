@@ -18,7 +18,9 @@
       "Bash(for dir in experiments/exp2_2_*/)",
       "Bash(do grep ^num_tables $dir/cfg.toml)",
       "Bash(docker logs:*)",
-      "Bash(for file in experiment_configs/exp2_1_single_table_false_conflicts.toml experiment_configs/exp3_1_single_table_real_conflicts.toml)"
+      "Bash(for file in experiment_configs/exp2_1_single_table_false_conflicts.toml experiment_configs/exp3_1_single_table_real_conflicts.toml)",
+      "Bash(bash:*)",
+      "Bash(git -C /home/chris/work/est status --short)"
     ],
     "deny": [],
     "ask": []
