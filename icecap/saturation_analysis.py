@@ -71,6 +71,10 @@ def get_default_config() -> Dict:
                 'threshold': 50.0,
                 'tolerance': 5.0
             },
+            'stddev': {
+                'enabled': True,
+                'alpha': 0.2
+            },
             'styles': {
                 'markers': ['o', 's', '^', 'D', 'v', '<', '>', 'p', '*', 'h'],
                 'linestyles': ['-', '--', '-.', ':'],
@@ -365,11 +369,62 @@ def load_and_aggregate_results(exp_info: Dict) -> pd.DataFrame:
     return combined
 
 
+def compute_per_seed_statistics(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Compute statistics for each seed separately.
+
+    Args:
+        df: DataFrame with 'seed' column and transaction data
+
+    Returns:
+        DataFrame with one row per seed containing statistics
+    """
+    if df is None or len(df) == 0 or 'seed' not in df.columns:
+        return None
+
+    seed_stats = []
+
+    for seed in df['seed'].unique():
+        seed_df = df[df['seed'] == seed]
+        committed = seed_df[seed_df['status'] == 'committed']
+        total = len(seed_df)
+
+        if len(committed) == 0:
+            continue
+
+        # Calculate duration (in seconds)
+        duration_s = seed_df['t_submit'].max() / 1000.0 if len(seed_df) > 0 else 1.0
+
+        # Compute overhead percentage
+        committed_with_overhead = committed.copy()
+        committed_with_overhead['overhead_pct'] = (
+            100.0 * committed_with_overhead['commit_latency'] / committed_with_overhead['total_latency']
+        )
+
+        seed_stats.append({
+            'seed': seed,
+            'total_txns': total,
+            'committed': len(committed),
+            'success_rate': 100.0 * len(committed) / total,
+            'p50_commit_latency': committed['commit_latency'].quantile(0.50),
+            'p95_commit_latency': committed['commit_latency'].quantile(0.95),
+            'p99_commit_latency': committed['commit_latency'].quantile(0.99),
+            'throughput': len(committed) / duration_s,
+            'mean_overhead_pct': committed_with_overhead['overhead_pct'].mean(),
+            'p50_overhead_pct': committed_with_overhead['overhead_pct'].quantile(0.50),
+            'p95_overhead_pct': committed_with_overhead['overhead_pct'].quantile(0.95),
+            'p99_overhead_pct': committed_with_overhead['overhead_pct'].quantile(0.99)
+        })
+
+    return pd.DataFrame(seed_stats) if seed_stats else None
+
+
 def compute_aggregate_statistics(df: pd.DataFrame) -> Dict:
     """
     Compute aggregate statistics for an experiment.
 
-    Returns statistics aggregated across all seeds.
+    Returns statistics aggregated across all seeds, including mean and stddev.
+    If no 'seed' column exists, computes statistics directly without stddev.
     """
     if df is None or len(df) == 0:
         return None
@@ -395,13 +450,49 @@ def compute_aggregate_statistics(df: pd.DataFrame) -> Dict:
             'p99_overhead_pct': None
         }
 
-    # Calculate duration (in seconds)
+    # Try to compute per-seed statistics if 'seed' column exists
+    per_seed_df = compute_per_seed_statistics(df)
+
+    # If we have per-seed statistics, compute mean and stddev across seeds
+    if per_seed_df is not None and len(per_seed_df) > 0:
+        stats = {
+            'num_seeds': len(per_seed_df),
+            'total_txns': per_seed_df['total_txns'].sum(),
+            'committed': per_seed_df['committed'].sum(),
+            'aborted': per_seed_df['total_txns'].sum() - per_seed_df['committed'].sum(),
+            'success_rate': per_seed_df['success_rate'].mean(),
+            'success_rate_std': per_seed_df['success_rate'].std(),
+            'p50_commit_latency': per_seed_df['p50_commit_latency'].mean(),
+            'p50_commit_latency_std': per_seed_df['p50_commit_latency'].std(),
+            'p95_commit_latency': per_seed_df['p95_commit_latency'].mean(),
+            'p95_commit_latency_std': per_seed_df['p95_commit_latency'].std(),
+            'p99_commit_latency': per_seed_df['p99_commit_latency'].mean(),
+            'p99_commit_latency_std': per_seed_df['p99_commit_latency'].std(),
+            'throughput': per_seed_df['throughput'].mean(),
+            'throughput_std': per_seed_df['throughput'].std(),
+            'mean_overhead_pct': per_seed_df['mean_overhead_pct'].mean(),
+            'mean_overhead_pct_std': per_seed_df['mean_overhead_pct'].std(),
+            'p50_overhead_pct': per_seed_df['p50_overhead_pct'].mean(),
+            'p50_overhead_pct_std': per_seed_df['p50_overhead_pct'].std(),
+            'p95_overhead_pct': per_seed_df['p95_overhead_pct'].mean(),
+            'p95_overhead_pct_std': per_seed_df['p95_overhead_pct'].std(),
+            'p99_overhead_pct': per_seed_df['p99_overhead_pct'].mean(),
+            'p99_overhead_pct_std': per_seed_df['p99_overhead_pct'].std()
+        }
+
+        # Add some legacy statistics that aren't per-seed
+        stats['mean_commit_latency'] = committed['commit_latency'].mean()
+        stats['median_commit_latency'] = committed['commit_latency'].median()
+        stats['mean_retries'] = committed['n_retries'].mean()
+        stats['max_retries'] = committed['n_retries'].max()
+
+        return stats
+
+    # No seed column or single seed - compute statistics directly without stddev
+    # This is for backward compatibility with tests and single-seed analysis
     duration_s = df['t_submit'].max() / 1000.0 if len(df) > 0 else 1.0
 
-    # Compute overhead percentage for committed transactions
-    # Overhead = (commit_latency / total_latency) * 100
-    # This represents the percentage of time spent in commit protocol (retries, backoff, manifest I/O)
-    # vs total transaction time (runtime + commit)
+    # Compute overhead percentage
     committed_with_overhead = committed.copy()
     committed_with_overhead['overhead_pct'] = (
         100.0 * committed_with_overhead['commit_latency'] / committed_with_overhead['total_latency']
@@ -419,7 +510,7 @@ def compute_aggregate_statistics(df: pd.DataFrame) -> Dict:
         'p99_commit_latency': committed['commit_latency'].quantile(0.99),
         'mean_retries': committed['n_retries'].mean(),
         'max_retries': committed['n_retries'].max(),
-        'throughput': len(committed) / duration_s,  # commits per second
+        'throughput': len(committed) / duration_s,
         'mean_overhead_pct': committed_with_overhead['overhead_pct'].mean(),
         'p50_overhead_pct': committed_with_overhead['overhead_pct'].quantile(0.50),
         'p95_overhead_pct': committed_with_overhead['overhead_pct'].quantile(0.95),
@@ -521,6 +612,11 @@ def plot_latency_vs_throughput(
         # Single series plot
         df_sorted = index_df.sort_values('throughput')
 
+        # Check if stddev should be shown
+        stddev_config = CONFIG.get('plots', {}).get('stddev', {})
+        show_stddev = stddev_config.get('enabled', True)
+        stddev_alpha = stddev_config.get('alpha', 0.2)
+
         # Plot P50, P95, P99 latency
         percentiles = [
             ('p50_commit_latency', 'P50', 'o', '#2E86AB'),
@@ -532,6 +628,20 @@ def plot_latency_vs_throughput(
             ax.plot(df_sorted['throughput'], df_sorted[col],
                    marker=marker, linewidth=2.5, markersize=10,
                    label=label, color=color)
+
+            # Add error bands if stddev is enabled and available
+            if show_stddev and f'{col}_std' in df_sorted.columns:
+                std_col = f'{col}_std'
+                # Only plot if we have valid stddev values
+                if df_sorted[std_col].notna().any():
+                    ax.fill_between(
+                        df_sorted['throughput'],
+                        df_sorted[col] - df_sorted[std_col],
+                        df_sorted[col] + df_sorted[std_col],
+                        color=color,
+                        alpha=stddev_alpha,
+                        linewidth=0
+                    )
 
     # Mark saturation point (configurable success rate threshold)
     sat_config = CONFIG.get('plots', {}).get('saturation', {})
@@ -665,6 +775,22 @@ def plot_success_rate_vs_throughput(
 
         ax.plot(df_sorted['throughput'], df_sorted['success_rate'],
                marker='o', linewidth=3, markersize=10, color='#2E86AB')
+
+        # Add error bands if stddev is enabled and available
+        stddev_config = CONFIG.get('plots', {}).get('stddev', {})
+        show_stddev = stddev_config.get('enabled', True)
+        stddev_alpha = stddev_config.get('alpha', 0.2)
+
+        if show_stddev and 'success_rate_std' in df_sorted.columns:
+            if df_sorted['success_rate_std'].notna().any():
+                ax.fill_between(
+                    df_sorted['throughput'],
+                    df_sorted['success_rate'] - df_sorted['success_rate_std'],
+                    df_sorted['success_rate'] + df_sorted['success_rate_std'],
+                    color='#2E86AB',
+                    alpha=stddev_alpha,
+                    linewidth=0
+                )
 
     # Mark saturation threshold if enabled
     sat_config = CONFIG.get('plots', {}).get('saturation', {})

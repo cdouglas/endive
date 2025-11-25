@@ -79,6 +79,11 @@ enabled = true  # Show saturation annotation/threshold lines
 threshold = 50.0  # Success rate threshold for saturation (percentage)
 tolerance = 5.0  # Tolerance for detecting saturation point (percentage)
 
+# Standard deviation display settings
+[plots.stddev]
+enabled = true  # Show standard deviation across seeds as error bars/bands
+alpha = 0.2     # Transparency of error bands (0.0-1.0)
+
 # Line and marker styles
 [plots.styles]
 markers = ["o", "s", "^", "D", "v", "<", ">", "p", "*", "h"]

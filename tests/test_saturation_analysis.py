@@ -921,6 +921,89 @@ tolerance = 10.0
 
             print("✓ Saturation config can be overridden")
 
+    def test_stddev_config_defaults(self):
+        """Verify stddev configuration has correct defaults."""
+        config = get_default_config()
+
+        # Check stddev section exists
+        assert 'stddev' in config['plots']
+
+        # Check default values
+        stddev_config = config['plots']['stddev']
+        assert stddev_config['enabled'] is True
+        assert stddev_config['alpha'] == 0.2
+
+        print("✓ Stddev config has correct defaults")
+
+    def test_stddev_config_override(self):
+        """Verify stddev configuration can be overridden."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "stddev_config.toml"
+
+            # Create config with custom stddev settings
+            config_content = """
+[plots.stddev]
+enabled = false
+alpha = 0.3
+"""
+            with open(config_path, 'w') as f:
+                f.write(config_content)
+
+            config = load_config(str(config_path))
+
+            # Verify custom values
+            stddev_config = config['plots']['stddev']
+            assert stddev_config['enabled'] is False
+            assert stddev_config['alpha'] == 0.3
+
+            print("✓ Stddev config can be overridden")
+
+    def test_per_seed_statistics_computed(self):
+        """Verify that per-seed statistics are computed correctly."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Create test data with multiple seeds
+            seed_dirs = []
+            for seed in [111, 222]:
+                seed_dir = Path(tmpdir) / str(seed)
+                seed_dir.mkdir()
+                seed_dirs.append(str(seed_dir))
+
+                n_txns = 60
+                df = pd.DataFrame({
+                    'txn_id': range(n_txns),
+                    't_submit': [i * 60000 for i in range(n_txns)],
+                    't_commit': [(i * 60000) + 11000 for i in range(n_txns)],
+                    'commit_latency': [1000 + seed] * n_txns,  # Different per seed
+                    'total_latency': [11000] * n_txns,
+                    'n_retries': [0] * n_txns,
+                    'status': ['committed'] * n_txns
+                })
+                df.to_parquet(seed_dir / "results.parquet")
+
+            # Load and compute statistics
+            exp_info = {
+                'seeds': seed_dirs,
+                'config': {
+                    'transaction': {'runtime': {'mean': 10000}},
+                    'simulation': {'duration_ms': 3600000}
+                }
+            }
+            result_df = load_and_aggregate_results(exp_info)
+            stats = compute_aggregate_statistics(result_df)
+
+            # Check that stddev columns exist
+            assert 'p50_commit_latency_std' in stats
+            assert 'p95_commit_latency_std' in stats
+            assert 'p99_commit_latency_std' in stats
+            assert 'success_rate_std' in stats
+            assert 'throughput_std' in stats
+
+            # With 2 seeds having different latencies (1111 and 1222),
+            # stddev should be non-zero
+            assert stats['p50_commit_latency_std'] > 0
+
+            print("✓ Per-seed statistics computed correctly")
+
     def test_cli_overrides_config_file(self):
         """Verify CLI arguments override config file values."""
         import subprocess
