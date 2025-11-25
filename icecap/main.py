@@ -53,6 +53,12 @@ N_TBL_W_PMF: float
 REAL_CONFLICT_PROBABILITY: float  # Probability that a conflict is "real" (requires manifest file ops)
 CONFLICTING_MANIFESTS_DIST: str  # Distribution of conflicting manifests
 CONFLICTING_MANIFESTS_PARAMS: dict  # Parameters for conflicting manifests distribution
+# Retry backoff parameters
+RETRY_BACKOFF_ENABLED: bool  # Whether exponential backoff is enabled
+RETRY_BACKOFF_BASE_MS: float  # Base backoff time in milliseconds
+RETRY_BACKOFF_MULTIPLIER: float  # Multiplier for each retry
+RETRY_BACKOFF_MAX_MS: float  # Maximum backoff time in milliseconds
+RETRY_BACKOFF_JITTER: float  # Jitter factor (0.0 to 1.0) for randomization
 
 STATS = Stats()
 
@@ -202,6 +208,7 @@ def configure_from_toml(config_file: str):
     global INTER_ARRIVAL_DIST, INTER_ARRIVAL_PARAMS
     global MAX_PARALLEL, MIN_LATENCY
     global REAL_CONFLICT_PROBABILITY, CONFLICTING_MANIFESTS_DIST, CONFLICTING_MANIFESTS_PARAMS
+    global RETRY_BACKOFF_ENABLED, RETRY_BACKOFF_BASE_MS, RETRY_BACKOFF_MULTIPLIER, RETRY_BACKOFF_MAX_MS, RETRY_BACKOFF_JITTER
     global EXPERIMENT_LABEL
 
     with open(config_file, "rb") as f:
@@ -311,6 +318,13 @@ def configure_from_toml(config_file: str):
         "max": config.get("transaction", {}).get("conflicting_manifests", {}).get("max", 10),
         "value": config.get("transaction", {}).get("conflicting_manifests", {}).get("value", 3),
     }
+
+    # Load retry backoff parameters
+    RETRY_BACKOFF_ENABLED = config.get("transaction", {}).get("retry_backoff", {}).get("enabled", False)
+    RETRY_BACKOFF_BASE_MS = config.get("transaction", {}).get("retry_backoff", {}).get("base_ms", 10.0)
+    RETRY_BACKOFF_MULTIPLIER = config.get("transaction", {}).get("retry_backoff", {}).get("multiplier", 2.0)
+    RETRY_BACKOFF_MAX_MS = config.get("transaction", {}).get("retry_backoff", {}).get("max_ms", 5000.0)
+    RETRY_BACKOFF_JITTER = config.get("transaction", {}).get("retry_backoff", {}).get("jitter", 0.1)
 
     # NOTE: Table partitioning is done in CLI after seed is set for determinism
 
@@ -528,6 +542,32 @@ def sample_conflicting_manifests() -> int:
         return np.random.randint(params['min'], params['max'] + 1)
     else:
         raise ValueError(f"Unknown conflicting_manifests distribution: {dist}")
+
+
+def calculate_backoff_time(retry_number: int) -> float:
+    """Calculate exponential backoff time with jitter.
+
+    Args:
+        retry_number: Current retry attempt (1-indexed)
+
+    Returns:
+        Backoff time in milliseconds
+    """
+    if not RETRY_BACKOFF_ENABLED:
+        return 0.0
+
+    # Exponential backoff: base * multiplier^(retry_number - 1)
+    backoff = RETRY_BACKOFF_BASE_MS * (RETRY_BACKOFF_MULTIPLIER ** (retry_number - 1))
+
+    # Cap at maximum
+    backoff = min(backoff, RETRY_BACKOFF_MAX_MS)
+
+    # Add jitter: random factor between (1 - jitter) and (1 + jitter)
+    if RETRY_BACKOFF_JITTER > 0:
+        jitter_factor = 1.0 + np.random.uniform(-RETRY_BACKOFF_JITTER, RETRY_BACKOFF_JITTER)
+        backoff *= jitter_factor
+
+    return max(0, backoff)
 
 
 def print_configuration():
@@ -895,6 +935,14 @@ def txn_gen(sim, txn_id, catalog):
     while txn.t_commit < 0 and txn.t_abort < 0:
         # attempt commit
         txn.n_retries += 1
+
+        # Apply exponential backoff before retry (if this is a retry, not first attempt)
+        if txn.n_retries > 1:
+            backoff_time = calculate_backoff_time(txn.n_retries - 1)
+            if backoff_time > 0:
+                logger.debug(f"{sim.now} TXN {txn_id} backing off for {backoff_time:.1f}ms (retry {txn.n_retries})")
+                yield sim.timeout(backoff_time)
+
         yield sim.process(txn_commit(sim, txn, catalog))
 
 def setup(sim):

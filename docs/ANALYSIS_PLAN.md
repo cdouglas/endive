@@ -37,10 +37,16 @@
 - ⏳ Exp 3.2: Manifest count distribution variance
 - ⏳ Exp 3.3: Multi-table real conflicts (Question 2b)
 
+**Phase 4 - Exponential Backoff Experiments (NEW):**
+- ⏳ Exp 4.1: Single-table false conflicts with backoff (Question 4a)
+- ⏳ Exp 3.4: Multi-table real conflicts with backoff (Question 4b)
+
 **Outstanding questions:**
 - How do real conflicts shift saturation point?
 - Cost difference: false (~1ms) vs real (~400ms)?
 - How do real conflicts compound in multi-table transactions?
+- Does exponential backoff improve performance under contention?
+- Is backoff more beneficial with expensive real conflicts?
 
 ---
 
@@ -466,7 +472,70 @@ real_conflict_probs = [0.0, 0.1, 0.3, 0.5]
 
 **Key insight**: P(≥1 real conflict in multi-table txn) = 1 - (1 - p)^n_tables
 
-### Phase 4: Visualization and Analysis
+### Phase 4: Exponential Backoff Experiments
+
+#### Experiment 4.1: Backoff Impact on False Conflicts (Question 4a)
+
+**Research Question**: Does exponential backoff improve performance under contention with cheap false conflicts?
+
+**Comparison with Exp 2.1**:
+- Same setup: single table, false conflicts only, fast catalog
+- NEW: Exponential backoff enabled (10ms base, 2x multiplier, 5s max, 10% jitter)
+
+**Configuration**:
+```toml
+[transaction.retry_backoff]
+enabled = true
+base_ms = 10.0        # Start with 10ms delay
+multiplier = 2.0      # Double each retry: 10, 20, 40, 80, 160, ...
+max_ms = 5000.0       # Cap at 5 seconds
+jitter = 0.1          # ±10% randomization
+```
+
+**Hypothesis**:
+- Backoff reduces wasted CAS attempts during high contention
+- Trade-off: Lower retry overhead vs longer time to success
+- Success rate curves may shift right (higher saturation point)
+- P95/P99 latency may improve near saturation
+
+**Expected results**:
+- Modest improvement (false conflicts are cheap ~1ms)
+- Benefit mainly at high load (near saturation)
+- Backoff delay < conflict resolution time
+
+#### Experiment 4.2 (3.4): Backoff with Real Conflicts (Question 4b)
+
+**Research Question**: Does backoff provide MORE benefit with expensive real conflicts?
+
+**Comparison with Exp 3.3**:
+- Same setup: multi-table, real conflicts, table-level isolation
+- NEW: Exponential backoff enabled (same parameters as 4.1)
+
+**Sweep parameters**:
+```python
+num_tables = [1, 2, 5, 10, 20]
+real_conflict_probs = [0.0, 0.1, 0.3, 0.5]
+inter_arrival_scale = [10, 20, 50, 100, 200, 500, 1000, 2000, 5000]
+```
+
+**Hypothesis**:
+- Backoff MORE beneficial with real conflicts (~400ms+ cost)
+- At high contention + real conflicts: backoff delay < conflict resolution
+- Success rate improvements larger than exp4.1
+- Key trade-off: 5s max backoff vs 400ms+ conflict resolution
+
+**Expected results**:
+- Larger improvements than exp4.1 (expensive retries)
+- Benefit scales with real_conflict_probability
+- Most impactful at high table count (compound conflicts)
+
+**Key metrics to compare**:
+- Success rate at each load level (with/without backoff)
+- P95 latency improvement
+- Mean retries per transaction
+- Saturation throughput shift
+
+### Phase 5: Visualization and Analysis
 
 #### 4.1 Primary Result: Latency vs Throughput Curves
 

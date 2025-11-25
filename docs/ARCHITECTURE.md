@@ -57,6 +57,29 @@
 
 **Implementation**: `icecap/main.py:627-719` (conflict resolution split)
 
+### Exponential Backoff (NEW)
+
+**Purpose**: Reduce wasted CAS attempts under high contention
+
+**Mechanism**: After first CAS failure, transaction waits before retrying
+- **Formula**: `delay = min(base_ms × multiplier^(retry-1), max_ms) × (1 ± jitter)`
+- **Example**: 10ms → 20ms → 40ms → 80ms → 160ms → 320ms → capped at 5s
+- **Jitter**: ±10% randomization prevents thundering herd
+
+**Configuration** (in `[transaction.retry_backoff]` section):
+- `enabled`: Boolean (default: false)
+- `base_ms`: Initial delay in milliseconds (default: 10.0)
+- `multiplier`: Growth factor per retry (default: 2.0)
+- `max_ms`: Maximum delay cap (default: 5000.0)
+- `jitter`: Randomization factor 0.0-1.0 (default: 0.1)
+
+**Trade-offs**:
+- **Benefit**: Fewer wasted CAS attempts, reduced catalog load
+- **Cost**: Longer time to eventual success, increased latency
+- **Hypothesis**: More beneficial with expensive real conflicts
+
+**Implementation**: `icecap/main.py:547-570` (calculate_backoff_time), `939-944` (apply in retry loop)
+
 ## Storage Model
 
 ### Latency Characteristics

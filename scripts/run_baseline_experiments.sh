@@ -54,6 +54,8 @@ RUN_EXP2_2=false
 RUN_EXP3_1=false
 RUN_EXP3_2=false
 RUN_EXP3_3=false
+RUN_EXP3_4=false
+RUN_EXP4_1=false
 ANY_EXP_SPECIFIED=false
 
 # Experiment parameters
@@ -73,6 +75,13 @@ EXP3_3_LOADS=(10 20 50 100 200 500 1000 2000 5000)
 EXP3_3_TABLES=(1 2 5 10 20)
 EXP3_3_REAL_PROBS=(0.0 0.1 0.3 0.5)
 
+EXP3_4_LOADS=(10 20 50 100 200 500 1000 2000 5000)
+EXP3_4_TABLES=(1 2 5 10 20)
+EXP3_4_REAL_PROBS=(0.0 0.1 0.3 0.5)
+
+# Phase 4: Exponential backoff
+EXP4_1_LOADS=(10 20 50 100 200 500 1000 2000 5000)
+
 # Quick mode parameters (for testing)
 QUICK_LOADS=(100 500 2000)
 QUICK_TABLES=(1 5 10)
@@ -86,6 +95,8 @@ EXP2_2_CONFIG="experiment_configs/exp2_2_multi_table_false_conflicts.toml"
 EXP3_1_CONFIG="experiment_configs/exp3_1_single_table_real_conflicts.toml"
 EXP3_2_CONFIG="experiment_configs/exp3_2_manifest_count_distribution.toml"
 EXP3_3_CONFIG="experiment_configs/exp3_3_multi_table_real_conflicts.toml"
+EXP3_4_CONFIG="experiment_configs/exp3_4_multi_table_real_backoff.toml"
+EXP4_1_CONFIG="experiment_configs/exp4_1_single_table_false_backoff.toml"
 
 # Logging
 LOG_DIR="experiment_logs"
@@ -137,6 +148,16 @@ while [[ $# -gt 0 ]]; do
             ANY_EXP_SPECIFIED=true
             shift
             ;;
+        --exp3.4)
+            RUN_EXP3_4=true
+            ANY_EXP_SPECIFIED=true
+            shift
+            ;;
+        --exp4.1)
+            RUN_EXP4_1=true
+            ANY_EXP_SPECIFIED=true
+            shift
+            ;;
         --quick)
             QUICK_MODE=true
             shift
@@ -164,6 +185,8 @@ if [ "$ANY_EXP_SPECIFIED" = false ]; then
     RUN_EXP3_1=true
     RUN_EXP3_2=true
     RUN_EXP3_3=true
+    RUN_EXP3_4=true
+    RUN_EXP4_1=true
 fi
 
 # ============================================================================
@@ -362,6 +385,14 @@ fi
 
 if [ "$RUN_EXP3_3" = true ]; then
     TOTAL_RUNS=$((TOTAL_RUNS + ${#EXP3_3_LOADS[@]} * ${#EXP3_3_TABLES[@]} * ${#EXP3_3_REAL_PROBS[@]} * NUM_SEEDS))
+fi
+
+if [ "$RUN_EXP3_4" = true ]; then
+    TOTAL_RUNS=$((TOTAL_RUNS + ${#EXP3_4_LOADS[@]} * ${#EXP3_4_TABLES[@]} * ${#EXP3_4_REAL_PROBS[@]} * NUM_SEEDS))
+fi
+
+if [ "$RUN_EXP4_1" = true ]; then
+    TOTAL_RUNS=$((TOTAL_RUNS + ${#EXP4_1_LOADS[@]} * NUM_SEEDS))
 fi
 
 # ============================================================================
@@ -638,6 +669,92 @@ if [ "$RUN_EXP3_3" = true ]; then
     done
 
     log "All Experiment 3.3 jobs submitted"
+fi
+
+# ============================================================================
+# Experiment 3.4: Multi-table real conflicts with exponential backoff
+# ============================================================================
+
+if [ "$RUN_EXP3_4" = true ]; then
+    log_section "EXPERIMENT 3.4: Multi-Table Real Conflicts with Backoff"
+    log "Research Question 4b: Does backoff help with multi-table real conflicts?"
+    log ""
+    log "Sweeping num_tables: ${EXP3_4_TABLES[*]}"
+    log "Sweeping real_conflict_probability: ${EXP3_4_REAL_PROBS[*]}"
+    log "Sweeping inter_arrival.scale: ${EXP3_4_LOADS[*]}"
+    log ""
+
+    for num_tables in "${EXP3_4_TABLES[@]}"; do
+        for prob in "${EXP3_4_REAL_PROBS[@]}"; do
+            for load in "${EXP3_4_LOADS[@]}"; do
+                for seed_num in $(seq 1 $NUM_SEEDS); do
+                    CURRENT_RUN=$((CURRENT_RUN + 1))
+                    PROGRESS="[$CURRENT_RUN/$TOTAL_RUNS]"
+
+                    TEMP_CONFIG=$(mktemp)
+
+                    if [ "$QUICK_MODE" = true ]; then
+                        create_config_variant "$EXP3_4_CONFIG" "$TEMP_CONFIG" \
+                            "num_tables=${num_tables}" \
+                            "num_groups=${num_tables}" \
+                            "real_conflict_probability=${prob}" \
+                            "inter_arrival.scale=${load}" \
+                            "duration_ms=${QUICK_DURATION}"
+                    else
+                        create_config_variant "$EXP3_4_CONFIG" "$TEMP_CONFIG" \
+                            "num_tables=${num_tables}" \
+                            "num_groups=${num_tables}" \
+                            "real_conflict_probability=${prob}" \
+                            "inter_arrival.scale=${load}"
+                    fi
+
+                    wait_for_job_slot
+                    DESC="$PROGRESS Exp3.4 tables=$num_tables prob=$prob load=$load seed=$seed_num"
+                    log "  Starting: $DESC"
+                    run_experiment_background "$EXP3_4_CONFIG" "$TEMP_CONFIG" "$DESC"
+                done
+            done
+        done
+    done
+
+    log "All Experiment 3.4 jobs submitted"
+fi
+
+# ============================================================================
+# Experiment 4.1: Single-table false conflicts with exponential backoff
+# ============================================================================
+
+if [ "$RUN_EXP4_1" = true ]; then
+    log_section "EXPERIMENT 4.1: Single-Table False Conflicts with Backoff"
+    log "Research Question 4a: Does backoff improve performance under contention?"
+    log ""
+    log "Sweeping inter_arrival.scale: ${EXP4_1_LOADS[*]}"
+    log ""
+
+    for load in "${EXP4_1_LOADS[@]}"; do
+        for seed_num in $(seq 1 $NUM_SEEDS); do
+            CURRENT_RUN=$((CURRENT_RUN + 1))
+            PROGRESS="[$CURRENT_RUN/$TOTAL_RUNS]"
+
+            TEMP_CONFIG=$(mktemp)
+
+            if [ "$QUICK_MODE" = true ]; then
+                create_config_variant "$EXP4_1_CONFIG" "$TEMP_CONFIG" \
+                    "inter_arrival.scale=${load}" \
+                    "duration_ms=${QUICK_DURATION}"
+            else
+                create_config_variant "$EXP4_1_CONFIG" "$TEMP_CONFIG" \
+                    "inter_arrival.scale=${load}"
+            fi
+
+            wait_for_job_slot
+            DESC="$PROGRESS Exp4.1 load=$load seed=$seed_num"
+            log "  Starting: $DESC"
+            run_experiment_background "$EXP4_1_CONFIG" "$TEMP_CONFIG" "$DESC"
+        done
+    done
+
+    log "All Experiment 4.1 jobs submitted"
 fi
 
 # ============================================================================

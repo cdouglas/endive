@@ -10,9 +10,9 @@ Apache Iceberg uses optimistic concurrency control (OCC) with compare-and-swap (
 2. Transaction reads manifest lists for missed snapshots
 3. For **false conflicts** (version changed, no data overlap): reads metadata only (~1ms)
 4. For **real conflicts** (overlapping changes): reads and rewrites manifest files (~400ms+)
-5. Transaction retries commit with exponential backoff
+5. Transaction retries commit (optionally with exponential backoff)
 
-This simulator explores: **When does commit throughput saturate? What causes latency to explode?**
+This simulator explores: **When does commit throughput saturate? What causes latency to explode? Does exponential backoff help?**
 
 ## Key Findings
 
@@ -46,10 +46,15 @@ This simulator explores: **When does commit throughput saturate? What causes lat
 
 ### Outstanding Questions (Ready to Answer)
 
-**Questions 1b & 2b** (Real conflicts) - Simulator ready, experiments not yet run:
+**Phase 3: Real Conflicts** (Questions 1b & 2b) - Simulator ready, experiments configured:
 - How do real conflicts shift saturation point?
 - Cost difference: false (~1ms) vs real (~400ms)?
 - How do real conflicts interact with table count?
+
+**Phase 4: Exponential Backoff** (Questions 4a & 4b) - New feature implemented:
+- Does backoff reduce wasted CAS attempts under contention?
+- Does backoff help more with expensive real conflicts?
+- What are the trade-offs: retry overhead vs time-to-success?
 
 ## Quick Start
 
