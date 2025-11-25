@@ -26,6 +26,10 @@ pattern = "exp2_*"
 # To disable grouping, comment out this line or leave it unset
 # group_by = "num_tables"
 
+# Minimum number of seeds required to include an experiment in analysis
+# Experiments with fewer seeds will be skipped
+min_seeds = 3
+
 # Minimum number of transaction cycles for steady-state measurement
 # Used to compute warmup period: K_MIN_CYCLES × mean_transaction_runtime
 # Higher values = more conservative warmup, better steady-state isolation
@@ -75,7 +79,7 @@ ha = "center"  # Horizontal alignment
 
 # Saturation annotation settings
 [plots.saturation]
-enabled = true  # Show saturation annotation/threshold lines
+enabled = false  # Show saturation annotation/threshold lines
 threshold = 50.0  # Success rate threshold for saturation (percentage)
 tolerance = 5.0  # Tolerance for detecting saturation point (percentage)
 

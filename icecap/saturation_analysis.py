@@ -35,7 +35,8 @@ def get_default_config() -> Dict:
             'group_by': None,
             'k_min_cycles': 5,
             'min_warmup_ms': 300000,
-            'max_warmup_ms': 900000
+            'max_warmup_ms': 900000,
+            'min_seeds': 3
         },
         'plots': {
             'dpi': 300,
@@ -102,7 +103,8 @@ def get_default_config() -> Dict:
                 'success_vs_load_plot': 'success_vs_load.png',
                 'success_vs_throughput_plot': 'success_vs_throughput.png',
                 'overhead_vs_throughput_plot': 'overhead_vs_throughput.png',
-                'overhead_vs_throughput_table': 'overhead_vs_throughput.md'
+                'overhead_vs_throughput_table': 'overhead_vs_throughput.md',
+                'commit_rate_over_time_plot': 'commit_rate_over_time.png'
             },
             'table': {
                 'float_format': '%.2f',
@@ -554,6 +556,13 @@ def build_experiment_index(base_dir: str, pattern: str) -> pd.DataFrame:
             print(" no statistics")
             continue
 
+        # Filter experiments with insufficient seeds
+        num_seeds = len(exp_info['seeds'])
+        min_seeds = CONFIG.get('analysis', {}).get('min_seeds', 3)
+        if num_seeds < min_seeds:
+            print(f" skipped (only {num_seeds} seeds, need {min_seeds})")
+            continue
+
         print(f" {stats['committed']}/{stats['total_txns']} committed")
 
         # Combine into single row
@@ -561,7 +570,7 @@ def build_experiment_index(base_dir: str, pattern: str) -> pd.DataFrame:
             'exp_dir': exp_dir,
             'label': exp_info['label'],
             'hash': exp_info['hash'],
-            'num_seeds': len(exp_info['seeds']),
+            'num_seeds': num_seeds,
             **params,
             **stats
         }
@@ -885,6 +894,103 @@ def plot_overhead_vs_throughput(
     plt.tight_layout()
     plt.savefig(output_path, dpi=300, bbox_inches='tight')
     print(f"Saved overhead vs throughput plot to {output_path}")
+    plt.close()
+
+
+def plot_commit_rate_over_time(
+    base_dir: str,
+    pattern: str,
+    output_path: str,
+    title: str = "Commit Rate Over Time",
+    window_size_sec: int = 60
+):
+    """
+    Plot commit rate over time for all experiments matching pattern.
+
+    Shows how commit throughput evolves during the simulation, useful for
+    verifying steady-state and identifying transient behavior.
+
+    Args:
+        base_dir: Base directory containing experiments
+        pattern: Pattern to match experiment directories
+        output_path: Path to save plot
+        title: Plot title
+        window_size_sec: Window size in seconds for rate calculation
+    """
+    experiments = scan_experiment_directories(base_dir, pattern)
+
+    if not experiments:
+        print(f"No experiments found for commit rate plot")
+        return
+
+    # Get warmup duration for marking on plot
+    first_exp = list(experiments.values())[0]
+    warmup_ms = compute_transient_period_duration(first_exp['config'])
+    warmup_min = warmup_ms / 60000
+
+    fig, ax = plt.subplots(figsize=(14, 8))
+
+    colors = plt.cm.viridis(np.linspace(0, 1, len(experiments)))
+
+    for (exp_dir, exp_info), color in zip(experiments.items(), colors):
+        # Load aggregated results
+        df = load_and_aggregate_results(exp_info)
+
+        if df is None or len(df) == 0:
+            continue
+
+        # Filter to committed transactions only
+        committed = df[df['status'] == 'committed'].copy()
+
+        if len(committed) == 0:
+            continue
+
+        # Compute commit rate in time windows
+        window_size_ms = window_size_sec * 1000
+        max_time_ms = committed['t_submit'].max()
+        time_windows = np.arange(0, max_time_ms + window_size_ms, window_size_ms)
+
+        rates = []
+        window_midpoints = []
+
+        for i in range(len(time_windows) - 1):
+            start = time_windows[i]
+            end = time_windows[i + 1]
+
+            # Count commits in this window
+            window_commits = committed[
+                (committed['t_submit'] >= start) &
+                (committed['t_submit'] < end)
+            ]
+
+            rate = len(window_commits) / window_size_sec  # commits/sec
+            rates.append(rate)
+            window_midpoints.append((start + end) / 2 / 60000)  # Convert to minutes
+
+        # Extract key parameter for label
+        config = exp_info['config']
+        inter_arrival = config.get('transaction', {}).get('inter_arrival', {}).get('scale', 'N/A')
+        label = f"inter_arrival={inter_arrival}ms"
+
+        ax.plot(window_midpoints, rates, linewidth=1.5, alpha=0.7,
+               label=label, color=color)
+
+    # Mark warmup period
+    ax.axvline(warmup_min, color='red', linestyle='--', linewidth=2,
+              alpha=0.7, label=f'Warmup end ({warmup_min:.1f} min)')
+    ax.axvspan(0, warmup_min, alpha=0.1, color='red')
+
+    ax.set_xlabel('Time (minutes)', fontsize=14, fontweight='bold')
+    ax.set_ylabel('Commit Rate (commits/sec)', fontsize=14, fontweight='bold')
+    ax.set_title(title, fontsize=16, fontweight='bold')
+    ax.legend(loc='best', fontsize=8, framealpha=0.9, ncol=2)
+    ax.grid(True, alpha=0.3, linestyle='--')
+    ax.set_xlim(left=0)
+    ax.set_ylim(bottom=0)
+
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=300, bbox_inches='tight')
+    print(f"Saved commit rate over time plot to {output_path}")
     plt.close()
 
 
@@ -1290,6 +1396,14 @@ def cli():
     generate_overhead_table(
         index_df, table_path,
         group_by=group_by
+    )
+
+    # Commit rate over time
+    plot_filename = CONFIG['output']['files']['commit_rate_over_time_plot']
+    plot_path = os.path.join(output_dir, plot_filename)
+    plot_commit_rate_over_time(
+        input_dir, pattern, plot_path,
+        title="Commit Rate Over Time"
     )
 
     print("\nAnalysis complete!")
