@@ -395,7 +395,12 @@ def compute_per_seed_statistics(df: pd.DataFrame) -> pd.DataFrame:
             continue
 
         # Calculate duration (in seconds)
-        duration_s = seed_df['t_submit'].max() / 1000.0 if len(seed_df) > 0 else 1.0
+        # After warmup/cooldown filtering, timestamps are still relative to simulation start
+        # so we need max - min, not just max
+        if len(seed_df) > 0:
+            duration_s = (seed_df['t_submit'].max() - seed_df['t_submit'].min()) / 1000.0
+        else:
+            duration_s = 1.0
 
         # Compute overhead percentage
         committed_with_overhead = committed.copy()
@@ -492,7 +497,12 @@ def compute_aggregate_statistics(df: pd.DataFrame) -> Dict:
 
     # No seed column or single seed - compute statistics directly without stddev
     # This is for backward compatibility with tests and single-seed analysis
-    duration_s = df['t_submit'].max() / 1000.0 if len(df) > 0 else 1.0
+    # After warmup/cooldown filtering, timestamps are still relative to simulation start
+    # so we need max - min, not just max
+    if len(df) > 0:
+        duration_s = (df['t_submit'].max() - df['t_submit'].min()) / 1000.0
+    else:
+        duration_s = 1.0
 
     # Compute overhead percentage
     committed_with_overhead = committed.copy()

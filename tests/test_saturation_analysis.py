@@ -395,8 +395,14 @@ runtime.mean = 10000
             })
             df.to_parquet(seed_dir / "results.parquet")
 
-            # Build index
-            index_df = build_experiment_index(tmpdir, "exp_test-*")
+            # Build index with min_seeds=1 for single-seed test
+            original_config = saturation_analysis.CONFIG.copy()
+            try:
+                saturation_analysis.CONFIG['analysis'] = saturation_analysis.CONFIG.get('analysis', {}).copy()
+                saturation_analysis.CONFIG['analysis']['min_seeds'] = 1
+                index_df = build_experiment_index(tmpdir, "exp_test-*")
+            finally:
+                saturation_analysis.CONFIG = original_config
 
             assert len(index_df) == 1
             assert 'label' in index_df.columns
@@ -532,8 +538,14 @@ runtime.mean = 10000
                     })
                     df.to_parquet(seed_dir / "results.parquet")
 
-            # Build index
-            index_df = build_experiment_index(tmpdir, "exp_test-*")
+            # Build index with min_seeds=2 for two-seed test
+            original_config = saturation_analysis.CONFIG.copy()
+            try:
+                saturation_analysis.CONFIG['analysis'] = saturation_analysis.CONFIG.get('analysis', {}).copy()
+                saturation_analysis.CONFIG['analysis']['min_seeds'] = 2
+                index_df = build_experiment_index(tmpdir, "exp_test-*")
+            finally:
+                saturation_analysis.CONFIG = original_config
 
             # Should have 2 experiments (one per inter_arrival value)
             assert len(index_df) == 2
@@ -1020,6 +1032,7 @@ pattern = "config_*"
 
 [analysis]
 group_by = "num_tables"
+min_seeds = 1
 """
             with open(config_path, 'w') as f:
                 f.write(config_content)
@@ -1087,22 +1100,24 @@ group_by = "num_tables"
             with open(exp_dir / "cfg.toml", 'w') as f:
                 f.write("[simulation]\nduration_ms = 3600000\n[experiment]\nlabel = 'default_exp'\n[transaction]\nruntime.mean = 10000\n")
 
-            seed_dir = exp_dir / "12345"
-            seed_dir.mkdir()
+            # Create 3 seeds to meet min_seeds default of 3
+            for seed in ["12345", "23456", "34567"]:
+                seed_dir = exp_dir / seed
+                seed_dir.mkdir()
 
-            # Create results spanning 1 hour to avoid warmup/cooldown exclusion
-            n_txns = 60
-            df = pd.DataFrame({
-                'txn_id': range(n_txns),
-                't_submit': [i * 60000 for i in range(n_txns)],  # Every minute
-                't_commit': [(i * 60000) + 11000 for i in range(n_txns)],
-                'commit_latency': [1000] * n_txns,
-                'total_latency': [11000] * n_txns,  # t_commit - t_submit
-                'n_retries': [0] * n_txns,
-                'status': ['committed'] * n_txns,
-                't_runtime': [10000] * n_txns  # 10 second transaction runtime
-            })
-            df.to_parquet(seed_dir / "results.parquet")
+                # Create results spanning 1 hour to avoid warmup/cooldown exclusion
+                n_txns = 60
+                df = pd.DataFrame({
+                    'txn_id': range(n_txns),
+                    't_submit': [i * 60000 for i in range(n_txns)],  # Every minute
+                    't_commit': [(i * 60000) + 11000 for i in range(n_txns)],
+                    'commit_latency': [1000] * n_txns,
+                    'total_latency': [11000] * n_txns,  # t_commit - t_submit
+                    'n_retries': [0] * n_txns,
+                    'status': ['committed'] * n_txns,
+                    't_runtime': [10000] * n_txns  # 10 second transaction runtime
+                })
+                df.to_parquet(seed_dir / "results.parquet")
 
             output_dir = Path(tmpdir) / "default_output"
 
@@ -1138,6 +1153,7 @@ group_by = "num_tables"
             config_content = """
 [analysis]
 # group_by not specified - will be overridden by CLI
+min_seeds = 1
 """
             with open(config_path, 'w') as f:
                 f.write(config_content)
