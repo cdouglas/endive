@@ -888,15 +888,38 @@ def plot_overhead_vs_throughput(
     plt.close()
 
 
+def format_value_with_stddev(value: float, stddev: float = None, decimals: int = 1) -> str:
+    """
+    Format a value with optional standard deviation.
+
+    Args:
+        value: The mean value to format
+        stddev: Optional standard deviation (if None, only value is shown)
+        decimals: Number of decimal places
+
+    Returns:
+        Formatted string like "12.5" or "12.5 ± 1.2"
+    """
+    if stddev is None or pd.isna(stddev):
+        return f"{value:.{decimals}f}"
+    else:
+        return f"{value:.{decimals}f} ± {stddev:.{decimals}f}"
+
+
 def generate_latency_vs_throughput_table(
     index_df: pd.DataFrame,
     output_path: str,
     group_by: str = None
 ):
-    """Generate markdown table for latency vs throughput data."""
+    """Generate markdown table for latency vs throughput data with optional stddev."""
+    # Check if stddev columns are available
+    has_stddev = 'p50_commit_latency_std' in index_df.columns
+
     with open(output_path, 'w') as f:
         f.write("# Commit Latency vs Throughput\n\n")
         f.write("Analysis of how commit latency scales with achieved throughput.\n\n")
+        if has_stddev:
+            f.write("Values shown as mean ± standard deviation across seeds.\n\n")
 
         if group_by and group_by in index_df.columns:
             groups = sorted(index_df[group_by].unique())
@@ -910,9 +933,32 @@ def generate_latency_vs_throughput_table(
                 f.write("|------------------|------------------|-----------------|-----------------|-----------------|---------------|\n")
 
                 for _, row in subset.iterrows():
-                    f.write(f"| {row['throughput']:.1f} | {row['success_rate']:.1f} | "
-                           f"{row['p50_commit_latency']/1000:.1f} | {row['p95_commit_latency']/1000:.1f} | "
-                           f"{row['p99_commit_latency']/1000:.1f} | {row['mean_retries']:.1f} |\n")
+                    throughput = format_value_with_stddev(
+                        row['throughput'],
+                        row.get('throughput_std') if has_stddev else None,
+                        decimals=1
+                    )
+                    success_rate = format_value_with_stddev(
+                        row['success_rate'],
+                        row.get('success_rate_std') if has_stddev else None,
+                        decimals=1
+                    )
+                    p50 = format_value_with_stddev(
+                        row['p50_commit_latency']/1000,
+                        row.get('p50_commit_latency_std')/1000 if has_stddev and row.get('p50_commit_latency_std') else None,
+                        decimals=1
+                    )
+                    p95 = format_value_with_stddev(
+                        row['p95_commit_latency']/1000,
+                        row.get('p95_commit_latency_std')/1000 if has_stddev and row.get('p95_commit_latency_std') else None,
+                        decimals=1
+                    )
+                    p99 = format_value_with_stddev(
+                        row['p99_commit_latency']/1000,
+                        row.get('p99_commit_latency_std')/1000 if has_stddev and row.get('p99_commit_latency_std') else None,
+                        decimals=1
+                    )
+                    f.write(f"| {throughput} | {success_rate} | {p50} | {p95} | {p99} | {row['mean_retries']:.1f} |\n")
                 f.write("\n")
         else:
             df_sorted = index_df.sort_values('throughput')
@@ -921,12 +967,37 @@ def generate_latency_vs_throughput_table(
             f.write("|------------------|------------------|-----------------|-----------------|-----------------|---------------|\n")
 
             for _, row in df_sorted.iterrows():
-                f.write(f"| {row['throughput']:.1f} | {row['success_rate']:.1f} | "
-                       f"{row['p50_commit_latency']/1000:.1f} | {row['p95_commit_latency']/1000:.1f} | "
-                       f"{row['p99_commit_latency']/1000:.1f} | {row['mean_retries']:.1f} |\n")
+                throughput = format_value_with_stddev(
+                    row['throughput'],
+                    row.get('throughput_std') if has_stddev else None,
+                    decimals=1
+                )
+                success_rate = format_value_with_stddev(
+                    row['success_rate'],
+                    row.get('success_rate_std') if has_stddev else None,
+                    decimals=1
+                )
+                p50 = format_value_with_stddev(
+                    row['p50_commit_latency']/1000,
+                    row.get('p50_commit_latency_std')/1000 if has_stddev and row.get('p50_commit_latency_std') else None,
+                    decimals=1
+                )
+                p95 = format_value_with_stddev(
+                    row['p95_commit_latency']/1000,
+                    row.get('p95_commit_latency_std')/1000 if has_stddev and row.get('p95_commit_latency_std') else None,
+                    decimals=1
+                )
+                p99 = format_value_with_stddev(
+                    row['p99_commit_latency']/1000,
+                    row.get('p99_commit_latency_std')/1000 if has_stddev and row.get('p99_commit_latency_std') else None,
+                    decimals=1
+                )
+                f.write(f"| {throughput} | {success_rate} | {p50} | {p95} | {p99} | {row['mean_retries']:.1f} |\n")
 
         f.write("\n## Notes\n\n")
         f.write("- Latencies reported in seconds (converted from milliseconds)\n")
+        if has_stddev:
+            f.write("- Values shown as mean ± standard deviation across multiple seeds\n")
         f.write("- Throughput = commits per second during steady-state window\n")
         f.write("- Success rate = percentage of transactions that committed successfully\n")
         f.write("- Mean retries = average number of retry attempts per committed transaction\n")
@@ -987,12 +1058,17 @@ def generate_overhead_table(
     output_path: str,
     group_by: str = None
 ):
-    """Generate markdown table for overhead percentage data."""
+    """Generate markdown table for overhead percentage data with optional stddev."""
+    # Check if stddev columns are available
+    has_stddev = 'mean_overhead_pct_std' in index_df.columns
+
     with open(output_path, 'w') as f:
         f.write("# Commit Overhead vs Throughput\n\n")
         f.write("Analysis of commit protocol overhead as percentage of total transaction time.\n\n")
         f.write("**Overhead** = (commit_latency / total_latency) × 100\n\n")
         f.write("This represents time spent in retries, exponential backoff, and manifest I/O.\n\n")
+        if has_stddev:
+            f.write("Values shown as mean ± standard deviation across seeds.\n\n")
 
         if group_by and group_by in index_df.columns:
             groups = sorted(index_df[group_by].unique())
@@ -1006,9 +1082,37 @@ def generate_overhead_table(
                 f.write("|------------------|------------------|-------------------|------------------|------------------|------------------|\n")
 
                 for _, row in subset.iterrows():
-                    f.write(f"| {row['throughput']:.1f} | {row['success_rate']:.1f} | "
-                           f"{row['mean_overhead_pct']:.1f} | {row['p50_overhead_pct']:.1f} | "
-                           f"{row['p95_overhead_pct']:.1f} | {row['p99_overhead_pct']:.1f} |\n")
+                    throughput = format_value_with_stddev(
+                        row['throughput'],
+                        row.get('throughput_std') if has_stddev else None,
+                        decimals=1
+                    )
+                    success_rate = format_value_with_stddev(
+                        row['success_rate'],
+                        row.get('success_rate_std') if has_stddev else None,
+                        decimals=1
+                    )
+                    mean_ovhd = format_value_with_stddev(
+                        row['mean_overhead_pct'],
+                        row.get('mean_overhead_pct_std') if has_stddev else None,
+                        decimals=1
+                    )
+                    p50_ovhd = format_value_with_stddev(
+                        row['p50_overhead_pct'],
+                        row.get('p50_overhead_pct_std') if has_stddev else None,
+                        decimals=1
+                    )
+                    p95_ovhd = format_value_with_stddev(
+                        row['p95_overhead_pct'],
+                        row.get('p95_overhead_pct_std') if has_stddev else None,
+                        decimals=1
+                    )
+                    p99_ovhd = format_value_with_stddev(
+                        row['p99_overhead_pct'],
+                        row.get('p99_overhead_pct_std') if has_stddev else None,
+                        decimals=1
+                    )
+                    f.write(f"| {throughput} | {success_rate} | {mean_ovhd} | {p50_ovhd} | {p95_ovhd} | {p99_ovhd} |\n")
                 f.write("\n")
         else:
             df_sorted = index_df.sort_values('throughput')
@@ -1017,15 +1121,45 @@ def generate_overhead_table(
             f.write("|------------------|------------------|-------------------|------------------|------------------|------------------|\n")
 
             for _, row in df_sorted.iterrows():
-                f.write(f"| {row['throughput']:.1f} | {row['success_rate']:.1f} | "
-                       f"{row['mean_overhead_pct']:.1f} | {row['p50_overhead_pct']:.1f} | "
-                       f"{row['p95_overhead_pct']:.1f} | {row['p99_overhead_pct']:.1f} |\n")
+                throughput = format_value_with_stddev(
+                    row['throughput'],
+                    row.get('throughput_std') if has_stddev else None,
+                    decimals=1
+                )
+                success_rate = format_value_with_stddev(
+                    row['success_rate'],
+                    row.get('success_rate_std') if has_stddev else None,
+                    decimals=1
+                )
+                mean_ovhd = format_value_with_stddev(
+                    row['mean_overhead_pct'],
+                    row.get('mean_overhead_pct_std') if has_stddev else None,
+                    decimals=1
+                )
+                p50_ovhd = format_value_with_stddev(
+                    row['p50_overhead_pct'],
+                    row.get('p50_overhead_pct_std') if has_stddev else None,
+                    decimals=1
+                )
+                p95_ovhd = format_value_with_stddev(
+                    row['p95_overhead_pct'],
+                    row.get('p95_overhead_pct_std') if has_stddev else None,
+                    decimals=1
+                )
+                p99_ovhd = format_value_with_stddev(
+                    row['p99_overhead_pct'],
+                    row.get('p99_overhead_pct_std') if has_stddev else None,
+                    decimals=1
+                )
+                f.write(f"| {throughput} | {success_rate} | {mean_ovhd} | {p50_ovhd} | {p95_ovhd} | {p99_ovhd} |\n")
 
         f.write("\n## Interpretation\n\n")
         f.write("- **Low overhead (<10%)**: System operating efficiently, minimal contention\n")
         f.write("- **Medium overhead (10-30%)**: Moderate contention, acceptable performance\n")
         f.write("- **High overhead (30-50%)**: High contention, commit protocol becoming significant\n")
         f.write("- **Very high overhead (>50%)**: Commit protocol dominates, system saturated\n\n")
+        if has_stddev:
+            f.write("Values shown as mean ± standard deviation across multiple seeds.\n")
         f.write("At saturation, overhead can exceed 50%, meaning more time is spent retrying\n")
         f.write("commits than executing transactions!\n")
 
