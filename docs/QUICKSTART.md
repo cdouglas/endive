@@ -124,11 +124,44 @@ python -m icecap.saturation_analysis \
     -o plots/exp2_2 \
     --group-by num_tables
 
+# With custom configuration
+python -m icecap.saturation_analysis \
+    --config analysis.toml \
+    -i experiments \
+    -p "exp2_*" \
+    -o plots
+
 # View results
 open plots/exp2_1/latency_vs_throughput.png
 open plots/exp2_1/success_rate_vs_throughput.png
 cat plots/exp2_1/experiment_index.csv
 ```
+
+### Analysis Configuration
+
+Customize analysis via `analysis.toml`:
+
+```toml
+# Control saturation annotations
+[plots.saturation]
+enabled = true      # Show/hide saturation markers
+threshold = 50.0    # Success rate threshold (%)
+tolerance = 5.0     # Detection tolerance (%)
+
+# Customize plot appearance
+[plots]
+dpi = 300
+[plots.figsize]
+latency_vs_throughput = [12, 8]
+
+# Configure warmup/cooldown
+[analysis]
+k_min_cycles = 5
+min_warmup_ms = 300000
+max_warmup_ms = 900000
+```
+
+See `analysis.toml` and `example_saturation_config.toml` for complete options.
 
 **Generated files:**
 - `experiment_index.csv` - Summary statistics (markdown table also generated)

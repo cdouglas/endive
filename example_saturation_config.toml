@@ -1,0 +1,48 @@
+# Example: Custom saturation threshold configuration
+#
+# This example shows how to customize the saturation annotation
+# that appears in latency vs throughput plots.
+#
+# Usage:
+#   python -m icecap.saturation_analysis --config example_saturation_config.toml
+
+[paths]
+input_dir = "experiments"
+output_dir = "plots"
+pattern = "exp2_*"
+
+# Saturation annotation settings
+[plots.saturation]
+# Enable or disable saturation annotations
+enabled = true
+
+# Success rate threshold for marking saturation (percentage)
+# Default: 50.0 (marks when success rate drops to ~50%)
+# Examples:
+#   - 50.0: Standard saturation (50% failure rate)
+#   - 60.0: Conservative saturation (40% failure rate)
+#   - 30.0: Aggressive saturation (70% failure rate)
+threshold = 50.0
+
+# Tolerance for detecting saturation point (percentage)
+# Used to find data points near the threshold
+# Default: 5.0 (looks for points within ±5% of threshold)
+tolerance = 5.0
+
+# Example configurations:
+
+# Disable saturation annotations entirely:
+# [plots.saturation]
+# enabled = false
+
+# Use a 60% success rate threshold (more conservative):
+# [plots.saturation]
+# enabled = true
+# threshold = 60.0
+# tolerance = 5.0
+
+# Use a 30% success rate threshold (show severe saturation):
+# [plots.saturation]
+# enabled = true
+# threshold = 30.0
+# tolerance = 10.0

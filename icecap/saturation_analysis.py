@@ -12,12 +12,148 @@ import os
 from collections import defaultdict
 from glob import glob
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional
 
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import tomli
+
+# Global configuration (loaded from analysis.toml or defaults)
+CONFIG = {}
+
+
+def get_default_config() -> Dict:
+    """Return default configuration if no config file is provided."""
+    return {
+        'paths': {
+            'input_dir': 'experiments',
+            'output_dir': 'plots',
+            'pattern': 'exp2_*'
+        },
+        'analysis': {
+            'group_by': None,
+            'k_min_cycles': 5,
+            'min_warmup_ms': 300000,
+            'max_warmup_ms': 900000
+        },
+        'plots': {
+            'dpi': 300,
+            'bbox_inches': 'tight',
+            'figsize': {
+                'latency_vs_throughput': [12, 8],
+                'success_vs_load': [16, 6],
+                'success_vs_throughput': [12, 8],
+                'overhead_vs_throughput': [12, 8]
+            },
+            'fonts': {
+                'title': 16,
+                'axis_label': 14,
+                'legend': 10,
+                'annotation': 10,
+                'axis_value': 13
+            },
+            'font_weights': {
+                'title': 'bold',
+                'axis_label': 'bold'
+            },
+            'legend': {
+                'loc': 'best',
+                'framealpha': 0.9
+            },
+            'annotation': {
+                'text_coords': 'offset points',
+                'xy_text': [0, 10],
+                'ha': 'center'
+            },
+            'saturation': {
+                'enabled': True,
+                'threshold': 50.0,
+                'tolerance': 5.0
+            },
+            'styles': {
+                'markers': ['o', 's', '^', 'D', 'v', '<', '>', 'p', '*', 'h'],
+                'linestyles': ['-', '--', '-.', ':'],
+                'linewidth': 2,
+                'markersize': 8,
+                'alpha': 0.7
+            },
+            'grid': {
+                'enabled': True,
+                'alpha': 0.3
+            },
+            'percentiles': {
+                'values': [50, 95, 99],
+                'labels': ['P50', 'P95', 'P99']
+            },
+            'colors': {
+                'scheme': 'default'
+            }
+        },
+        'output': {
+            'files': {
+                'experiment_index': 'experiment_index.csv',
+                'latency_vs_throughput_plot': 'latency_vs_throughput.png',
+                'latency_vs_throughput_table': 'latency_vs_throughput.md',
+                'success_vs_load_plot': 'success_vs_load.png',
+                'success_vs_throughput_plot': 'success_vs_throughput.png',
+                'overhead_vs_throughput_plot': 'overhead_vs_throughput.png',
+                'overhead_vs_throughput_table': 'overhead_vs_throughput.md'
+            },
+            'table': {
+                'float_format': '%.2f',
+                'na_rep': 'N/A',
+                'index': True
+            }
+        }
+    }
+
+
+def load_config(config_path: Optional[str] = None) -> Dict:
+    """
+    Load analysis configuration from TOML file.
+
+    Args:
+        config_path: Path to analysis.toml file. If None, searches for analysis.toml
+                     in current directory, then uses defaults.
+
+    Returns:
+        Configuration dictionary
+    """
+    if config_path is None:
+        # Try to find analysis.toml in current directory
+        if os.path.exists('analysis.toml'):
+            config_path = 'analysis.toml'
+        else:
+            # Use defaults
+            return get_default_config()
+
+    try:
+        with open(config_path, 'rb') as f:
+            loaded_config = tomli.load(f)
+
+        # Merge with defaults (in case some keys are missing)
+        default_config = get_default_config()
+
+        # Deep merge
+        def deep_merge(base, override):
+            result = base.copy()
+            for key, value in override.items():
+                if key in result and isinstance(result[key], dict) and isinstance(value, dict):
+                    result[key] = deep_merge(result[key], value)
+                else:
+                    result[key] = value
+            return result
+
+        return deep_merge(default_config, loaded_config)
+
+    except FileNotFoundError:
+        print(f"Warning: Config file {config_path} not found, using defaults")
+        return get_default_config()
+    except Exception as e:
+        print(f"Error loading config file {config_path}: {e}")
+        print("Using default configuration")
+        return get_default_config()
 
 
 def scan_experiment_directories(base_dir: str, pattern: str) -> Dict[str, Dict]:
@@ -102,9 +238,10 @@ def compute_transient_period_duration(config: Dict) -> float:
     Returns:
         Transient period duration in milliseconds
     """
-    K_MIN_CYCLES = 5  # Number of transaction cycles for steady-state (increased from 3 to eliminate gradual decline)
-    MIN_PERIOD_MS = 5 * 60 * 1000  # 5 minutes absolute minimum
-    MAX_PERIOD_MS = 15 * 60 * 1000  # 15 minutes maximum
+    # Get config values
+    K_MIN_CYCLES = CONFIG.get('analysis', {}).get('k_min_cycles', 5)
+    MIN_PERIOD_MS = CONFIG.get('analysis', {}).get('min_warmup_ms', 300000)
+    MAX_PERIOD_MS = CONFIG.get('analysis', {}).get('max_warmup_ms', 900000)
 
     # Get mean transaction runtime
     mean_runtime_ms = config.get("transaction", {}).get("runtime", {}).get("mean", 10000)
@@ -396,16 +533,22 @@ def plot_latency_vs_throughput(
                    marker=marker, linewidth=2.5, markersize=10,
                    label=label, color=color)
 
-    # Mark saturation point (50% success rate)
-    saturation_points = index_df[index_df['success_rate'] < 55]  # Some tolerance
-    if len(saturation_points) > 0:
-        sat_throughput = saturation_points['throughput'].max()
-        ax.axvline(sat_throughput, color='red', linestyle='--',
-                  linewidth=2, alpha=0.5, label='~50% Success Rate')
-        ax.text(sat_throughput, ax.get_ylim()[1] * 0.9,
-               f'Saturation\n~{sat_throughput:.1f} commits/sec',
-               ha='center', fontsize=10,
-               bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+    # Mark saturation point (configurable success rate threshold)
+    sat_config = CONFIG.get('plots', {}).get('saturation', {})
+    sat_enabled = sat_config.get('enabled', True)
+    sat_threshold = sat_config.get('threshold', 50.0)
+    sat_tolerance = sat_config.get('tolerance', 5.0)
+
+    if sat_enabled:
+        saturation_points = index_df[index_df['success_rate'] < sat_threshold + sat_tolerance]
+        if len(saturation_points) > 0:
+            sat_throughput = saturation_points['throughput'].max()
+            ax.axvline(sat_throughput, color='red', linestyle='--',
+                      linewidth=2, alpha=0.5, label=f'~{sat_threshold:.0f}% Success Rate')
+            ax.text(sat_throughput, ax.get_ylim()[1] * 0.9,
+                   f'Saturation\n~{sat_throughput:.1f} commits/sec',
+                   ha='center', fontsize=10,
+                   bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
 
     ax.set_xlabel('Achieved Throughput (commits/sec)', fontsize=14, fontweight='bold')
     ax.set_ylabel('Commit Latency (ms)', fontsize=14, fontweight='bold')
@@ -452,7 +595,15 @@ def plot_success_rate_vs_load(
     ax1.set_title('Transaction Success Rate vs Load', fontsize=14, fontweight='bold')
     ax1.grid(True, alpha=0.3)
     ax1.set_ylim([0, 105])
-    ax1.axhline(50, color='red', linestyle='--', alpha=0.5, label='50% Saturation Threshold')
+
+    # Add saturation threshold line if enabled
+    sat_config = CONFIG.get('plots', {}).get('saturation', {})
+    sat_enabled = sat_config.get('enabled', True)
+    sat_threshold = sat_config.get('threshold', 50.0)
+    if sat_enabled:
+        ax1.axhline(sat_threshold, color='red', linestyle='--', alpha=0.5,
+                   label=f'{sat_threshold:.0f}% Saturation Threshold')
+
     ax1.legend()
 
     # Plot 2: Throughput vs inter-arrival time
@@ -515,9 +666,13 @@ def plot_success_rate_vs_throughput(
         ax.plot(df_sorted['throughput'], df_sorted['success_rate'],
                marker='o', linewidth=3, markersize=10, color='#2E86AB')
 
-    # Mark 50% success rate
-    ax.axhline(50, color='red', linestyle='--', linewidth=2, alpha=0.5,
-              label='50% Saturation Threshold')
+    # Mark saturation threshold if enabled
+    sat_config = CONFIG.get('plots', {}).get('saturation', {})
+    sat_enabled = sat_config.get('enabled', True)
+    sat_threshold = sat_config.get('threshold', 50.0)
+    if sat_enabled:
+        ax.axhline(sat_threshold, color='red', linestyle='--', linewidth=2, alpha=0.5,
+                  label=f'{sat_threshold:.0f}% Saturation Threshold')
 
     ax.set_xlabel('Achieved Throughput (commits/sec)', fontsize=14, fontweight='bold')
     ax.set_ylabel('Success Rate (%)', fontsize=14, fontweight='bold')
@@ -776,89 +931,105 @@ def save_experiment_index(index_df: pd.DataFrame, output_path: str):
 
 
 def cli():
+    global CONFIG
+
     parser = argparse.ArgumentParser(
         description="Saturation analysis for baseline experiments"
     )
     parser.add_argument(
+        "-c", "--config",
+        help="Path to analysis.toml configuration file"
+    )
+    parser.add_argument(
         "-i", "--input-dir",
-        default="experiments",
-        help="Base directory containing experiment results (default: experiments)"
+        help="Base directory containing experiment results (overrides config)"
     )
     parser.add_argument(
         "-o", "--output-dir",
-        default="plots",
-        help="Output directory for plots (default: plots)"
+        help="Output directory for plots (overrides config)"
     )
     parser.add_argument(
         "-p", "--pattern",
-        default="exp2_*",
-        help="Pattern to match experiment directories (default: exp2_*)"
+        help="Pattern to match experiment directories (overrides config)"
     )
     parser.add_argument(
         "--group-by",
-        help="Parameter to group by in plots (e.g., 'num_tables', 'real_conflict_probability')"
+        help="Parameter to group by in plots (overrides config)"
     )
 
     args = parser.parse_args()
 
+    # Load configuration
+    CONFIG = load_config(args.config)
+
+    # CLI arguments override config
+    input_dir = args.input_dir if args.input_dir else CONFIG['paths']['input_dir']
+    output_dir = args.output_dir if args.output_dir else CONFIG['paths']['output_dir']
+    pattern = args.pattern if args.pattern else CONFIG['paths']['pattern']
+    group_by = args.group_by if args.group_by else CONFIG['analysis'].get('group_by')
+
     # Create output directory
-    os.makedirs(args.output_dir, exist_ok=True)
+    os.makedirs(output_dir, exist_ok=True)
 
     # Build experiment index
-    print(f"Scanning {args.input_dir} for pattern '{args.pattern}'...")
-    index_df = build_experiment_index(args.input_dir, args.pattern)
+    print(f"Scanning {input_dir} for pattern '{pattern}'...")
+    index_df = build_experiment_index(input_dir, pattern)
 
     print(f"\nBuilt index with {len(index_df)} experiments")
     print(f"Parameters found: {list(index_df.columns)}")
 
     # Save index
-    index_path = os.path.join(args.output_dir, "experiment_index.csv")
+    index_filename = CONFIG['output']['files']['experiment_index']
+    index_path = os.path.join(output_dir, index_filename)
     save_experiment_index(index_df, index_path)
 
     # Generate plots and tables
     print("\nGenerating plots and tables...")
 
     # Latency vs Throughput
-    plot_path = os.path.join(args.output_dir, "latency_vs_throughput.png")
-    table_path = os.path.join(args.output_dir, "latency_vs_throughput.md")
+    plot_filename = CONFIG['output']['files']['latency_vs_throughput_plot']
+    table_filename = CONFIG['output']['files']['latency_vs_throughput_table']
+    plot_path = os.path.join(output_dir, plot_filename)
+    table_path = os.path.join(output_dir, table_filename)
     plot_latency_vs_throughput(
         index_df, plot_path,
         title="Commit Latency vs Throughput",
-        group_by=args.group_by
+        group_by=group_by
     )
     generate_latency_vs_throughput_table(
         index_df, table_path,
-        group_by=args.group_by
+        group_by=group_by
     )
 
     # Success rate vs load (if inter_arrival_scale present)
     if 'inter_arrival_scale' in index_df.columns:
-        plot_path = os.path.join(args.output_dir, "success_rate_vs_load.png")
-        table_path = os.path.join(args.output_dir, "success_rate_vs_load.md")
+        plot_filename = CONFIG['output']['files']['success_vs_load_plot']
+        plot_path = os.path.join(output_dir, plot_filename)
         plot_success_rate_vs_load(index_df, plot_path)
-        generate_success_rate_table(index_df, table_path, group_by=args.group_by)
+        # No separate table for success_vs_load
 
     # Success rate vs throughput
-    plot_path = os.path.join(args.output_dir, "success_rate_vs_throughput.png")
-    table_path = os.path.join(args.output_dir, "success_rate_vs_throughput.md")
+    plot_filename = CONFIG['output']['files']['success_vs_throughput_plot']
+    plot_path = os.path.join(output_dir, plot_filename)
     plot_success_rate_vs_throughput(
         index_df, plot_path,
         title="Transaction Success Rate vs Throughput",
-        group_by=args.group_by
+        group_by=group_by
     )
-    generate_success_rate_table(index_df, table_path, group_by=args.group_by)
 
     # Overhead vs throughput
-    plot_path = os.path.join(args.output_dir, "overhead_vs_throughput.png")
-    table_path = os.path.join(args.output_dir, "overhead_vs_throughput.md")
+    plot_filename = CONFIG['output']['files']['overhead_vs_throughput_plot']
+    table_filename = CONFIG['output']['files']['overhead_vs_throughput_table']
+    plot_path = os.path.join(output_dir, plot_filename)
+    table_path = os.path.join(output_dir, table_filename)
     plot_overhead_vs_throughput(
         index_df, plot_path,
         title="Commit Overhead vs Throughput",
-        group_by=args.group_by
+        group_by=group_by
     )
     generate_overhead_table(
         index_df, table_path,
-        group_by=args.group_by
+        group_by=group_by
     )
 
     print("\nAnalysis complete!")

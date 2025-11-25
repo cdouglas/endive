@@ -1,0 +1,120 @@
+# Icecap Analysis Configuration
+#
+# This file configures the saturation analysis script that generates
+# latency vs throughput graphs and statistical tables from experiment results.
+#
+# Usage:
+#   python -m icecap.saturation_analysis --config analysis.toml
+#
+# CLI overrides:
+#   python -m icecap.saturation_analysis --config analysis.toml -i experiments -o plots
+
+[paths]
+# Input directory containing experiment results
+input_dir = "experiments"
+
+# Output directory for generated plots and tables
+output_dir = "plots"
+
+# Pattern to match experiment directories (glob pattern)
+# Examples: "exp2_*", "exp3_1_*", "*"
+pattern = "exp2_*"
+
+[analysis]
+# Parameter to group experiments by in plots
+# Common values: "num_tables", "real_conflict_probability", null (no grouping)
+group_by = null
+
+# Minimum number of transaction cycles for steady-state measurement
+# Used to compute warmup period: K_MIN_CYCLES × mean_transaction_runtime
+# Higher values = more conservative warmup, better steady-state isolation
+k_min_cycles = 5
+
+# Minimum warmup duration in milliseconds (5 minutes)
+min_warmup_ms = 300000
+
+# Maximum warmup duration in milliseconds (15 minutes)
+max_warmup_ms = 900000
+
+[plots]
+# General plot settings
+dpi = 300
+bbox_inches = "tight"
+
+# Figure sizes (width, height in inches)
+[plots.figsize]
+latency_vs_throughput = [12, 8]
+success_vs_load = [16, 6]  # Two subplots side-by-side
+success_vs_throughput = [12, 8]
+overhead_vs_throughput = [12, 8]
+
+# Font sizes
+[plots.fonts]
+title = 16
+axis_label = 14
+legend = 10
+annotation = 10
+axis_value = 13  # For success_vs_load plots
+
+# Font weights
+[plots.font_weights]
+title = "bold"
+axis_label = "bold"
+
+# Legend settings
+[plots.legend]
+loc = "best"
+framealpha = 0.9
+
+# Annotation settings for latency plots
+[plots.annotation]
+text_coords = "offset points"
+xy_text = [0, 10]  # Offset from data point
+ha = "center"  # Horizontal alignment
+
+# Saturation annotation settings
+[plots.saturation]
+enabled = true  # Show saturation annotation/threshold lines
+threshold = 50.0  # Success rate threshold for saturation (percentage)
+tolerance = 5.0  # Tolerance for detecting saturation point (percentage)
+
+# Line and marker styles
+[plots.styles]
+markers = ["o", "s", "^", "D", "v", "<", ">", "p", "*", "h"]
+linestyles = ["-", "--", "-.", ":"]
+linewidth = 2
+markersize = 8
+alpha = 0.7  # Transparency for plot elements
+
+# Grid settings
+[plots.grid]
+enabled = true
+alpha = 0.3
+
+# Percentiles to plot for latency analysis
+[plots.percentiles]
+values = [50, 95, 99]
+labels = ["P50", "P95", "P99"]
+
+# Color scheme
+[plots.colors]
+# Default matplotlib color cycle
+# Can be overridden with custom colors
+scheme = "default"  # Options: "default", "colorblind", "grayscale"
+
+[output]
+# Output file formats and names
+[output.files]
+experiment_index = "experiment_index.csv"
+latency_vs_throughput_plot = "latency_vs_throughput.png"
+latency_vs_throughput_table = "latency_vs_throughput.md"
+success_vs_load_plot = "success_vs_load.png"
+success_vs_throughput_plot = "success_vs_throughput.png"
+overhead_vs_throughput_plot = "overhead_vs_throughput.png"
+overhead_vs_throughput_table = "overhead_vs_throughput.md"
+
+# Table formatting
+[output.table]
+float_format = "%.2f"
+na_rep = "N/A"
+index = true

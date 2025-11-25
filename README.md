@@ -72,6 +72,9 @@ pip install -e .
 python -m icecap.saturation_analysis -i experiments -p "exp2_1_*" -o plots/exp2_1
 python -m icecap.saturation_analysis -i experiments -p "exp2_2_*" -o plots/exp2_2 --group-by num_tables
 
+# Analyze with custom configuration
+python -m icecap.saturation_analysis --config analysis.toml
+
 # View results
 open plots/exp2_1/latency_vs_throughput.png
 cat plots/exp2_1/experiment_index.csv
@@ -81,6 +84,52 @@ cat plots/exp2_1/experiment_index.csv
 ```bash
 ./scripts/run_baseline_experiments.sh --quick --seeds 1
 ```
+
+## Analysis Configuration
+
+The analysis script supports comprehensive configuration via `analysis.toml`:
+
+```bash
+# Use default configuration (auto-discovers analysis.toml)
+python -m icecap.saturation_analysis -i experiments -o plots
+
+# Use custom config file
+python -m icecap.saturation_analysis --config custom_analysis.toml
+
+# Override specific config values via CLI
+python -m icecap.saturation_analysis --config analysis.toml -o custom_output --group-by num_tables
+```
+
+### Key Configuration Options
+
+**Saturation Annotations** - Control when saturation is marked on plots:
+```toml
+[plots.saturation]
+enabled = true      # Show/hide saturation annotations
+threshold = 50.0    # Success rate threshold (%)
+tolerance = 5.0     # Detection tolerance (%)
+```
+
+**Plot Appearance** - Customize figure sizes, fonts, colors, markers, etc.:
+```toml
+[plots]
+dpi = 300
+[plots.figsize]
+latency_vs_throughput = [12, 8]
+[plots.fonts]
+title = 16
+axis_label = 14
+```
+
+**Analysis Parameters** - Configure warmup/cooldown periods:
+```toml
+[analysis]
+k_min_cycles = 5         # Minimum transaction cycles for steady-state
+min_warmup_ms = 300000   # 5 minutes minimum
+max_warmup_ms = 900000   # 15 minutes maximum
+```
+
+See `analysis.toml` for complete configuration options and `example_saturation_config.toml` for usage examples.
 
 ## Docker
 
