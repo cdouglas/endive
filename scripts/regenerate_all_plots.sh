@@ -54,6 +54,9 @@ declare -a experiments=(
     "exp2_2_*|plots/exp2_2|num_tables|Multi-table false conflicts"
     "exp3_1_*|plots/exp3_1||Single-table real conflicts"
     "exp3_2_*|plots/exp3_2||Manifest distribution variance"
+    "exp3_3_*|plots/exp3_3|num_tables|Multi-table real conflicts"
+    "exp3_4_*|plots/exp3_4||Exponential backoff sensitivity"
+    "exp4_1_*|plots/exp4_1||Exponential backoff with real conflicts"
 )
 
 # Function to run analysis for one experiment group
@@ -63,7 +66,15 @@ run_analysis() {
     local group_by="$3"
     local description="$4"
 
-    echo "Starting: $description ($pattern)"
+    # Check if any experiments exist matching the pattern
+    local exp_count=$(find experiments -type d -name "$pattern" 2>/dev/null | wc -l)
+
+    if [ "$exp_count" -eq 0 ]; then
+        echo "Skipped: $description (no experiments found matching $pattern)"
+        return 0
+    fi
+
+    echo "Starting: $description ($pattern) - $exp_count experiment configs found"
 
     # Create output directory
     mkdir -p "$output_dir"
@@ -84,7 +95,8 @@ run_analysis() {
         echo "Completed: $description"
     else
         echo "Failed: $description (exit code: $exit_code)"
-        return $exit_code
+        # Don't propagate error - continue with other experiments
+        return 0
     fi
 }
 
