@@ -20,7 +20,12 @@
       "Bash(docker logs:*)",
       "Bash(for file in experiment_configs/exp2_1_single_table_false_conflicts.toml experiment_configs/exp3_1_single_table_real_conflicts.toml)",
       "Bash(bash:*)",
-      "Bash(git -C /home/chris/work/est status --short)"
+      "Bash(git -C /home/chris/work/est status --short)",
+      "Bash(for exp in exp2_1 exp2_2 exp3_1 exp3_2 exp3_3)",
+      "Bash(python3:*)",
+      "Bash(./scripts/regenerate_all_plots.sh:*)",
+      "Bash(tar:*)",
+      "Bash(python test_bug_simulation.py:*)"
     ],
     "deny": [],
     "ask": []
