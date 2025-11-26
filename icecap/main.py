@@ -954,6 +954,71 @@ def setup(sim):
         sim.process(txn_gen(sim, next(txn_ids), catalog))
 
 
+def check_existing_experiment(config: dict, config_file: str) -> tuple[bool, int | None, str | None]:
+    """Check if experiment results already exist and are complete.
+
+    Returns:
+        (skip, seed, output_path):
+            - skip: True if results exist and simulation should be skipped
+            - seed: Existing seed if found, None otherwise
+            - output_path: Path to existing results if found, None otherwise
+    """
+    from pathlib import Path
+    import tomllib
+
+    label = config.get("experiment", {}).get("label")
+
+    if label is None:
+        # No experiment label - check if simple output file exists
+        output_path = config["simulation"]["output_path"]
+        if Path(output_path).exists():
+            return (True, None, output_path)
+        return (False, None, None)
+
+    # Compute experiment hash
+    exp_hash = compute_experiment_hash(config)
+    exp_dir = Path("experiments") / f"{label}-{exp_hash}"
+
+    # Check if experiment directory exists
+    if not exp_dir.exists():
+        return (False, None, None)
+
+    # Check for existing cfg.toml and validate hash
+    exp_config_path = exp_dir / "cfg.toml"
+    if exp_config_path.exists():
+        try:
+            with open(exp_config_path, "rb") as f:
+                existing_config = tomllib.load(f)
+            existing_hash = compute_experiment_hash(existing_config)
+
+            if existing_hash != exp_hash:
+                logger.warning(f"⚠️  Hash mismatch in {exp_dir}")
+                logger.warning(f"   Expected: {exp_hash}")
+                logger.warning(f"   Found:    {existing_hash}")
+                logger.warning(f"   Configuration may have changed - continuing anyway")
+        except Exception as e:
+            logger.warning(f"Could not validate existing config: {e}")
+
+    # Look for completed runs (seed directories with results.parquet)
+    output_filename = config["simulation"]["output_path"]
+    completed_seeds = []
+
+    if exp_dir.exists():
+        for seed_dir in exp_dir.iterdir():
+            if seed_dir.is_dir() and seed_dir.name.isdigit():
+                results_path = seed_dir / output_filename
+                if results_path.exists():
+                    completed_seeds.append(int(seed_dir.name))
+
+    # Check if configured seed is already completed
+    configured_seed = config.get("simulation", {}).get("seed")
+    if configured_seed is not None and configured_seed in completed_seeds:
+        output_path = exp_dir / str(configured_seed) / output_filename
+        return (True, configured_seed, str(output_path))
+
+    return (False, None, None)
+
+
 def prepare_experiment_output(config: dict, config_file: str, actual_seed: int) -> str:
     """Prepare experiment output directory and return final output path.
 
@@ -1064,6 +1129,14 @@ def cli():
         sys.exit(1)
 
     configure_from_toml(args.config)
+
+    # Check if experiment results already exist
+    skip, existing_seed, existing_output = check_existing_experiment(config, args.config)
+    if skip:
+        if not args.quiet:
+            print(f"✓ Results already exist: {existing_output}")
+            print(f"  Skipping simulation (seed={existing_seed})")
+        sys.exit(0)
 
     # Print configuration (unless quiet mode)
     if not args.quiet:
