@@ -25,7 +25,17 @@
       "Bash(python3:*)",
       "Bash(./scripts/regenerate_all_plots.sh:*)",
       "Bash(tar:*)",
-      "Bash(python test_bug_simulation.py:*)"
+      "Bash(python test_bug_simulation.py:*)",
+      "Bash(python:*)",
+      "Bash(source venv/bin/activate)",
+      "Bash(timeout 120 python:*)",
+      "Bash(if [ -f experiments/consolidated.parquet ])",
+      "Bash(then ls -lh experiments/consolidated.parquet)",
+      "Bash(else echo \"File not yet created, checking if process is running...\")",
+      "Bash(fi)",
+      "Bash(timeout 1800 python scripts/consolidate_all_experiments.py:*)",
+      "Bash(BashOutput ac27ec)",
+      "Bash(timeout 300 python:*)"
     ],
     "deny": [],
     "ask": []
