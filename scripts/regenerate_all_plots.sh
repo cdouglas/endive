@@ -5,11 +5,17 @@
 # This script runs saturation analysis for all experiment patterns
 # and generates plots with standard deviation across seeds.
 #
+# Uses consolidated.parquet file if available (22× faster than individual files).
+# Falls back to individual results.parquet files if consolidated file missing.
+#
 # Usage:
 #   ./scripts/regenerate_all_plots.sh [--parallel N]
 #
 # Options:
 #   --parallel N    Number of parallel analysis jobs (default: 4)
+#
+# Note: To regenerate consolidated.parquet, run:
+#   python scripts/consolidate_all_experiments_incremental.py
 #
 
 set -e
