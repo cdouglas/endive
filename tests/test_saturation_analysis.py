@@ -1037,28 +1037,46 @@ min_seeds = 1
             with open(config_path, 'w') as f:
                 f.write(config_content)
 
-            # Create minimal experiment structure
+            # Create experiment structure with complete config
             exp_dir = Path(tmpdir) / "cli_exp-abc123"
             exp_dir.mkdir()
 
             with open(exp_dir / "cfg.toml", 'w') as f:
-                f.write("[simulation]\nduration_ms = 3600000\n[experiment]\nlabel = 'cli_exp'\n[transaction]\nruntime.mean = 10000\n")
+                f.write("""
+[simulation]
+duration_ms = 3600000
+
+[experiment]
+label = 'cli_exp'
+
+[catalog]
+num_tables = 1
+num_groups = 1
+
+[transaction]
+runtime.mean = 10000
+inter_arrival.scale = 100.0
+retry = 10
+""")
 
             seed_dir = exp_dir / "12345"
             seed_dir.mkdir()
 
-            # Create results spanning 1 hour to avoid warmup/cooldown exclusion
-            # Generate transactions every minute for 60 minutes
-            n_txns = 60
+            # Create results spanning 1 hour with enough data after warmup/cooldown
+            # With 15-min warmup and 15-min cooldown, active window is 30 minutes (900-2700 seconds)
+            # Generate 300 transactions (one every 12 seconds) to ensure enough data
+            n_txns = 300
             df = pd.DataFrame({
                 'txn_id': range(n_txns),
-                't_submit': [i * 60000 for i in range(n_txns)],  # Every minute
-                't_commit': [(i * 60000) + 11000 for i in range(n_txns)],
+                't_submit': [i * 12000 for i in range(n_txns)],  # Every 12 seconds for 60 minutes
+                't_runtime': [10000] * n_txns,
+                't_commit': [(i * 12000) + 11000 for i in range(n_txns)],
                 'commit_latency': [1000] * n_txns,
-                'total_latency': [11000] * n_txns,  # t_commit - t_submit
+                'total_latency': [11000] * n_txns,
                 'n_retries': [0] * n_txns,
-                'status': ['committed'] * n_txns,
-                't_runtime': [10000] * n_txns  # 10 second transaction runtime
+                'n_tables_read': [1] * n_txns,
+                'n_tables_written': [1] * n_txns,
+                'status': ['committed'] * n_txns
             })
             df.to_parquet(seed_dir / "results.parquet")
 
@@ -1093,29 +1111,46 @@ min_seeds = 1
         import sys
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            # Create minimal experiment structure
+            # Create experiment structure with complete config
             exp_dir = Path(tmpdir) / "default_exp-xyz789"
             exp_dir.mkdir()
 
             with open(exp_dir / "cfg.toml", 'w') as f:
-                f.write("[simulation]\nduration_ms = 3600000\n[experiment]\nlabel = 'default_exp'\n[transaction]\nruntime.mean = 10000\n")
+                f.write("""
+[simulation]
+duration_ms = 3600000
+
+[experiment]
+label = 'default_exp'
+
+[catalog]
+num_tables = 1
+num_groups = 1
+
+[transaction]
+runtime.mean = 10000
+inter_arrival.scale = 100.0
+retry = 10
+""")
 
             # Create 3 seeds to meet min_seeds default of 3
             for seed in ["12345", "23456", "34567"]:
                 seed_dir = exp_dir / seed
                 seed_dir.mkdir()
 
-                # Create results spanning 1 hour to avoid warmup/cooldown exclusion
-                n_txns = 60
+                # Create results spanning 1 hour with enough data after warmup/cooldown
+                n_txns = 300
                 df = pd.DataFrame({
                     'txn_id': range(n_txns),
-                    't_submit': [i * 60000 for i in range(n_txns)],  # Every minute
-                    't_commit': [(i * 60000) + 11000 for i in range(n_txns)],
+                    't_submit': [i * 12000 for i in range(n_txns)],  # Every 12 seconds for 60 minutes
+                    't_runtime': [10000] * n_txns,
+                    't_commit': [(i * 12000) + 11000 for i in range(n_txns)],
                     'commit_latency': [1000] * n_txns,
-                    'total_latency': [11000] * n_txns,  # t_commit - t_submit
+                    'total_latency': [11000] * n_txns,
                     'n_retries': [0] * n_txns,
-                    'status': ['committed'] * n_txns,
-                    't_runtime': [10000] * n_txns  # 10 second transaction runtime
+                    'n_tables_read': [1] * n_txns,
+                    'n_tables_written': [1] * n_txns,
+                    'status': ['committed'] * n_txns
                 })
                 df.to_parquet(seed_dir / "results.parquet")
 
@@ -1173,26 +1208,30 @@ label = "group_exp_{num_tables}"
 
 [catalog]
 num_tables = {num_tables}
+num_groups = {num_tables}
 
 [transaction]
 inter_arrival.scale = 100
 runtime.mean = 10000
+retry = 10
 """)
 
                 seed_dir = exp_dir / "12345"
                 seed_dir.mkdir()
 
-                # Create results spanning 1 hour
-                n_txns = 60
+                # Create results spanning 1 hour with enough data after warmup/cooldown
+                n_txns = 300
                 df = pd.DataFrame({
                     'txn_id': range(n_txns),
-                    't_submit': [i * 60000 for i in range(n_txns)],  # Every minute
-                    't_commit': [(i * 60000) + 11000 for i in range(n_txns)],
+                    't_submit': [i * 12000 for i in range(n_txns)],  # Every 12 seconds for 60 minutes
+                    't_runtime': [10000] * n_txns,
+                    't_commit': [(i * 12000) + 11000 for i in range(n_txns)],
                     'commit_latency': [1000] * n_txns,
-                    'total_latency': [11000] * n_txns,  # t_commit - t_submit
+                    'total_latency': [11000] * n_txns,
                     'n_retries': [0] * n_txns,
-                    'status': ['committed'] * n_txns,
-                    't_runtime': [10000] * n_txns
+                    'n_tables_read': [num_tables] * n_txns,
+                    'n_tables_written': [num_tables] * n_txns,
+                    'status': ['committed'] * n_txns
                 })
                 df.to_parquet(seed_dir / "results.parquet")
 
