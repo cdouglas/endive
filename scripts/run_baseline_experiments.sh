@@ -14,11 +14,14 @@
 #   --exp3.1           Run Experiment 3.1 (single table, real conflicts)
 #   --exp3.2           Run Experiment 3.2 (manifest count distribution)
 #   --exp3.3           Run Experiment 3.3 (multi-table, real conflicts)
+#   --exp5.1           Run Experiment 5.1 (single table, catalog latency)
+#   --exp5.2           Run Experiment 5.2 (multi-table, catalog latency)
+#   --exp5.3           Run Experiment 5.3 (transaction partitioning, catalog latency)
 #   --quick            Quick test mode (fewer configs, shorter duration)
 #   --dry-run          Show what would be run without executing
 #   --help, -h         Show this help message
 #
-# If no --expM.N flags are specified, runs all experiments (Phase 2 & 3)
+# If no --expM.N flags are specified, runs all experiments (Phase 2, 3, 5)
 #
 # Examples:
 #   # Run all experiments (Phase 2 & 3) with 5 seeds
@@ -32,6 +35,9 @@
 #
 #   # Quick test of exp3.1
 #   ./run_baseline_experiments.sh --exp3.1 --quick --seeds 1
+#
+#   # Run Phase 5 catalog latency experiments
+#   ./run_baseline_experiments.sh --exp5.1 --exp5.2 --exp5.3
 #
 #   # Run with 8 parallel jobs in background
 #   nohup ./run_baseline_experiments.sh --parallel 8 --seeds 3 > experiments.log 2>&1 &
@@ -56,6 +62,9 @@ RUN_EXP3_2=false
 RUN_EXP3_3=false
 RUN_EXP3_4=false
 RUN_EXP4_1=false
+RUN_EXP5_1=false
+RUN_EXP5_2=false
+RUN_EXP5_3=false
 ANY_EXP_SPECIFIED=false
 
 # Experiment parameters
@@ -82,6 +91,18 @@ EXP3_4_REAL_PROBS=(0.0 0.1 0.3 0.5)
 # Phase 4: Exponential backoff
 EXP4_1_LOADS=(10 20 50 100 200 500 1000 2000 5000)
 
+# Phase 5: Catalog latency impact
+EXP5_1_LOADS=(10 20 50 100 200 500 1000 2000 5000)
+EXP5_1_CAS_LATENCIES=(15 50 100 200 500 1000)
+
+EXP5_2_LOADS=(10 20 50 100 200 500 1000 2000 5000)
+EXP5_2_CAS_LATENCIES=(15 50 100 200 500 1000)
+EXP5_2_TABLES=(1 5 20 50)
+
+EXP5_3_LOADS=(10 20 50 100 200 500 1000 2000 5000)
+EXP5_3_CAS_LATENCIES=(15 50 100 200 500 1000)
+EXP5_3_GROUPS=(1 2 5 10 20)
+
 # Quick mode parameters (for testing)
 QUICK_LOADS=(100 500 2000)
 QUICK_TABLES=(1 5 10)
@@ -97,6 +118,9 @@ EXP3_2_CONFIG="experiment_configs/exp3_2_manifest_count_distribution.toml"
 EXP3_3_CONFIG="experiment_configs/exp3_3_multi_table_real_conflicts.toml"
 EXP3_4_CONFIG="experiment_configs/exp3_4_multi_table_real_backoff.toml"
 EXP4_1_CONFIG="experiment_configs/exp4_1_single_table_false_backoff.toml"
+EXP5_1_CONFIG="experiment_configs/exp5_1_single_table_catalog_latency.toml"
+EXP5_2_CONFIG="experiment_configs/exp5_2_multi_table_catalog_latency.toml"
+EXP5_3_CONFIG="experiment_configs/exp5_3_transaction_partitioning_catalog_latency.toml"
 
 # Logging
 LOG_DIR="experiment_logs"
@@ -155,6 +179,21 @@ while [[ $# -gt 0 ]]; do
             ;;
         --exp4.1)
             RUN_EXP4_1=true
+            ANY_EXP_SPECIFIED=true
+            shift
+            ;;
+        --exp5.1)
+            RUN_EXP5_1=true
+            ANY_EXP_SPECIFIED=true
+            shift
+            ;;
+        --exp5.2)
+            RUN_EXP5_2=true
+            ANY_EXP_SPECIFIED=true
+            shift
+            ;;
+        --exp5.3)
+            RUN_EXP5_3=true
             ANY_EXP_SPECIFIED=true
             shift
             ;;
@@ -395,6 +434,18 @@ if [ "$RUN_EXP4_1" = true ]; then
     TOTAL_RUNS=$((TOTAL_RUNS + ${#EXP4_1_LOADS[@]} * NUM_SEEDS))
 fi
 
+if [ "$RUN_EXP5_1" = true ]; then
+    TOTAL_RUNS=$((TOTAL_RUNS + ${#EXP5_1_LOADS[@]} * ${#EXP5_1_CAS_LATENCIES[@]} * NUM_SEEDS))
+fi
+
+if [ "$RUN_EXP5_2" = true ]; then
+    TOTAL_RUNS=$((TOTAL_RUNS + ${#EXP5_2_LOADS[@]} * ${#EXP5_2_CAS_LATENCIES[@]} * ${#EXP5_2_TABLES[@]} * NUM_SEEDS))
+fi
+
+if [ "$RUN_EXP5_3" = true ]; then
+    TOTAL_RUNS=$((TOTAL_RUNS + ${#EXP5_3_LOADS[@]} * ${#EXP5_3_CAS_LATENCIES[@]} * ${#EXP5_3_GROUPS[@]} * NUM_SEEDS))
+fi
+
 # ============================================================================
 # Print Summary
 # ============================================================================
@@ -414,6 +465,10 @@ log "  Phase 3 (Real Conflicts):"
 log "    Exp 3.1 (Single table, varying prob): $RUN_EXP3_1"
 log "    Exp 3.2 (Manifest count distribution): $RUN_EXP3_2"
 log "    Exp 3.3 (Multi-table, real conflicts): $RUN_EXP3_3"
+log "  Phase 5 (Catalog Latency):"
+log "    Exp 5.1 (Single table, catalog latency): $RUN_EXP5_1"
+log "    Exp 5.2 (Multi-table, catalog latency): $RUN_EXP5_2"
+log "    Exp 5.3 (Transaction partitioning, catalog latency): $RUN_EXP5_3"
 log ""
 log "Total simulations to run: $TOTAL_RUNS"
 
@@ -758,6 +813,177 @@ if [ "$RUN_EXP4_1" = true ]; then
 fi
 
 # ============================================================================
+# Experiment 5.1: Single Table with Varying Catalog Latency - False Conflicts
+# ============================================================================
+
+if [ "$RUN_EXP5_1" = true ]; then
+    log_section "EXPERIMENT 5.1: Single Table with Varying Catalog Latency"
+    log "Research Question: How does catalog latency affect throughput ceiling?"
+    log ""
+    log "Sweeping T_CAS.mean: ${EXP5_1_CAS_LATENCIES[*]} ms"
+    log "Sweeping inter_arrival.scale: ${EXP5_1_LOADS[*]}"
+    log ""
+
+    for cas_latency in "${EXP5_1_CAS_LATENCIES[@]}"; do
+        cas_stddev=$((cas_latency / 10))  # 10% stddev
+        for load in "${EXP5_1_LOADS[@]}"; do
+            for seed_num in $(seq 1 $NUM_SEEDS); do
+                CURRENT_RUN=$((CURRENT_RUN + 1))
+                PROGRESS="[$CURRENT_RUN/$TOTAL_RUNS]"
+
+                TEMP_CONFIG=$(mktemp)
+
+                if [ "$QUICK_MODE" = true ]; then
+                    create_config_variant "$EXP5_1_CONFIG" "$TEMP_CONFIG" \
+                        "T_CAS.mean=${cas_latency}" \
+                        "T_CAS.stddev=${cas_stddev}" \
+                        "T_METADATA_ROOT.read.mean=${cas_latency}" \
+                        "T_METADATA_ROOT.read.stddev=${cas_stddev}" \
+                        "T_METADATA_ROOT.write.mean=${cas_latency}" \
+                        "T_METADATA_ROOT.write.stddev=${cas_stddev}" \
+                        "inter_arrival.scale=${load}" \
+                        "duration_ms=${QUICK_DURATION}"
+                else
+                    create_config_variant "$EXP5_1_CONFIG" "$TEMP_CONFIG" \
+                        "T_CAS.mean=${cas_latency}" \
+                        "T_CAS.stddev=${cas_stddev}" \
+                        "T_METADATA_ROOT.read.mean=${cas_latency}" \
+                        "T_METADATA_ROOT.read.stddev=${cas_stddev}" \
+                        "T_METADATA_ROOT.write.mean=${cas_latency}" \
+                        "T_METADATA_ROOT.write.stddev=${cas_stddev}" \
+                        "inter_arrival.scale=${load}"
+                fi
+
+                wait_for_job_slot
+                DESC="$PROGRESS Exp5.1 cas=${cas_latency}ms load=$load seed=$seed_num"
+                log "  Starting: $DESC"
+                run_experiment_background "$EXP5_1_CONFIG" "$TEMP_CONFIG" "$DESC"
+            done
+        done
+    done
+
+    log "All Experiment 5.1 jobs submitted"
+fi
+
+# ============================================================================
+# Experiment 5.2: Multi-Table with Varying Catalog Latency - False Conflicts
+# ============================================================================
+
+if [ "$RUN_EXP5_2" = true ]; then
+    log_section "EXPERIMENT 5.2: Multi-Table with Varying Catalog Latency"
+    log "Research Question: Does catalog latency change multi-table scaling?"
+    log ""
+    log "Sweeping T_CAS.mean: ${EXP5_2_CAS_LATENCIES[*]} ms"
+    log "Sweeping num_tables: ${EXP5_2_TABLES[*]}"
+    log "Sweeping inter_arrival.scale: ${EXP5_2_LOADS[*]}"
+    log ""
+
+    for cas_latency in "${EXP5_2_CAS_LATENCIES[@]}"; do
+        cas_stddev=$((cas_latency / 10))  # 10% stddev
+        for num_tables in "${EXP5_2_TABLES[@]}"; do
+            for load in "${EXP5_2_LOADS[@]}"; do
+                for seed_num in $(seq 1 $NUM_SEEDS); do
+                    CURRENT_RUN=$((CURRENT_RUN + 1))
+                    PROGRESS="[$CURRENT_RUN/$TOTAL_RUNS]"
+
+                    TEMP_CONFIG=$(mktemp)
+
+                    if [ "$QUICK_MODE" = true ]; then
+                        create_config_variant "$EXP5_2_CONFIG" "$TEMP_CONFIG" \
+                            "num_tables=${num_tables}" \
+                            "num_groups=${num_tables}" \
+                            "T_CAS.mean=${cas_latency}" \
+                            "T_CAS.stddev=${cas_stddev}" \
+                            "T_METADATA_ROOT.read.mean=${cas_latency}" \
+                            "T_METADATA_ROOT.read.stddev=${cas_stddev}" \
+                            "T_METADATA_ROOT.write.mean=${cas_latency}" \
+                            "T_METADATA_ROOT.write.stddev=${cas_stddev}" \
+                            "inter_arrival.scale=${load}" \
+                            "duration_ms=${QUICK_DURATION}"
+                    else
+                        create_config_variant "$EXP5_2_CONFIG" "$TEMP_CONFIG" \
+                            "num_tables=${num_tables}" \
+                            "num_groups=${num_tables}" \
+                            "T_CAS.mean=${cas_latency}" \
+                            "T_CAS.stddev=${cas_stddev}" \
+                            "T_METADATA_ROOT.read.mean=${cas_latency}" \
+                            "T_METADATA_ROOT.read.stddev=${cas_stddev}" \
+                            "T_METADATA_ROOT.write.mean=${cas_latency}" \
+                            "T_METADATA_ROOT.write.stddev=${cas_stddev}" \
+                            "inter_arrival.scale=${load}"
+                    fi
+
+                    wait_for_job_slot
+                    DESC="$PROGRESS Exp5.2 cas=${cas_latency}ms tables=$num_tables load=$load seed=$seed_num"
+                    log "  Starting: $DESC"
+                    run_experiment_background "$EXP5_2_CONFIG" "$TEMP_CONFIG" "$DESC"
+                done
+            done
+        done
+    done
+
+    log "All Experiment 5.2 jobs submitted"
+fi
+
+# ============================================================================
+# Experiment 5.3: Transaction Partitioning with Varying Catalog Latency
+# ============================================================================
+
+if [ "$RUN_EXP5_3" = true ]; then
+    log_section "EXPERIMENT 5.3: Transaction Partitioning with Varying Catalog Latency"
+    log "Research Question: How does transaction partitioning interact with catalog latency?"
+    log ""
+    log "Sweeping T_CAS.mean: ${EXP5_3_CAS_LATENCIES[*]} ms"
+    log "Sweeping num_groups: ${EXP5_3_GROUPS[*]}"
+    log "Sweeping inter_arrival.scale: ${EXP5_3_LOADS[*]}"
+    log ""
+
+    for cas_latency in "${EXP5_3_CAS_LATENCIES[@]}"; do
+        cas_stddev=$((cas_latency / 10))  # 10% stddev
+        for num_groups in "${EXP5_3_GROUPS[@]}"; do
+            for load in "${EXP5_3_LOADS[@]}"; do
+                for seed_num in $(seq 1 $NUM_SEEDS); do
+                    CURRENT_RUN=$((CURRENT_RUN + 1))
+                    PROGRESS="[$CURRENT_RUN/$TOTAL_RUNS]"
+
+                    TEMP_CONFIG=$(mktemp)
+
+                    if [ "$QUICK_MODE" = true ]; then
+                        create_config_variant "$EXP5_3_CONFIG" "$TEMP_CONFIG" \
+                            "num_groups=${num_groups}" \
+                            "T_CAS.mean=${cas_latency}" \
+                            "T_CAS.stddev=${cas_stddev}" \
+                            "T_METADATA_ROOT.read.mean=${cas_latency}" \
+                            "T_METADATA_ROOT.read.stddev=${cas_stddev}" \
+                            "T_METADATA_ROOT.write.mean=${cas_latency}" \
+                            "T_METADATA_ROOT.write.stddev=${cas_stddev}" \
+                            "inter_arrival.scale=${load}" \
+                            "duration_ms=${QUICK_DURATION}"
+                    else
+                        create_config_variant "$EXP5_3_CONFIG" "$TEMP_CONFIG" \
+                            "num_groups=${num_groups}" \
+                            "T_CAS.mean=${cas_latency}" \
+                            "T_CAS.stddev=${cas_stddev}" \
+                            "T_METADATA_ROOT.read.mean=${cas_latency}" \
+                            "T_METADATA_ROOT.read.stddev=${cas_stddev}" \
+                            "T_METADATA_ROOT.write.mean=${cas_latency}" \
+                            "T_METADATA_ROOT.write.stddev=${cas_stddev}" \
+                            "inter_arrival.scale=${load}"
+                    fi
+
+                    wait_for_job_slot
+                    DESC="$PROGRESS Exp5.3 cas=${cas_latency}ms groups=$num_groups load=$load seed=$seed_num"
+                    log "  Starting: $DESC"
+                    run_experiment_background "$EXP5_3_CONFIG" "$TEMP_CONFIG" "$DESC"
+                done
+            done
+        done
+    done
+
+    log "All Experiment 5.3 jobs submitted"
+fi
+
+# ============================================================================
 # Wait for all jobs to complete
 # ============================================================================
 
@@ -788,6 +1014,15 @@ if [ "$RUN_EXP3_2" = true ]; then
 fi
 if [ "$RUN_EXP3_3" = true ]; then
     log "  exp3_3_multi_table_real-*/"
+fi
+if [ "$RUN_EXP5_1" = true ]; then
+    log "  exp5_1_single_table_catalog_latency-*/"
+fi
+if [ "$RUN_EXP5_2" = true ]; then
+    log "  exp5_2_multi_table_catalog_latency-*/"
+fi
+if [ "$RUN_EXP5_3" = true ]; then
+    log "  exp5_3_transaction_partitioning_catalog_latency-*/"
 fi
 
 log ""

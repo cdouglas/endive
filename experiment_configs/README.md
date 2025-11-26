@@ -126,6 +126,53 @@ done
 - Heatmap of saturation throughput
 - Optimal table count depends on conflict probability
 
+### Phase 5: Catalog Latency Impact
+
+Measures how catalog latency (CAS and metadata operations) affects throughput.
+
+#### Experiment 5.1: Single Table, Catalog Latency
+- **File**: `exp5_1_single_table_catalog_latency.toml`
+- **Goal**: Isolate pure catalog latency impact on throughput ceiling
+
+**Key Parameters to Sweep:**
+- `T_CAS.mean` (and `T_METADATA_ROOT`): [15, 50, 100, 200, 500, 1000] ms
+- `inter_arrival.scale`: [10, 20, 50, 100, 200, 500, 1000, 2000, 5000]
+
+**Key Findings:**
+- Throughput ceiling inversely proportional to catalog latency
+- Fast catalog (15ms S3 Express) → ~66 txn/sec
+- Slow catalog (1000ms) → ~1 txn/sec
+
+#### Experiment 5.2: Multi-Table, Catalog Latency
+- **File**: `exp5_2_multi_table_catalog_latency.toml`
+- **Goal**: How does catalog latency interact with hot-table bottlenecks?
+
+**Key Parameters to Sweep:**
+- `T_CAS.mean`: [15, 50, 100, 200, 500, 1000] ms
+- `num_tables` (and `num_groups`): [1, 5, 20, 50]
+- `inter_arrival.scale`: [10, 20, 50, 100, 200, 500, 1000, 2000, 5000]
+
+**Key Findings:**
+- Fast catalog: hot-table bottleneck dominates
+- Slow catalog: catalog latency dominates, table count matters less
+
+#### Experiment 5.3: Transaction Partitioning, Catalog Latency
+- **File**: `exp5_3_transaction_partitioning_catalog_latency.toml`
+- **Goal**: At what catalog latency does transaction partitioning stop helping?
+
+**Key Parameters to Sweep:**
+- `T_CAS.mean`: [15, 50, 100, 200, 500, 1000] ms
+- `num_tables`: 20 (fixed)
+- `num_groups`: [1, 2, 5, 10, 20] (catalog-level to table-level conflicts)
+- `inter_arrival.scale`: [10, 20, 50, 100, 200, 500, 1000, 2000, 5000]
+
+**Key Findings:**
+- Fast catalog: more groups significantly reduces contention
+- Slow catalog: catalog itself is bottleneck, partitioning helps less
+- Reveals crossover point for partitioning effectiveness
+
+**Total Phase 5 Runs**: 2,700 simulations (~28 hours with 96 parallel)
+
 ## Output Organization
 
 All experiments use the `experiment.label` parameter to organize outputs:
