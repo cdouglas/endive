@@ -29,14 +29,16 @@ def get_default_config() -> Dict:
         'paths': {
             'input_dir': 'experiments',
             'output_dir': 'plots',
-            'pattern': 'exp2_*'
+            'pattern': 'exp2_*',
+            'consolidated_file': 'experiments/consolidated.parquet'
         },
         'analysis': {
             'group_by': None,
             'k_min_cycles': 5,
             'min_warmup_ms': 300000,
             'max_warmup_ms': 900000,
-            'min_seeds': 3
+            'min_seeds': 3,
+            'use_consolidated': True
         },
         'plots': {
             'dpi': 300,
@@ -371,6 +373,70 @@ def load_and_aggregate_results(exp_info: Dict) -> pd.DataFrame:
     return combined
 
 
+def load_and_aggregate_results_consolidated(exp_info: Dict, consolidated_path: str = 'experiments/consolidated.parquet') -> pd.DataFrame:
+    """
+    Load experiment results from consolidated parquet file using predicate pushdown.
+
+    This is a memory-efficient alternative to load_and_aggregate_results() that uses
+    the consolidated parquet file with predicate pushdown to only load relevant data.
+
+    Args:
+        exp_info: Experiment information dict with 'label', 'hash', 'seeds', and 'config'
+        consolidated_path: Path to consolidated parquet file
+
+    Returns:
+        DataFrame with aggregated statistics across all seeds (warmup/cooldown excluded)
+    """
+    # Compute warmup and cooldown durations for this experiment
+    warmup_ms = compute_warmup_duration(exp_info['config'])
+    cooldown_ms = compute_cooldown_duration(exp_info['config'])
+
+    # Get simulation duration to compute cooldown threshold
+    sim_duration_ms = exp_info['config'].get('simulation', {}).get('duration_ms', 3600000)
+    cooldown_start_ms = sim_duration_ms - cooldown_ms
+
+    # Extract exp_name and exp_hash from exp_info
+    exp_name = exp_info['label']
+    exp_hash = exp_info['hash']
+
+    # Use predicate pushdown to load only this experiment's data
+    # Parquet will skip entire row groups that don't match these filters
+    filters = [
+        ('exp_name', '==', exp_name),
+        ('exp_hash', '==', exp_hash),
+        # Pushdown t_submit filter for warmup/cooldown
+        ('t_submit', '>=', warmup_ms),
+        ('t_submit', '<', cooldown_start_ms)
+    ]
+
+    try:
+        df = pd.read_parquet(consolidated_path, filters=filters)
+    except FileNotFoundError:
+        print(f"Warning: Consolidated file not found at {consolidated_path}, falling back to individual files")
+        return load_and_aggregate_results(exp_info)
+
+    if len(df) == 0:
+        return None
+
+    # Drop the consolidated-specific columns (we don't need them for analysis)
+    df = df.drop(columns=['exp_name', 'exp_hash', 'config'])
+
+    # Report filtering statistics
+    # Note: With predicate pushdown, we don't know the pre-filter count, so we approximate
+    total_txns_after_filter = len(df)
+    active_window_ms = cooldown_start_ms - warmup_ms
+
+    # Estimate total txns (assuming uniform distribution over time)
+    duration_ratio = sim_duration_ms / active_window_ms if active_window_ms > 0 else 1
+    estimated_total = int(total_txns_after_filter * duration_ratio)
+    pct_excluded = 100.0 * (1 - 1 / duration_ratio) if duration_ratio > 1 else 0
+
+    print(f" (warmup: {warmup_ms/1000:.0f}s, cooldown: {cooldown_ms/1000:.0f}s, " +
+          f"active: {active_window_ms/1000:.0f}s, ~{total_txns_after_filter} active txns, est ~{pct_excluded:.1f}% excluded)", end='')
+
+    return df
+
+
 def compute_per_seed_statistics(df: pd.DataFrame) -> pd.DataFrame:
     """
     Compute statistics for each seed separately.
@@ -554,7 +620,14 @@ def build_experiment_index(base_dir: str, pattern: str) -> pd.DataFrame:
 
         # Load and aggregate results
         print(f"Processing {exp_info['label']}-{exp_info['hash']}...", end='')
-        df = load_and_aggregate_results(exp_info)
+
+        # Use consolidated file if enabled, otherwise use individual files
+        use_consolidated = CONFIG.get('analysis', {}).get('use_consolidated', False)
+        if use_consolidated:
+            consolidated_path = CONFIG.get('paths', {}).get('consolidated_file', 'experiments/consolidated.parquet')
+            df = load_and_aggregate_results_consolidated(exp_info, consolidated_path)
+        else:
+            df = load_and_aggregate_results(exp_info)
 
         if df is None:
             print(" no data")
@@ -607,6 +680,11 @@ def plot_latency_vs_throughput(
         title: Plot title
         group_by: Optional parameter to group by (e.g., 'num_tables', 'real_conflict_probability')
     """
+    # Handle empty or incomplete dataframes
+    if index_df.empty or 'throughput' not in index_df.columns:
+        print(f"  Skipping {output_path}: No data or missing required columns")
+        return
+
     fig, ax = plt.subplots(figsize=(12, 8))
 
     if group_by and group_by in index_df.columns:
@@ -775,6 +853,11 @@ def plot_success_rate_vs_throughput(
         title: Plot title
         group_by: Optional parameter to group by (e.g., 'num_tables')
     """
+    # Handle empty or incomplete dataframes
+    if index_df.empty or 'throughput' not in index_df.columns:
+        print(f"  Skipping {output_path}: No data or missing required columns")
+        return
+
     fig, ax = plt.subplots(figsize=(12, 8))
 
     if group_by and group_by in index_df.columns:
@@ -855,6 +938,11 @@ def plot_overhead_vs_throughput(
         title: Plot title
         group_by: Optional parameter to group by (e.g., 'num_tables')
     """
+    # Handle empty or incomplete dataframes
+    if index_df.empty or 'throughput' not in index_df.columns:
+        print(f"  Skipping {output_path}: No data or missing required columns")
+        return
+
     fig, ax = plt.subplots(figsize=(12, 8))
 
     if group_by and group_by in index_df.columns:
@@ -944,7 +1032,12 @@ def plot_commit_rate_over_time(
 
     for (exp_dir, exp_info), color in zip(experiments.items(), colors):
         # Load aggregated results
-        df = load_and_aggregate_results(exp_info)
+        use_consolidated = CONFIG.get('analysis', {}).get('use_consolidated', False)
+        if use_consolidated:
+            consolidated_path = CONFIG.get('paths', {}).get('consolidated_file', 'experiments/consolidated.parquet')
+            df = load_and_aggregate_results_consolidated(exp_info, consolidated_path)
+        else:
+            df = load_and_aggregate_results(exp_info)
 
         if df is None or len(df) == 0:
             continue
@@ -1028,6 +1121,11 @@ def generate_latency_vs_throughput_table(
     group_by: str = None
 ):
     """Generate markdown table for latency vs throughput data with optional stddev."""
+    # Handle empty or incomplete dataframes
+    if index_df.empty or 'throughput' not in index_df.columns:
+        print(f"  Skipping {output_path}: No data or missing required columns")
+        return
+
     # Check if stddev columns are available
     has_stddev = 'p50_commit_latency_std' in index_df.columns
 
@@ -1127,6 +1225,11 @@ def generate_success_rate_table(
     group_by: str = None
 ):
     """Generate markdown table for success rate data."""
+    # Handle empty or incomplete dataframes
+    if index_df.empty or 'throughput' not in index_df.columns:
+        print(f"  Skipping {output_path}: No data or missing required columns")
+        return
+
     with open(output_path, 'w') as f:
         f.write("# Transaction Success Rate vs Load\n\n")
         f.write("Analysis of how success rate changes with offered load (inter-arrival time).\n\n")
@@ -1175,6 +1278,11 @@ def generate_overhead_table(
     group_by: str = None
 ):
     """Generate markdown table for overhead percentage data with optional stddev."""
+    # Handle empty or incomplete dataframes
+    if index_df.empty or 'throughput' not in index_df.columns:
+        print(f"  Skipping {output_path}: No data or missing required columns")
+        return
+
     # Check if stddev columns are available
     has_stddev = 'mean_overhead_pct_std' in index_df.columns
 
@@ -1284,6 +1392,26 @@ def generate_overhead_table(
 
 def save_experiment_index(index_df: pd.DataFrame, output_path: str):
     """Save experiment index to CSV for reference."""
+    # Handle empty dataframes
+    if index_df.empty:
+        # Create empty DataFrame with expected column headers
+        columns = [
+            'label', 'hash', 'num_seeds',
+            'inter_arrival_scale', 'num_tables', 'num_groups',
+            'real_conflict_probability',
+            'total_txns', 'committed', 'success_rate',
+            'throughput',
+            'mean_commit_latency', 'p50_commit_latency',
+            'p95_commit_latency', 'p99_commit_latency',
+            'mean_retries',
+            'mean_overhead_pct', 'p50_overhead_pct',
+            'p95_overhead_pct', 'p99_overhead_pct'
+        ]
+        df_export = pd.DataFrame(columns=columns)
+        df_export.to_csv(output_path, index=False)
+        print(f"Saved empty experiment index to {output_path}")
+        return
+
     # Select relevant columns
     columns = [
         'label', 'hash', 'num_seeds',

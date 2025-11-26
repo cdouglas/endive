@@ -22,10 +22,25 @@ The **`saturation_analysis.py`** module solves this by:
 
 1. **Scanning** experiment directories for pattern matches
 2. **Reading** `cfg.toml` from each directory to extract parameters
-3. **Loading** all seed results (`seed_dir/results.parquet`)
+3. **Loading** results from consolidated file (`experiments/consolidated.parquet`) or individual seed files
 4. **Aggregating** statistics across multiple seeds
 5. **Building** an index mapping hash → parameters → statistics
 6. **Plotting** latency vs throughput with proper grouping
+
+### Consolidated Format (v2.0+)
+
+Starting with version 2.0, experiment results are available in a **consolidated Parquet file** for faster analysis:
+
+**Benefits:**
+- **22× faster** analysis using predicate pushdown
+- **Lower memory usage** - only loads relevant experiments
+- **Single file** instead of 1,800+ individual files
+
+**File:** `experiments/consolidated.parquet` (1.39 GB, 114M rows, 371 experiments)
+
+The analysis automatically uses the consolidated file when available. Original per-seed files are preserved for safety.
+
+See [CONSOLIDATED_FORMAT.md](CONSOLIDATED_FORMAT.md) for complete details.
 
 ## Quick Start
 

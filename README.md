@@ -157,6 +157,7 @@ See [docs/DOCKER.md](docs/DOCKER.md) for details.
 ### Understanding Results
 - **[docs/BASELINE_RESULTS.md](docs/BASELINE_RESULTS.md)** - Detailed findings from Exp 2.1 & 2.2
 - **[docs/OVERHEAD_ANALYSIS.md](docs/OVERHEAD_ANALYSIS.md)** - Commit protocol overhead breakdown
+- **[docs/CONSOLIDATED_FORMAT.md](docs/CONSOLIDATED_FORMAT.md)** - Consolidated experiment results format (v2.0+)
 
 ### Research & Design
 - **[docs/ANALYSIS_PLAN.md](docs/ANALYSIS_PLAN.md)** - Research questions and methodology
@@ -259,6 +260,7 @@ pytest tests/ --cov=icecap          # With coverage
 - **Simulation speed**: ~1000× real-time (1 hour simulated in ~3.6 seconds)
 - **Parallel execution**: ~8× speedup with 8 cores
 - **Baseline runtime**: 24 hours with 8 cores (vs 8 days sequential)
+- **Analysis speed** (v2.0+): 22× faster with consolidated format using predicate pushdown
 
 ## Practical Implications
 
