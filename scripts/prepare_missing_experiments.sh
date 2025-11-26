@@ -6,6 +6,8 @@
 # with missing results, and exports their configurations to a portable bundle
 # that can be copied to a remote machine for execution.
 #
+# For each missing seed, creates a config file with the seed pre-set.
+#
 # Usage:
 #   ./scripts/prepare_missing_experiments.sh [--output DIR] [--expected-seeds N]
 #
@@ -86,14 +88,29 @@ for exp_dir in experiments/exp*-[0-9a-f]*; do
         bundle_exp_dir="$OUTPUT_DIR/configs/$exp_name"
         mkdir -p "$bundle_exp_dir"
 
-        # Copy config
-        cp "$exp_dir/cfg.toml" "$bundle_exp_dir/cfg.toml"
-
-        # Find and record missing seeds
+        # Find and create configs for missing seeds
         for seed_dir in "$exp_dir"/[0-9]*; do
             if [ -d "$seed_dir" ]; then
                 seed=$(basename "$seed_dir")
                 if [ ! -f "$seed_dir/results.parquet" ]; then
+                    # Create config with seed set
+                    cfg_with_seed="$bundle_exp_dir/seed_${seed}.toml"
+
+                    # Check if seed is already set in config
+                    if grep -q "^seed = " "$exp_dir/cfg.toml" 2>/dev/null; then
+                        # Replace existing seed
+                        sed "s/^seed = .*/seed = $seed/" "$exp_dir/cfg.toml" > "$cfg_with_seed"
+                    elif grep -q "^# seed = " "$exp_dir/cfg.toml" 2>/dev/null; then
+                        # Uncomment and set seed
+                        sed "s/^# seed = .*/seed = $seed/" "$exp_dir/cfg.toml" > "$cfg_with_seed"
+                    else
+                        # Add seed after [simulation] section
+                        awk -v seed="$seed" '
+                            /^\[simulation\]/ { print; print "seed = " seed; next }
+                            { print }
+                        ' "$exp_dir/cfg.toml" > "$cfg_with_seed"
+                    fi
+
                     echo "$exp_name:$seed" >> "$MANIFEST"
                     total_simulations=$((total_simulations + 1))
                 fi
@@ -189,7 +206,7 @@ run_simulation() {
     local script_dir="$3"
     local output_base="$4"
 
-    local cfg_path="$script_dir/configs/$exp_name/cfg.toml"
+    local cfg_path="$script_dir/configs/$exp_name/seed_${seed}.toml"
     local exp_output_dir="$output_base/$exp_name"
     local seed_output_dir="$exp_output_dir/$seed"
 
@@ -199,7 +216,7 @@ run_simulation() {
 
     # Run simulation
     cd "$seed_output_dir"
-    python -m icecap.main "$cfg_path" --seed "$seed" > run.log 2>&1
+    python -m icecap.main "$cfg_path" --yes --no-progress > run.log 2>&1
     local exit_code=$?
 
     if [ $exit_code -eq 0 ] && [ -f "results.parquet" ]; then
@@ -277,7 +294,7 @@ This bundle contains configurations for experiments with missing results.
 ## Contents
 
 - `manifest.txt` - List of experiment:seed pairs to run
-- `configs/` - Configuration files (cfg.toml) for each experiment
+- `configs/` - Configuration files with seeds pre-set (seed_XXXXX.toml)
 - `run_experiments.sh` - Execution script for remote machine
 
 ## Workflow
@@ -323,7 +340,7 @@ echo "Bundle created successfully!"
 echo ""
 echo "Contents:"
 echo "  - manifest.txt ($total_simulations simulations)"
-echo "  - configs/ ($experiment_count experiment configs)"
+echo "  - configs/ ($experiment_count experiment dirs with seed-specific configs)"
 echo "  - run_experiments.sh (execution script)"
 echo "  - README.md (instructions)"
 echo ""
