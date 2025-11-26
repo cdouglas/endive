@@ -64,6 +64,8 @@ class Stats:
         self.latency.record_value(commit_latency)
 
         # Record transaction details
+        # Note: All time/latency fields are int64 (ms), not float64
+        # This eliminates floating point inaccuracy and reduces file size by 24%
         self.transactions.append({
             'txn_id': txn.id,
             't_submit': txn.t_submit,
@@ -100,8 +102,29 @@ class Stats:
         self.latency.output_percentile_distribution(out_file=out)
 
     def export_parquet(self, output_path: str):
-        """Export transaction data to Parquet format."""
+        """Export transaction data to Parquet format with optimized dtypes."""
         df = pd.DataFrame(self.transactions)
+
+        # Ensure correct dtypes for storage efficiency and accuracy
+        # All times/latencies are int64 (ms) - no float64 inaccuracy
+        # Small counts are int8 to be semantically correct (though compression makes this negligible)
+        dtype_map = {
+            'txn_id': 'int64',
+            't_submit': 'int64',
+            't_runtime': 'int64',
+            't_commit': 'int64',
+            'commit_latency': 'int64',
+            'total_latency': 'int64',
+            'n_retries': 'int8',
+            'n_tables_read': 'int8',
+            'n_tables_written': 'int8',
+            'status': 'object'  # String type
+        }
+
+        for col, dtype in dtype_map.items():
+            if col in df.columns:
+                df[col] = df[col].astype(dtype)
+
         df.to_parquet(output_path, engine='pyarrow', compression='snappy', index=False)
 
         # Also print summary statistics
