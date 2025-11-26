@@ -77,3 +77,33 @@ services:
       "
     profiles:
       - single
+
+  # Service for running experiment batches (for missing experiments)
+  batch:
+    build: .
+    image: icecap-sim:latest
+    container_name: icecap-batch
+    volumes:
+      - ./experiment_batch:/app/experiment_batch
+    environment:
+      - PYTHONUNBUFFERED=1
+      - DOCKER_CONTAINER=1
+      - OMP_NUM_THREADS=1
+      - OPENBLAS_NUM_THREADS=1
+      - MKL_NUM_THREADS=1
+      - NUMEXPR_NUM_THREADS=1
+      - BATCH_PARALLEL=${BATCH_PARALLEL:-4}
+    command: >
+      bash -c "
+      if [ ! -d /app/experiment_batch ]; then
+        echo 'Error: experiment_batch directory not found!';
+        echo 'Run: ./scripts/prepare_missing_experiments.sh';
+        exit 1;
+      fi &&
+      cd /app/experiment_batch &&
+      echo 'Starting batch execution with parallelism: $${BATCH_PARALLEL}' &&
+      ./run_experiments.sh --parallel $${BATCH_PARALLEL} &&
+      echo 'Batch complete! Results in experiment_batch/results/'
+      "
+    profiles:
+      - batch
