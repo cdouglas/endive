@@ -624,8 +624,24 @@ def build_experiment_index(base_dir: str, pattern: str) -> pd.DataFrame:
         # Use consolidated file if enabled, otherwise use individual files
         use_consolidated = CONFIG.get('analysis', {}).get('use_consolidated', False)
         if use_consolidated:
-            consolidated_path = CONFIG.get('paths', {}).get('consolidated_file', 'experiments/consolidated.parquet')
-            df = load_and_aggregate_results_consolidated(exp_info, consolidated_path)
+            # Make consolidated path relative to base_dir
+            consolidated_filename = CONFIG.get('paths', {}).get('consolidated_file', 'experiments/consolidated.parquet')
+            # If consolidated_file is just a filename, look for it in base_dir
+            # If it's an absolute path or contains base_dir, use as-is
+            if os.path.isabs(consolidated_filename):
+                consolidated_path = consolidated_filename
+            elif consolidated_filename.startswith(base_dir):
+                consolidated_path = consolidated_filename
+            else:
+                # Extract just the filename and look for it in base_dir
+                consolidated_path = os.path.join(base_dir, 'consolidated.parquet')
+
+            # Check if consolidated file exists before trying to use it
+            if os.path.exists(consolidated_path):
+                df = load_and_aggregate_results_consolidated(exp_info, consolidated_path)
+            else:
+                # Consolidated file doesn't exist, use individual files
+                df = load_and_aggregate_results(exp_info)
         else:
             df = load_and_aggregate_results(exp_info)
 
@@ -1034,8 +1050,20 @@ def plot_commit_rate_over_time(
         # Load aggregated results
         use_consolidated = CONFIG.get('analysis', {}).get('use_consolidated', False)
         if use_consolidated:
-            consolidated_path = CONFIG.get('paths', {}).get('consolidated_file', 'experiments/consolidated.parquet')
-            df = load_and_aggregate_results_consolidated(exp_info, consolidated_path)
+            # Make consolidated path relative to base_dir
+            consolidated_filename = CONFIG.get('paths', {}).get('consolidated_file', 'experiments/consolidated.parquet')
+            if os.path.isabs(consolidated_filename):
+                consolidated_path = consolidated_filename
+            elif consolidated_filename.startswith(base_dir):
+                consolidated_path = consolidated_filename
+            else:
+                consolidated_path = os.path.join(base_dir, 'consolidated.parquet')
+
+            # Check if consolidated file exists before trying to use it
+            if os.path.exists(consolidated_path):
+                df = load_and_aggregate_results_consolidated(exp_info, consolidated_path)
+            else:
+                df = load_and_aggregate_results(exp_info)
         else:
             df = load_and_aggregate_results(exp_info)
 
