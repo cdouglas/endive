@@ -365,6 +365,39 @@ wait_for_all_jobs() {
     log "All jobs complete"
 }
 
+generate_or_load_session_nonce() {
+    # Generate or load session nonce for deterministic seed generation
+    # This makes experiments reentrant within a session but unique across sessions
+    local nonce_file="experiments/.nonce"
+
+    if [ -f "$nonce_file" ]; then
+        # Reentrant: reuse existing nonce
+        cat "$nonce_file"
+        echo "[Session nonce] Reusing existing nonce from $nonce_file" >&2
+    else
+        # First run: generate new nonce
+        local nonce=$(openssl rand -hex 16 2>/dev/null || cat /dev/urandom | head -c 16 | xxd -p)
+        echo "$nonce" > "$nonce_file"
+        echo "[Session nonce] Generated new nonce: $nonce" >&2
+        echo "$nonce"
+    fi
+}
+
+generate_deterministic_seed() {
+    # Generate a deterministic seed from session nonce + experiment parameters
+    # Uses: session nonce + experiment label + parameter string + seed_num
+    local exp_label="$1"
+    local param_string="$2"
+    local seed_num="$3"
+
+    # Create a hash of the input and convert to a positive integer seed
+    # Uses SHA256 and takes first 8 hex digits (32 bits)
+    local hash_input="${SESSION_NONCE}:${exp_label}:${param_string}:${seed_num}"
+    local seed=$(echo -n "$hash_input" | sha256sum | cut -c1-8)
+    # Convert hex to decimal
+    echo $((0x${seed}))
+}
+
 create_config_variant() {
     local base_config=$1
     local output_file=$2
@@ -384,6 +417,14 @@ create_config_variant() {
         sed -i.bak "s/^${param}[[:space:]]*=.*/${param} = ${value}/" "$output_file"
         rm -f "$output_file.bak"
     done
+
+    # If seed was not set in modifications, ensure it exists in config
+    # Check if seed line exists (commented or uncommented)
+    if ! grep -q "^seed[[:space:]]*=" "$output_file" 2>/dev/null; then
+        # Add seed line after duration_ms in [simulation] section
+        sed -i.bak '/^\[simulation\]/a\seed = __SEED_PLACEHOLDER__' "$output_file"
+        rm -f "$output_file.bak"
+    fi
 }
 
 # ============================================================================
@@ -490,6 +531,12 @@ if [ "$DRY_RUN" = false ]; then
     sleep 3
 fi
 
+# Generate or load session nonce for reentrant seed generation
+mkdir -p experiments
+SESSION_NONCE=$(generate_or_load_session_nonce)
+export SESSION_NONCE
+log ""
+
 CURRENT_RUN=0
 
 # ============================================================================
@@ -509,19 +556,24 @@ if [ "$RUN_EXP2_1" = true ]; then
             CURRENT_RUN=$((CURRENT_RUN + 1))
             PROGRESS="[$CURRENT_RUN/$TOTAL_RUNS]"
 
+            # Generate deterministic seed
+            SEED=$(generate_deterministic_seed "exp2_1" "load=${load}" "$seed_num")
+
             TEMP_CONFIG=$(mktemp)
 
             if [ "$QUICK_MODE" = true ]; then
                 create_config_variant "$EXP2_1_CONFIG" "$TEMP_CONFIG" \
+                    "seed=${SEED}" \
                     "inter_arrival.scale=${load}" \
                     "duration_ms=${QUICK_DURATION}"
             else
                 create_config_variant "$EXP2_1_CONFIG" "$TEMP_CONFIG" \
+                    "seed=${SEED}" \
                     "inter_arrival.scale=${load}"
             fi
 
             wait_for_job_slot
-            DESC="$PROGRESS Exp2.1 load=$load seed=$seed_num"
+            DESC="$PROGRESS Exp2.1 load=$load seed=$SEED"
             log "  Starting: $DESC"
             run_experiment_background "$EXP2_1_CONFIG" "$TEMP_CONFIG" "$DESC"
         done
@@ -548,23 +600,28 @@ if [ "$RUN_EXP2_2" = true ]; then
                 CURRENT_RUN=$((CURRENT_RUN + 1))
                 PROGRESS="[$CURRENT_RUN/$TOTAL_RUNS]"
 
+                # Generate deterministic seed
+                SEED=$(generate_deterministic_seed "exp2_2" "tables=${num_tables}:load=${load}" "$seed_num")
+
                 TEMP_CONFIG=$(mktemp)
 
                 if [ "$QUICK_MODE" = true ]; then
                     create_config_variant "$EXP2_2_CONFIG" "$TEMP_CONFIG" \
+                        "seed=${SEED}" \
                         "num_tables=${num_tables}" \
                         "num_groups=${num_tables}" \
                         "inter_arrival.scale=${load}" \
                         "duration_ms=${QUICK_DURATION}"
                 else
                     create_config_variant "$EXP2_2_CONFIG" "$TEMP_CONFIG" \
+                        "seed=${SEED}" \
                         "num_tables=${num_tables}" \
                         "num_groups=${num_tables}" \
                         "inter_arrival.scale=${load}"
                 fi
 
                 wait_for_job_slot
-                DESC="$PROGRESS Exp2.2 tables=$num_tables load=$load seed=$seed_num"
+                DESC="$PROGRESS Exp2.2 tables=$num_tables load=$load seed=$SEED"
                 log "  Starting: $DESC"
                 run_experiment_background "$EXP2_2_CONFIG" "$TEMP_CONFIG" "$DESC"
             done
@@ -592,21 +649,26 @@ if [ "$RUN_EXP3_1" = true ]; then
                 CURRENT_RUN=$((CURRENT_RUN + 1))
                 PROGRESS="[$CURRENT_RUN/$TOTAL_RUNS]"
 
+                # Generate deterministic seed
+                SEED=$(generate_deterministic_seed "exp3_1" "prob=${prob}:load=${load}" "$seed_num")
+
                 TEMP_CONFIG=$(mktemp)
 
                 if [ "$QUICK_MODE" = true ]; then
                     create_config_variant "$EXP3_1_CONFIG" "$TEMP_CONFIG" \
+                        "seed=${SEED}" \
                         "real_conflict_probability=${prob}" \
                         "inter_arrival.scale=${load}" \
                         "duration_ms=${QUICK_DURATION}"
                 else
                     create_config_variant "$EXP3_1_CONFIG" "$TEMP_CONFIG" \
+                        "seed=${SEED}" \
                         "real_conflict_probability=${prob}" \
                         "inter_arrival.scale=${load}"
                 fi
 
                 wait_for_job_slot
-                DESC="$PROGRESS Exp3.1 prob=$prob load=$load seed=$seed_num"
+                DESC="$PROGRESS Exp3.1 prob=$prob load=$load seed=$SEED"
                 log "  Starting: $DESC"
                 run_experiment_background "$EXP3_1_CONFIG" "$TEMP_CONFIG" "$DESC"
             done
@@ -636,17 +698,22 @@ if [ "$RUN_EXP3_2" = true ]; then
                 CURRENT_RUN=$((CURRENT_RUN + 1))
                 PROGRESS="[$CURRENT_RUN/$TOTAL_RUNS]"
 
+                # Generate deterministic seed
+                SEED=$(generate_deterministic_seed "exp3_2" "dist=${dist_config}:load=${load}" "$seed_num")
+
                 TEMP_CONFIG=$(mktemp)
 
                 if [ "$dist" = "fixed" ]; then
                     if [ "$QUICK_MODE" = true ]; then
                         create_config_variant "$EXP3_2_CONFIG" "$TEMP_CONFIG" \
+                            "seed=${SEED}" \
                             "conflicting_manifests.distribution=\"${dist}\"" \
                             "conflicting_manifests.value=${value}" \
                             "inter_arrival.scale=${load}" \
                             "duration_ms=${QUICK_DURATION}"
                     else
                         create_config_variant "$EXP3_2_CONFIG" "$TEMP_CONFIG" \
+                            "seed=${SEED}" \
                             "conflicting_manifests.distribution=\"${dist}\"" \
                             "conflicting_manifests.value=${value}" \
                             "inter_arrival.scale=${load}"
@@ -654,12 +721,14 @@ if [ "$RUN_EXP3_2" = true ]; then
                 else  # exponential
                     if [ "$QUICK_MODE" = true ]; then
                         create_config_variant "$EXP3_2_CONFIG" "$TEMP_CONFIG" \
+                            "seed=${SEED}" \
                             "conflicting_manifests.distribution=\"${dist}\"" \
                             "conflicting_manifests.mean=${value}" \
                             "inter_arrival.scale=${load}" \
                             "duration_ms=${QUICK_DURATION}"
                     else
                         create_config_variant "$EXP3_2_CONFIG" "$TEMP_CONFIG" \
+                            "seed=${SEED}" \
                             "conflicting_manifests.distribution=\"${dist}\"" \
                             "conflicting_manifests.mean=${value}" \
                             "inter_arrival.scale=${load}"
@@ -667,7 +736,7 @@ if [ "$RUN_EXP3_2" = true ]; then
                 fi
 
                 wait_for_job_slot
-                DESC="$PROGRESS Exp3.2 dist=$dist_config load=$load seed=$seed_num"
+                DESC="$PROGRESS Exp3.2 dist=$dist_config load=$load seed=$SEED"
                 log "  Starting: $DESC"
                 run_experiment_background "$EXP3_2_CONFIG" "$TEMP_CONFIG" "$DESC"
             done
@@ -697,10 +766,14 @@ if [ "$RUN_EXP3_3" = true ]; then
                     CURRENT_RUN=$((CURRENT_RUN + 1))
                     PROGRESS="[$CURRENT_RUN/$TOTAL_RUNS]"
 
+                    # Generate deterministic seed
+                    SEED=$(generate_deterministic_seed "exp3_3" "tables=${num_tables}:prob=${prob}:load=${load}" "$seed_num")
+
                     TEMP_CONFIG=$(mktemp)
 
                     if [ "$QUICK_MODE" = true ]; then
                         create_config_variant "$EXP3_3_CONFIG" "$TEMP_CONFIG" \
+                            "seed=${SEED}" \
                             "num_tables=${num_tables}" \
                             "num_groups=${num_tables}" \
                             "real_conflict_probability=${prob}" \
@@ -708,6 +781,7 @@ if [ "$RUN_EXP3_3" = true ]; then
                             "duration_ms=${QUICK_DURATION}"
                     else
                         create_config_variant "$EXP3_3_CONFIG" "$TEMP_CONFIG" \
+                            "seed=${SEED}" \
                             "num_tables=${num_tables}" \
                             "num_groups=${num_tables}" \
                             "real_conflict_probability=${prob}" \
@@ -715,7 +789,7 @@ if [ "$RUN_EXP3_3" = true ]; then
                     fi
 
                     wait_for_job_slot
-                    DESC="$PROGRESS Exp3.3 tables=$num_tables prob=$prob load=$load seed=$seed_num"
+                    DESC="$PROGRESS Exp3.3 tables=$num_tables prob=$prob load=$load seed=$SEED"
                     log "  Starting: $DESC"
                     run_experiment_background "$EXP3_3_CONFIG" "$TEMP_CONFIG" "$DESC"
                 done
@@ -746,10 +820,14 @@ if [ "$RUN_EXP3_4" = true ]; then
                     CURRENT_RUN=$((CURRENT_RUN + 1))
                     PROGRESS="[$CURRENT_RUN/$TOTAL_RUNS]"
 
+                    # Generate deterministic seed
+                    SEED=$(generate_deterministic_seed "exp3_4" "tables=${num_tables}:prob=${prob}:load=${load}" "$seed_num")
+
                     TEMP_CONFIG=$(mktemp)
 
                     if [ "$QUICK_MODE" = true ]; then
                         create_config_variant "$EXP3_4_CONFIG" "$TEMP_CONFIG" \
+                            "seed=${SEED}" \
                             "num_tables=${num_tables}" \
                             "num_groups=${num_tables}" \
                             "real_conflict_probability=${prob}" \
@@ -757,6 +835,7 @@ if [ "$RUN_EXP3_4" = true ]; then
                             "duration_ms=${QUICK_DURATION}"
                     else
                         create_config_variant "$EXP3_4_CONFIG" "$TEMP_CONFIG" \
+                            "seed=${SEED}" \
                             "num_tables=${num_tables}" \
                             "num_groups=${num_tables}" \
                             "real_conflict_probability=${prob}" \
@@ -764,7 +843,7 @@ if [ "$RUN_EXP3_4" = true ]; then
                     fi
 
                     wait_for_job_slot
-                    DESC="$PROGRESS Exp3.4 tables=$num_tables prob=$prob load=$load seed=$seed_num"
+                    DESC="$PROGRESS Exp3.4 tables=$num_tables prob=$prob load=$load seed=$SEED"
                     log "  Starting: $DESC"
                     run_experiment_background "$EXP3_4_CONFIG" "$TEMP_CONFIG" "$DESC"
                 done
@@ -791,19 +870,24 @@ if [ "$RUN_EXP4_1" = true ]; then
             CURRENT_RUN=$((CURRENT_RUN + 1))
             PROGRESS="[$CURRENT_RUN/$TOTAL_RUNS]"
 
+            # Generate deterministic seed
+            SEED=$(generate_deterministic_seed "exp4_1" "load=${load}" "$seed_num")
+
             TEMP_CONFIG=$(mktemp)
 
             if [ "$QUICK_MODE" = true ]; then
                 create_config_variant "$EXP4_1_CONFIG" "$TEMP_CONFIG" \
+                    "seed=${SEED}" \
                     "inter_arrival.scale=${load}" \
                     "duration_ms=${QUICK_DURATION}"
             else
                 create_config_variant "$EXP4_1_CONFIG" "$TEMP_CONFIG" \
+                    "seed=${SEED}" \
                     "inter_arrival.scale=${load}"
             fi
 
             wait_for_job_slot
-            DESC="$PROGRESS Exp4.1 load=$load seed=$seed_num"
+            DESC="$PROGRESS Exp4.1 load=$load seed=$SEED"
             log "  Starting: $DESC"
             run_experiment_background "$EXP4_1_CONFIG" "$TEMP_CONFIG" "$DESC"
         done
@@ -831,10 +915,14 @@ if [ "$RUN_EXP5_1" = true ]; then
                 CURRENT_RUN=$((CURRENT_RUN + 1))
                 PROGRESS="[$CURRENT_RUN/$TOTAL_RUNS]"
 
+                # Generate deterministic seed
+                SEED=$(generate_deterministic_seed "exp5_1" "cas=${cas_latency}:load=${load}" "$seed_num")
+
                 TEMP_CONFIG=$(mktemp)
 
                 if [ "$QUICK_MODE" = true ]; then
                     create_config_variant "$EXP5_1_CONFIG" "$TEMP_CONFIG" \
+                        "seed=${SEED}" \
                         "T_CAS.mean=${cas_latency}" \
                         "T_CAS.stddev=${cas_stddev}" \
                         "T_METADATA_ROOT.read.mean=${cas_latency}" \
@@ -845,6 +933,7 @@ if [ "$RUN_EXP5_1" = true ]; then
                         "duration_ms=${QUICK_DURATION}"
                 else
                     create_config_variant "$EXP5_1_CONFIG" "$TEMP_CONFIG" \
+                        "seed=${SEED}" \
                         "T_CAS.mean=${cas_latency}" \
                         "T_CAS.stddev=${cas_stddev}" \
                         "T_METADATA_ROOT.read.mean=${cas_latency}" \
@@ -855,7 +944,7 @@ if [ "$RUN_EXP5_1" = true ]; then
                 fi
 
                 wait_for_job_slot
-                DESC="$PROGRESS Exp5.1 cas=${cas_latency}ms load=$load seed=$seed_num"
+                DESC="$PROGRESS Exp5.1 cas=${cas_latency}ms load=$load seed=$SEED"
                 log "  Starting: $DESC"
                 run_experiment_background "$EXP5_1_CONFIG" "$TEMP_CONFIG" "$DESC"
             done
@@ -886,10 +975,14 @@ if [ "$RUN_EXP5_2" = true ]; then
                     CURRENT_RUN=$((CURRENT_RUN + 1))
                     PROGRESS="[$CURRENT_RUN/$TOTAL_RUNS]"
 
+                    # Generate deterministic seed
+                    SEED=$(generate_deterministic_seed "exp5_2" "cas=${cas_latency}:tables=${num_tables}:load=${load}" "$seed_num")
+
                     TEMP_CONFIG=$(mktemp)
 
                     if [ "$QUICK_MODE" = true ]; then
                         create_config_variant "$EXP5_2_CONFIG" "$TEMP_CONFIG" \
+                            "seed=${SEED}" \
                             "num_tables=${num_tables}" \
                             "num_groups=${num_tables}" \
                             "T_CAS.mean=${cas_latency}" \
@@ -902,6 +995,7 @@ if [ "$RUN_EXP5_2" = true ]; then
                             "duration_ms=${QUICK_DURATION}"
                     else
                         create_config_variant "$EXP5_2_CONFIG" "$TEMP_CONFIG" \
+                            "seed=${SEED}" \
                             "num_tables=${num_tables}" \
                             "num_groups=${num_tables}" \
                             "T_CAS.mean=${cas_latency}" \
@@ -914,7 +1008,7 @@ if [ "$RUN_EXP5_2" = true ]; then
                     fi
 
                     wait_for_job_slot
-                    DESC="$PROGRESS Exp5.2 cas=${cas_latency}ms tables=$num_tables load=$load seed=$seed_num"
+                    DESC="$PROGRESS Exp5.2 cas=${cas_latency}ms tables=$num_tables load=$load seed=$SEED"
                     log "  Starting: $DESC"
                     run_experiment_background "$EXP5_2_CONFIG" "$TEMP_CONFIG" "$DESC"
                 done
@@ -946,10 +1040,14 @@ if [ "$RUN_EXP5_3" = true ]; then
                     CURRENT_RUN=$((CURRENT_RUN + 1))
                     PROGRESS="[$CURRENT_RUN/$TOTAL_RUNS]"
 
+                    # Generate deterministic seed
+                    SEED=$(generate_deterministic_seed "exp5_3" "cas=${cas_latency}:groups=${num_groups}:load=${load}" "$seed_num")
+
                     TEMP_CONFIG=$(mktemp)
 
                     if [ "$QUICK_MODE" = true ]; then
                         create_config_variant "$EXP5_3_CONFIG" "$TEMP_CONFIG" \
+                            "seed=${SEED}" \
                             "num_groups=${num_groups}" \
                             "T_CAS.mean=${cas_latency}" \
                             "T_CAS.stddev=${cas_stddev}" \
@@ -961,6 +1059,7 @@ if [ "$RUN_EXP5_3" = true ]; then
                             "duration_ms=${QUICK_DURATION}"
                     else
                         create_config_variant "$EXP5_3_CONFIG" "$TEMP_CONFIG" \
+                            "seed=${SEED}" \
                             "num_groups=${num_groups}" \
                             "T_CAS.mean=${cas_latency}" \
                             "T_CAS.stddev=${cas_stddev}" \
@@ -972,7 +1071,7 @@ if [ "$RUN_EXP5_3" = true ]; then
                     fi
 
                     wait_for_job_slot
-                    DESC="$PROGRESS Exp5.3 cas=${cas_latency}ms groups=$num_groups load=$load seed=$seed_num"
+                    DESC="$PROGRESS Exp5.3 cas=${cas_latency}ms groups=$num_groups load=$load seed=$SEED"
                     log "  Starting: $DESC"
                     run_experiment_background "$EXP5_3_CONFIG" "$TEMP_CONFIG" "$DESC"
                 done
