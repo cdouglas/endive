@@ -38,7 +38,9 @@
       "Bash(timeout 300 python:*)",
       "Bash(xargs python3:*)",
       "Bash(./scripts/rerun_missing_experiments.sh:*)",
-      "Bash(./scripts/prepare_missing_experiments.sh:*)"
+      "Bash(./scripts/prepare_missing_experiments.sh:*)",
+      "Bash(./scripts/run_baseline_experiments.sh:*)",
+      "Bash(cat:*)"
     ],
     "deny": [],
     "ask": []
