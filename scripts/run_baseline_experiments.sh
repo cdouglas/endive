@@ -412,19 +412,18 @@ create_config_variant() {
         local param=$(echo "$mod" | cut -d'=' -f1)
         local value=$(echo "$mod" | cut -d'=' -f2-)
 
-        # Use sed to replace parameter value
-        # Handle both "param = value" and "param=value" formats
-        sed -i.bak "s/^${param}[[:space:]]*=.*/${param} = ${value}/" "$output_file"
+        # Try to replace existing uncommented line
+        if grep -q "^${param}[[:space:]]*=" "$output_file" 2>/dev/null; then
+            sed -i.bak "s/^${param}[[:space:]]*=.*/${param} = ${value}/" "$output_file"
+        # Try to uncomment and replace commented line
+        elif grep -q "^#[[:space:]]*${param}[[:space:]]*=" "$output_file" 2>/dev/null; then
+            sed -i.bak "s/^#[[:space:]]*${param}[[:space:]]*=.*/${param} = ${value}/" "$output_file"
+        # Otherwise append after [simulation] section
+        else
+            sed -i.bak "/^\[simulation\]/a ${param} = ${value}" "$output_file"
+        fi
         rm -f "$output_file.bak"
     done
-
-    # If seed was not set in modifications, ensure it exists in config
-    # Check if seed line exists (commented or uncommented)
-    if ! grep -q "^seed[[:space:]]*=" "$output_file" 2>/dev/null; then
-        # Add seed line after duration_ms in [simulation] section
-        sed -i.bak '/^\[simulation\]/a\seed = __SEED_PLACEHOLDER__' "$output_file"
-        rm -f "$output_file.bak"
-    fi
 }
 
 # ============================================================================
