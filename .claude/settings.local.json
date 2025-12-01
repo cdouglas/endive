@@ -40,7 +40,11 @@
       "Bash(./scripts/rerun_missing_experiments.sh:*)",
       "Bash(./scripts/prepare_missing_experiments.sh:*)",
       "Bash(./scripts/run_baseline_experiments.sh:*)",
-      "Bash(cat:*)"
+      "Bash(cat:*)",
+      "Bash(chmod:*)",
+      "Bash(for dir in experiments/exp5_3_transaction_partitioning_catalog_latency-48f49962/* experiments/exp5_3_transaction_partitioning_catalog_latency-6222a7eb/*)",
+      "Bash(do if [ -d \"$dir\" ])",
+      "Bash(then if [ -f \"$dir/results.parquet\" ])"
     ],
     "deny": [],
     "ask": []
