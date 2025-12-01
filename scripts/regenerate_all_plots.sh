@@ -53,6 +53,36 @@ echo ""
 # Create plots directory
 mkdir -p plots
 
+# Check if consolidated.parquet exists for faster processing
+CONSOLIDATED_FILE="experiments/consolidated.parquet"
+USE_CONSOLIDATED=false
+TEMP_CONFIG=""
+
+if [ -f "$CONSOLIDATED_FILE" ]; then
+    echo "Found consolidated.parquet - using fast mode (22× speedup)"
+    USE_CONSOLIDATED=true
+
+    # Create temporary config file to enable consolidated mode
+    TEMP_CONFIG=$(mktemp)
+    cat > "$TEMP_CONFIG" << 'CONFIGEOF'
+[analysis]
+use_consolidated = true
+
+[paths]
+consolidated_file = "experiments/consolidated.parquet"
+CONFIGEOF
+
+    trap "rm -f $TEMP_CONFIG" EXIT
+
+    # Export for use in subshells
+    export TEMP_CONFIG
+    export USE_CONSOLIDATED
+else
+    echo "No consolidated.parquet found - using individual results files"
+    echo "To speed up analysis 22×, run: python scripts/consolidate_all_experiments_incremental.py"
+fi
+echo ""
+
 # Define experiment configurations
 # Format: "pattern|output_dir|group_by|description"
 declare -a experiments=(
@@ -61,8 +91,10 @@ declare -a experiments=(
     "exp3_1_*|plots/exp3_1||Single-table real conflicts"
     "exp3_2_*|plots/exp3_2||Manifest distribution variance"
     "exp3_3_*|plots/exp3_3|num_tables|Multi-table real conflicts"
-    "exp3_4_*|plots/exp3_4||Exponential backoff sensitivity"
-    "exp4_1_*|plots/exp4_1||Exponential backoff with real conflicts"
+    "exp3_4_*|plots/exp3_4||Exponential backoff with real conflicts"
+    "exp5_1_*|plots/exp5_1||Single-table catalog latency"
+    "exp5_2_*|plots/exp5_2|num_tables|Multi-table catalog latency"
+    "exp5_3_*|plots/exp5_3||Transaction partitioning catalog latency"
 )
 
 # Function to run analysis for one experiment group
@@ -87,6 +119,11 @@ run_analysis() {
 
     # Build command
     local cmd="python -m icecap.saturation_analysis -i experiments -p \"$pattern\" -o \"$output_dir\""
+
+    # Add config file if using consolidated mode
+    if [ "$USE_CONSOLIDATED" = true ]; then
+        cmd="$cmd -c \"$TEMP_CONFIG\""
+    fi
 
     # Add group-by if specified
     if [ -n "$group_by" ]; then

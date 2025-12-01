@@ -44,7 +44,10 @@
       "Bash(chmod:*)",
       "Bash(for dir in experiments/exp5_3_transaction_partitioning_catalog_latency-48f49962/* experiments/exp5_3_transaction_partitioning_catalog_latency-6222a7eb/*)",
       "Bash(do if [ -d \"$dir\" ])",
-      "Bash(then if [ -f \"$dir/results.parquet\" ])"
+      "Bash(then if [ -f \"$dir/results.parquet\" ])",
+      "Bash(xargs:*)",
+      "Bash(for exp in exp5_1 exp5_2 exp5_3)",
+      "Bash(do echo '=== $exp ===' ls -d experiments/$exp_*)"
     ],
     "deny": [],
     "ask": []
