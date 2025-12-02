@@ -48,7 +48,8 @@
       "Bash(xargs:*)",
       "Bash(for exp in exp5_1 exp5_2 exp5_3)",
       "Bash(do echo '=== $exp ===' ls -d experiments/$exp_*)",
-      "Bash(for script in scripts/*.py scripts/*.sh)"
+      "Bash(for script in scripts/*.py scripts/*.sh)",
+      "Bash(git show:*)"
     ],
     "deny": [],
     "ask": []
