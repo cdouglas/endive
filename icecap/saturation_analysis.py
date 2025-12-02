@@ -70,7 +70,7 @@ def get_default_config() -> Dict:
                 'ha': 'center'
             },
             'saturation': {
-                'enabled': True,
+                'enabled': False,  # Disabled by default (can be enabled in analysis.toml)
                 'threshold': 50.0,
                 'tolerance': 5.0
             },
@@ -766,7 +766,7 @@ def plot_latency_vs_throughput(
 
     # Mark saturation point (configurable success rate threshold)
     sat_config = CONFIG.get('plots', {}).get('saturation', {})
-    sat_enabled = sat_config.get('enabled', True)
+    sat_enabled = sat_config.get('enabled', False)  # Default: disabled
     sat_threshold = sat_config.get('threshold', 50.0)
     sat_tolerance = sat_config.get('tolerance', 5.0)
 
@@ -829,7 +829,7 @@ def plot_success_rate_vs_load(
 
     # Add saturation threshold line if enabled
     sat_config = CONFIG.get('plots', {}).get('saturation', {})
-    sat_enabled = sat_config.get('enabled', True)
+    sat_enabled = sat_config.get('enabled', False)  # Default: disabled
     sat_threshold = sat_config.get('threshold', 50.0)
     if sat_enabled:
         ax1.axhline(sat_threshold, color='red', linestyle='--', alpha=0.5,
@@ -920,7 +920,7 @@ def plot_success_rate_vs_throughput(
 
     # Mark saturation threshold if enabled
     sat_config = CONFIG.get('plots', {}).get('saturation', {})
-    sat_enabled = sat_config.get('enabled', True)
+    sat_enabled = sat_config.get('enabled', False)  # Default: disabled
     sat_threshold = sat_config.get('threshold', 50.0)
     if sat_enabled:
         ax.axhline(sat_threshold, color='red', linestyle='--', linewidth=2, alpha=0.5,
