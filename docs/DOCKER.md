@@ -4,93 +4,88 @@ This document explains how to run the simulator experiments using Docker.
 
 ## Quick Start
 
-### Using Docker Compose (Recommended)
+### Build the Image
 
 ```bash
-# Build the image and run baseline experiments
-docker-compose up
-
-# Results will be available in:
-# - ./experiments/  - Raw experiment results
-# - ./experiment_logs/ - Execution logs
+docker build -t cdouglas/icecap-sim:latest .
 ```
 
-### Using Docker Directly
+### Run Experiments
 
 ```bash
-# Build the image
-docker build -t icecap-sim .
-
-# Run baseline experiments
-docker run -v $(pwd)/experiments:/app/experiments \
-           -v $(pwd)/plots:/app/plots \
-           -v $(pwd)/experiment_logs:/app/experiment_logs \
-           icecap-sim
-
-# Results will be in ./experiments/
+# Run specific experiments with custom settings
+docker run -d \
+    -e EXP_ARGS="--exp4.1 --seeds 5 --parallel 112" \
+    -e DOCKER_CONTAINER=1 \
+    -e OMP_NUM_THREADS=1 \
+    -e OPENBLAS_NUM_THREADS=1 \
+    -e MKL_NUM_THREADS=1 \
+    -e NUMEXPR_NUM_THREADS=1 \
+    -v $(pwd)/experiments:/app/experiments \
+    -v $(pwd)/plots:/app/plots \
+    -v $(pwd)/experiment_logs:/app/experiment_logs \
+    cdouglas/icecap-sim:latest \
+    bash -c "scripts/run_baseline_experiments.sh \${EXP_ARGS} 2>&1 | tee experiment_logs/run_\$(date +%Y%m%d_%H%M%S).log"
 ```
 
-## Available Services
+Results will be available in:
+- `./experiments/` - Raw experiment results (.parquet files)
+- `./experiment_logs/` - Execution logs with timestamps
 
-### 1. Default: Run Baseline Experiments
+## Controlling Experiment Execution
 
-Runs all baseline experiments (Exp 2.1 and Exp 2.2).
+### EXP_ARGS Environment Variable
+
+Use the `EXP_ARGS` environment variable to control which experiments run and how:
 
 ```bash
-docker-compose up
+# Run single experiment suite with 5 seeds
+-e EXP_ARGS="--exp2.1 --seeds 5"
+
+# Run multiple experiments in parallel with 96 cores
+-e EXP_ARGS="--exp3.1 --exp3.2 --seeds 5 --parallel 96"
+
+# Run with specific seed count and parallelism
+-e EXP_ARGS="--exp4.1 --seeds 3 --parallel 112"
+
+# Run all phase 2 experiments
+-e EXP_ARGS="--exp2.1 --exp2.2 --seeds 5"
+
+# Run all phase 3 experiments
+-e EXP_ARGS="--exp3.1 --exp3.2 --exp3.3 --exp3.4 --seeds 5 --parallel 96"
+
+# Run exp5 experiments (catalog latency)
+-e EXP_ARGS="--exp5.1 --exp5.2 --exp5.3 --seeds 5"
 ```
 
-**Output:**
-- `experiments/exp2_1_*` - Single-table saturation experiments
-- `experiments/exp2_2_*` - Multi-table scaling experiments
-- `experiment_logs/` - Execution logs with timestamps
+### Available Experiment Flags
 
-**Duration:** ~10-20 hours depending on hardware (63 experiments × 5 seeds each)
+| Flag | Description | Configs | Seeds | Total Runs |
+|------|-------------|---------|-------|------------|
+| `--exp2.1` | Single-table false conflicts | 9 loads | 5 | 45 |
+| `--exp2.2` | Multi-table false conflicts | 9 loads × 6 tables | 5 | 270 |
+| `--exp3.1` | Single-table real conflicts | 9 loads × 7 p_real | 5 | 315 |
+| `--exp3.2` | Manifest distributions | 9 loads × 4 dists | 5 | 180 |
+| `--exp3.3` | Multi-table real conflicts | 9 loads × 5 tables × 4 p_real | 5 | 900 |
+| `--exp3.4` | Exponential backoff | 9 loads | 5 | 45 |
+| `--exp4.1` | Backoff with real conflicts | 9 loads × 6 backoff | 5 | 270 |
+| `--exp5.1` | Single-table catalog latency | 6 T_CAS × 9 loads | 5 | 270 |
+| `--exp5.2` | Multi-table catalog latency | 6 T_CAS × 4 tables × 9 loads | 5 | 1,080 |
+| `--exp5.3` | Transaction partitioning | 5 groups × 6 T_CAS × 9 loads | 5 | 1,350 |
 
-### 2. Run Analysis Only
+### Thread Control Environment Variables
 
-After experiments complete, generate all plots and tables:
+Always set these to prevent thread oversubscription:
 
 ```bash
-docker-compose run --rm analyze
+-e DOCKER_CONTAINER=1
+-e OMP_NUM_THREADS=1
+-e OPENBLAS_NUM_THREADS=1
+-e MKL_NUM_THREADS=1
+-e NUMEXPR_NUM_THREADS=1
 ```
 
-**Output:**
-- `plots/exp2_1_analysis/` - Single-table analysis (plots + markdown)
-- `plots/exp2_2_analysis/` - Multi-table analysis (plots + markdown)
-- `plots/distributions/` - Theoretical distributions (plots + markdown)
-
-**Duration:** ~1-2 minutes
-
-### 3. Run Conformance Tests
-
-Verify that experiment results match configured distributions:
-
-```bash
-docker-compose run --rm test
-```
-
-**Output:** Test results showing pass/fail for distribution conformance
-
-**Duration:** ~5-10 seconds
-
-### 4. Run Single Experiment
-
-Run a specific experiment configuration:
-
-```bash
-# Using environment variable
-EXPERIMENT_CONFIG=experiment_configs/exp2_1_single_table_false_conflicts.toml \
-  docker-compose run --rm single-experiment
-
-# Or directly with docker
-docker run -v $(pwd)/experiments:/app/experiments \
-           -v $(pwd)/experiment_configs:/app/experiment_configs:ro \
-           icecap-sim \
-           bash -c "echo 'Y' | python -m icecap.main experiment_configs/exp2_1_single_table_false_conflicts.toml"
-```
-
-**Duration:** ~5-60 minutes depending on configuration
+These ensure numpy/scipy operations use single threads, allowing process-level parallelism via `--parallel`.
 
 ## Volume Mounts
 
@@ -103,57 +98,78 @@ The Docker setup uses three volume mounts:
 | `./experiment_logs` | `/app/experiment_logs` | Execution logs | Read/Write |
 | `./experiment_configs` | `/app/experiment_configs` | Experiment configurations | Read-Only |
 
-## Advanced Usage
-
-### Run Custom Python Command
-
+Ensure directories exist before running:
 ```bash
-docker-compose run --rm icecap-sim python -m icecap.main --help
+mkdir -p experiments plots experiment_logs
 ```
 
-### Run Interactive Shell
+## Analysis
+
+After experiments complete, generate plots:
+
+```bash
+docker run --rm \
+    -v $(pwd)/experiments:/app/experiments:ro \
+    -v $(pwd)/plots:/app/plots \
+    cdouglas/icecap-sim:latest \
+    bash -c "scripts/regenerate_all_plots.sh"
+```
+
+Output will be in `./plots/exp{2,3,4,5}_*/`.
+
+## Interactive Shell
+
+For manual experimentation:
 
 ```bash
 docker run -it --rm \
-  -v $(pwd)/experiments:/app/experiments \
-  -v $(pwd)/plots:/app/plots \
-  icecap-sim bash
+    -v $(pwd)/experiments:/app/experiments \
+    -v $(pwd)/plots:/app/plots \
+    cdouglas/icecap-sim:latest \
+    bash
 ```
 
 Inside the container:
 ```bash
 # Run a single experiment
-echo "Y" | python -m icecap.main experiment_configs/exp2_1_single_table_false_conflicts.toml
+python -m icecap.main experiment_configs/exp2_1_single_table_false_conflicts.toml --yes
 
-# Run analysis
-python -m icecap.saturation_analysis -i experiments -o plots/my_analysis -p "exp2_1_*"
+# Run analysis for specific experiments
+python -m icecap.saturation_analysis -i experiments -o plots/custom -p "exp2_1_*"
 
 # Run tests
 pytest tests/ -v
 ```
 
-### Parallel Experiment Execution
+## Monitoring Progress
 
-Run multiple containers in parallel (careful with resource usage):
+### View Logs in Real-Time
 
 ```bash
-# Terminal 1: Run exp2_1 experiments
-docker run -v $(pwd)/experiments:/app/experiments icecap-sim \
-  bash scripts/run_baseline_experiments.sh
+# Get container ID
+docker ps
 
-# Terminal 2: Meanwhile, analyze completed experiments
-docker-compose run --rm analyze
+# Follow logs
+docker logs -f <container-id>
+
+# Or check log files directly
+tail -f experiment_logs/run_*.log
 ```
 
-### Custom Experiment Configuration
+### Check Progress
 
-1. Create your config file in `experiment_configs/my_experiment.toml`
-2. Run with:
 ```bash
-docker run -v $(pwd)/experiments:/app/experiments \
-           -v $(pwd)/experiment_configs:/app/experiment_configs:ro \
-           icecap-sim \
-           bash -c "echo 'Y' | python -m icecap.main experiment_configs/my_experiment.toml"
+# Count completed experiments
+find experiments -name "results.parquet" | wc -l
+
+# Show most recent experiments
+ls -ltr experiments/*/results.parquet | tail -20
+```
+
+### Monitor Resource Usage
+
+```bash
+docker stats <container-id>
 ```
 
 ## Resource Requirements
@@ -164,35 +180,57 @@ docker run -v $(pwd)/experiments:/app/experiments \
 - **Disk:** 10 GB free space
 
 ### Recommended for Full Baseline
-- **CPU:** 8+ cores (experiments can run in parallel)
-- **RAM:** 16 GB
-- **Disk:** 50 GB (experiment results + plots)
+- **CPU:** 96+ cores (high parallelism)
+- **RAM:** 64 GB (for consolidation operations)
+- **Disk:** 100 GB (experiment results ~50GB, consolidated format ~5GB)
 
-## Monitoring Progress
+### Parallelism Guidelines
 
-### View Logs in Real-Time
-
+Match `--parallel` to available cores:
 ```bash
-# If running in background
-docker logs -f icecap-experiments
+# 8-core machine
+-e EXP_ARGS="--exp2.1 --seeds 5 --parallel 8"
 
-# Or check log files
-tail -f experiment_logs/run_*.log
+# 96-core machine
+-e EXP_ARGS="--exp3.3 --seeds 5 --parallel 96"
+
+# 112-core machine
+-e EXP_ARGS="--exp5.2 --seeds 5 --parallel 112"
 ```
 
-### Check Progress
+## Advanced Usage
+
+### Running Single Experiment
 
 ```bash
-# Count completed experiments
-find experiments -name "results.parquet" | wc -l
-
-# Expected: 315 files (63 experiments × 5 seeds)
+docker run --rm \
+    -v $(pwd)/experiments:/app/experiments \
+    -v $(pwd)/experiment_configs:/app/experiment_configs:ro \
+    cdouglas/icecap-sim:latest \
+    bash -c "python -m icecap.main experiment_configs/exp2_1_single_table_false_conflicts.toml --yes"
 ```
 
-### Monitor Resource Usage
+### Custom Configuration
+
+1. Create your config file in `experiment_configs/my_experiment.toml`
+2. Run with:
+```bash
+docker run --rm \
+    -v $(pwd)/experiments:/app/experiments \
+    -v $(pwd)/experiment_configs:/app/experiment_configs:ro \
+    cdouglas/icecap-sim:latest \
+    bash -c "python -m icecap.main experiment_configs/my_experiment.toml --yes"
+```
+
+### Consolidate Results
+
+Create single consolidated.parquet file for efficient storage:
 
 ```bash
-docker stats icecap-experiments
+docker run --rm \
+    -v $(pwd)/experiments:/app/experiments \
+    cdouglas/icecap-sim:latest \
+    python scripts/consolidate_all_experiments_incremental.py
 ```
 
 ## Troubleshooting
@@ -201,15 +239,17 @@ docker stats icecap-experiments
 
 Check logs:
 ```bash
-docker logs icecap-experiments
+docker logs <container-id>
 ```
 
 ### Out of Memory
 
-Reduce parallel experiments or increase Docker memory limit:
+Reduce parallelism or increase Docker memory limit:
 ```bash
-# Docker Desktop: Settings → Resources → Memory
-# Recommended: 8GB minimum
+# Reduce parallel experiments
+-e EXP_ARGS="--exp3.1 --seeds 5 --parallel 48"
+
+# Docker Desktop: Settings → Resources → Memory (recommend 16GB+)
 ```
 
 ### Permission Errors on Volumes
@@ -222,11 +262,10 @@ chmod 755 experiments plots experiment_logs
 
 ### Experiments Taking Too Long
 
-For testing, reduce the number of experiments in `scripts/run_baseline_experiments.sh`:
+For testing, run subset of experiments:
 ```bash
-# Edit to run only a subset
-INTER_ARRIVALS=(1000 500)  # Instead of all 9 values
-NUM_TABLES=(1 2)           # Instead of all 6 values
+# Just one experiment suite with fewer seeds
+-e EXP_ARGS="--exp2.1 --seeds 3 --parallel 8"
 ```
 
 ## Cleaning Up
@@ -240,109 +279,8 @@ rm -rf experiments/* plots/* experiment_logs/*
 ### Remove Docker Images
 
 ```bash
-docker-compose down --rmi all
-# Or
-docker rmi icecap-sim
+docker rmi cdouglas/icecap-sim:latest
 ```
-
-### Remove All (Including Volumes)
-
-```bash
-docker-compose down -v --rmi all
-rm -rf experiments plots experiment_logs
-```
-
-## CI/CD Integration
-
-### GitHub Actions Example
-
-```yaml
-name: Run Experiments
-
-on:
-  schedule:
-    - cron: '0 0 * * 0'  # Weekly
-  workflow_dispatch:
-
-jobs:
-  experiments:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v3
-
-      - name: Build Docker image
-        run: docker-compose build
-
-      - name: Run baseline experiments
-        run: docker-compose up
-        timeout-minutes: 1200  # 20 hours
-
-      - name: Run analysis
-        run: docker-compose run --rm analyze
-
-      - name: Run tests
-        run: docker-compose run --rm test
-
-      - name: Upload results
-        uses: actions/upload-artifact@v3
-        with:
-          name: experiment-results
-          path: |
-            experiments/
-            plots/
-          retention-days: 90
-```
-
-### Jenkins Pipeline Example
-
-```groovy
-pipeline {
-    agent {
-        docker {
-            image 'icecap-sim:latest'
-            args '-v $WORKSPACE/experiments:/app/experiments -v $WORKSPACE/plots:/app/plots'
-        }
-    }
-    stages {
-        stage('Build') {
-            steps {
-                sh 'docker-compose build'
-            }
-        }
-        stage('Run Experiments') {
-            steps {
-                sh 'docker-compose up'
-            }
-        }
-        stage('Analyze') {
-            steps {
-                sh 'docker-compose run --rm analyze'
-            }
-        }
-        stage('Test') {
-            steps {
-                sh 'docker-compose run --rm test'
-            }
-        }
-    }
-    post {
-        always {
-            archiveArtifacts artifacts: 'experiments/**,plots/**', fingerprint: true
-        }
-    }
-}
-```
-
-## Performance Tips
-
-1. **Use SSD storage** for experiment results (high I/O)
-2. **Allocate more CPU cores** to Docker for parallel execution
-3. **Monitor disk space** - experiments generate ~10GB of data
-4. **Run analysis separately** after experiments to save time
-5. **Use `--no-cache`** when rebuilding after code changes:
-   ```bash
-   docker-compose build --no-cache
-   ```
 
 ## Multi-Architecture Support
 
@@ -350,19 +288,24 @@ Build for different platforms:
 
 ```bash
 # Build for Linux AMD64 (most common)
-docker build --platform linux/amd64 -t icecap-sim:amd64 .
+docker build --platform linux/amd64 -t cdouglas/icecap-sim:amd64 .
 
 # Build for Linux ARM64 (Mac M1/M2)
-docker build --platform linux/arm64 -t icecap-sim:arm64 .
+docker build --platform linux/arm64 -t cdouglas/icecap-sim:arm64 .
 
 # Multi-platform build
-docker buildx build --platform linux/amd64,linux/arm64 -t icecap-sim:latest .
+docker buildx build --platform linux/amd64,linux/arm64 \
+    -t cdouglas/icecap-sim:latest .
 ```
 
-## Support
+## Performance Tips
 
-For issues with Docker setup:
-1. Check logs: `docker logs icecap-experiments`
-2. Verify volumes: `docker inspect icecap-experiments`
-3. Test interactively: `docker run -it --rm icecap-sim bash`
-4. Report issues at: https://github.com/anthropics/claude-code/issues
+1. **Use SSD storage** for experiment results (high I/O)
+2. **Match --parallel to CPU cores** for optimal throughput
+3. **Monitor disk space** - experiments generate ~50GB of data
+4. **Use consolidated format** to reduce storage by 90%
+5. **Run analysis separately** after experiments complete
+6. **Use `--no-cache`** when rebuilding after code changes:
+   ```bash
+   docker build --no-cache -t cdouglas/icecap-sim:latest .
+   ```
