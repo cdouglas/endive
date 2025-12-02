@@ -121,6 +121,22 @@ python -m icecap.saturation_analysis \
     -o plots/exp2_2 \
     --group-by num_tables
 
+# Filter by parameter values (useful for multi-dimensional sweeps)
+python -m icecap.saturation_analysis \
+    -i experiments \
+    -p "exp5_2_*" \
+    -o plots/exp5_2_filtered \
+    --group-by num_tables \
+    --filter "t_cas_mean==50"
+
+# Multiple filters (AND logic)
+python -m icecap.saturation_analysis \
+    -i experiments \
+    -p "exp5_2_*" \
+    -o plots/filtered \
+    --filter "t_cas_mean>=50" \
+    --filter "num_tables<=5"
+
 # Use custom configuration
 python -m icecap.saturation_analysis --config analysis.toml
 ```

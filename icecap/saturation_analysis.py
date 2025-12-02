@@ -311,6 +311,14 @@ def extract_key_parameters(config: Dict) -> Dict:
     if 'simulation' in config:
         params['duration_ms'] = config['simulation'].get('duration_ms', None)
 
+    # Extract storage/catalog latency parameters
+    if 'storage' in config:
+        # Extract T_CAS (catalog CAS operation latency)
+        if 'T_CAS' in config['storage']:
+            t_cas = config['storage']['T_CAS']
+            if isinstance(t_cas, dict):
+                params['t_cas_mean'] = t_cas.get('mean', None)
+
     return params
 
 
@@ -1462,6 +1470,124 @@ def save_experiment_index(index_df: pd.DataFrame, output_path: str):
     print(f"Saved experiment index to {output_path}")
 
 
+def parse_filter_expression(filter_str: str) -> Tuple[str, str, any]:
+    """
+    Parse a filter expression like "t_cas_mean==50" or "num_tables>=5".
+
+    Supported operators: ==, !=, <, <=, >, >=
+
+    Args:
+        filter_str: Filter expression string
+
+    Returns:
+        Tuple of (parameter_name, operator, value)
+
+    Raises:
+        ValueError: If filter expression is invalid
+
+    Examples:
+        >>> parse_filter_expression("t_cas_mean==50")
+        ('t_cas_mean', '==', 50)
+        >>> parse_filter_expression("num_tables>=5")
+        ('num_tables', '>=', 5)
+    """
+    # Strip whitespace
+    filter_str = filter_str.strip()
+
+    # Try to match operators (order matters - check >= before >)
+    operators = ['==', '!=', '<=', '>=', '<', '>']
+
+    for op in operators:
+        if op in filter_str:
+            parts = filter_str.split(op, 1)
+            if len(parts) != 2:
+                raise ValueError(f"Invalid filter expression: {filter_str}")
+
+            param_name = parts[0].strip()
+            value_str = parts[1].strip()
+
+            # Validate that parameter name and value are not empty
+            if not param_name or not value_str:
+                raise ValueError(f"Invalid filter expression: {filter_str}")
+
+            # Try to convert value to appropriate type
+            try:
+                # Try int first
+                value = int(value_str)
+            except ValueError:
+                try:
+                    # Try float
+                    value = float(value_str)
+                except ValueError:
+                    # Keep as string (strip quotes if present)
+                    value = value_str.strip('"').strip("'")
+
+            return (param_name, op, value)
+
+    raise ValueError(f"No valid operator found in filter expression: {filter_str}")
+
+
+def apply_filters(df: pd.DataFrame, filter_expressions: List[str]) -> pd.DataFrame:
+    """
+    Apply parameter filters to experiment index DataFrame.
+
+    Args:
+        df: Experiment index DataFrame
+        filter_expressions: List of filter expressions (e.g., ["t_cas_mean==50", "num_tables>=5"])
+
+    Returns:
+        Filtered DataFrame
+
+    Raises:
+        ValueError: If filter references non-existent column
+
+    Examples:
+        >>> df = pd.DataFrame({'t_cas_mean': [15, 50, 100], 'num_tables': [1, 5, 10]})
+        >>> filtered = apply_filters(df, ["t_cas_mean==50"])
+        >>> len(filtered)
+        1
+        >>> filtered = apply_filters(df, ["t_cas_mean>=50", "num_tables<=5"])
+        >>> len(filtered)
+        1
+    """
+    if not filter_expressions:
+        return df
+
+    result = df.copy()
+
+    for filter_expr in filter_expressions:
+        param_name, op, value = parse_filter_expression(filter_expr)
+
+        # Check if column exists
+        if param_name not in result.columns:
+            available = [c for c in result.columns if not c.startswith('_')]
+            raise ValueError(
+                f"Filter parameter '{param_name}' not found in DataFrame. "
+                f"Available parameters: {', '.join(available)}"
+            )
+
+        # Apply filter based on operator
+        if op == '==':
+            mask = result[param_name] == value
+        elif op == '!=':
+            mask = result[param_name] != value
+        elif op == '<':
+            mask = result[param_name] < value
+        elif op == '<=':
+            mask = result[param_name] <= value
+        elif op == '>':
+            mask = result[param_name] > value
+        elif op == '>=':
+            mask = result[param_name] >= value
+        else:
+            raise ValueError(f"Unsupported operator: {op}")
+
+        result = result[mask]
+        print(f"Applied filter '{filter_expr}': {len(result)} experiments remain")
+
+    return result
+
+
 def cli():
     global CONFIG
 
@@ -1488,6 +1614,12 @@ def cli():
         "--group-by",
         help="Parameter to group by in plots (overrides config)"
     )
+    parser.add_argument(
+        "--filter",
+        action="append",
+        dest="filters",
+        help="Filter experiments by parameter (e.g., 't_cas_mean==50'). Can be specified multiple times."
+    )
 
     args = parser.parse_args()
 
@@ -1509,6 +1641,12 @@ def cli():
 
     print(f"\nBuilt index with {len(index_df)} experiments")
     print(f"Parameters found: {list(index_df.columns)}")
+
+    # Apply filters if specified
+    if args.filters:
+        print(f"\nApplying {len(args.filters)} filter(s)...")
+        index_df = apply_filters(index_df, args.filters)
+        print(f"After filtering: {len(index_df)} experiments remain\n")
 
     # Save index
     index_filename = CONFIG['output']['files']['experiment_index']

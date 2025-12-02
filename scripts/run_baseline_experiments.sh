@@ -14,6 +14,8 @@
 #   --exp3.1           Run Experiment 3.1 (single table, real conflicts)
 #   --exp3.2           Run Experiment 3.2 (manifest count distribution)
 #   --exp3.3           Run Experiment 3.3 (multi-table, real conflicts)
+#   --exp3.4           Run Experiment 3.4 (multi-table, real conflicts with backoff)
+#   --exp4.1           Run Experiment 4.1 (single table, false conflicts with backoff)
 #   --exp5.1           Run Experiment 5.1 (single table, catalog latency)
 #   --exp5.2           Run Experiment 5.2 (multi-table, catalog latency)
 #   --exp5.3           Run Experiment 5.3 (transaction partitioning, catalog latency)
@@ -21,10 +23,10 @@
 #   --dry-run          Show what would be run without executing
 #   --help, -h         Show this help message
 #
-# If no --expM.N flags are specified, runs all experiments (Phase 2, 3, 5)
+# If no --expM.N flags are specified, runs all experiments (Phase 2, 3, 4)
 #
 # Examples:
-#   # Run all experiments (Phase 2 & 3) with 5 seeds
+#   # Run all experiments (Phase 2, 3, & 4) with 5 seeds
 #   ./run_baseline_experiments.sh --seeds 5
 #
 #   # Run only Phase 2 baseline experiments

@@ -47,7 +47,8 @@
       "Bash(then if [ -f \"$dir/results.parquet\" ])",
       "Bash(xargs:*)",
       "Bash(for exp in exp5_1 exp5_2 exp5_3)",
-      "Bash(do echo '=== $exp ===' ls -d experiments/$exp_*)"
+      "Bash(do echo '=== $exp ===' ls -d experiments/$exp_*)",
+      "Bash(for script in scripts/*.py scripts/*.sh)"
     ],
     "deny": [],
     "ask": []

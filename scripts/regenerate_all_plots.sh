@@ -92,9 +92,9 @@ declare -a experiments=(
     "exp3_2_*|plots/exp3_2||Manifest distribution variance"
     "exp3_3_*|plots/exp3_3|num_tables|Multi-table real conflicts"
     "exp3_4_*|plots/exp3_4||Exponential backoff with real conflicts"
-    "exp5_1_*|plots/exp5_1||Single-table catalog latency"
-    "exp5_2_*|plots/exp5_2|num_tables|Multi-table catalog latency"
-    "exp5_3_*|plots/exp5_3||Transaction partitioning catalog latency"
+    "exp5_1_*|plots/exp5_1|t_cas_mean|Single-table catalog latency"
+    # Note: exp5_2 handled separately below with filtering
+    "exp5_3_*|plots/exp5_3|num_groups|Transaction partitioning catalog latency"
 )
 
 # Function to run analysis for one experiment group
@@ -145,8 +145,88 @@ run_analysis() {
 
 export -f run_analysis
 
+# Function to run analysis with filtering for one experiment group
+run_analysis_with_filter() {
+    local pattern="$1"
+    local output_dir="$2"
+    local group_by="$3"
+    local filter_expr="$4"
+    local description="$5"
+
+    # Check if any experiments exist matching the pattern
+    local exp_count=$(find experiments -type d -name "$pattern" 2>/dev/null | wc -l)
+
+    if [ "$exp_count" -eq 0 ]; then
+        echo "Skipped: $description (no experiments found matching $pattern)"
+        return 0
+    fi
+
+    echo "Starting: $description ($pattern with filter '$filter_expr')"
+
+    # Create output directory
+    mkdir -p "$output_dir"
+
+    # Build command
+    local cmd="python -m icecap.saturation_analysis -i experiments -p \"$pattern\" -o \"$output_dir\""
+
+    # Add config file if using consolidated mode
+    if [ "$USE_CONSOLIDATED" = true ]; then
+        cmd="$cmd -c \"$TEMP_CONFIG\""
+    fi
+
+    # Add group-by if specified
+    if [ -n "$group_by" ]; then
+        cmd="$cmd --group-by $group_by"
+    fi
+
+    # Add filter
+    cmd="$cmd --filter \"$filter_expr\""
+
+    # Run with logging
+    eval "$cmd" > "$output_dir/analysis.log" 2>&1
+
+    local exit_code=$?
+    if [ $exit_code -eq 0 ]; then
+        echo "Completed: $description"
+    else
+        echo "Failed: $description (exit code: $exit_code)"
+        # Don't propagate error - continue with other experiments
+        return 0
+    fi
+}
+
+export -f run_analysis_with_filter
+
 # Run analyses in background with limited parallelism
 pids=()
+
+# Handle exp5.2 first with filtering by T_CAS value
+# This generates 6 separate plots, one for each T_CAS value (15, 50, 100, 200, 500, 1000 ms)
+declare -a exp5_2_t_cas_values=(15 50 100 200 500 1000)
+for t_cas in "${exp5_2_t_cas_values[@]}"; do
+    # Wait if we've reached max parallel jobs
+    while [ ${#pids[@]} -ge "$PARALLEL" ]; do
+        # Check for completed jobs
+        for i in "${!pids[@]}"; do
+            if ! kill -0 "${pids[$i]}" 2>/dev/null; then
+                # Job completed, remove from array
+                unset 'pids[i]'
+            fi
+        done
+        # Rebuild array to remove gaps
+        pids=("${pids[@]}")
+        sleep 1
+    done
+
+    # Start analysis in background
+    run_analysis_with_filter \
+        "exp5_2_*" \
+        "plots/exp5_2_t_cas_${t_cas}ms" \
+        "num_tables" \
+        "t_cas_mean==$t_cas" \
+        "Multi-table catalog latency (T_CAS=${t_cas}ms)" &
+    pids+=($!)
+done
 for exp_config in "${experiments[@]}"; do
     IFS='|' read -r pattern output_dir group_by description <<< "$exp_config"
 
@@ -198,12 +278,26 @@ for exp_config in "${experiments[@]}"; do
     IFS='|' read -r pattern output_dir group_by description <<< "$exp_config"
     echo "  $description: $output_dir/"
 done
+# Add exp5.2 plots
+for t_cas in "${exp5_2_t_cas_values[@]}"; do
+    echo "  Multi-table catalog latency (T_CAS=${t_cas}ms): plots/exp5_2_t_cas_${t_cas}ms/"
+done
 echo ""
 
 # Show file counts
 echo "File summary:"
 for exp_config in "${experiments[@]}"; do
     IFS='|' read -r pattern output_dir group_by description <<< "$exp_config"
+    if [ -d "$output_dir" ]; then
+        png_count=$(find "$output_dir" -name "*.png" 2>/dev/null | wc -l)
+        md_count=$(find "$output_dir" -name "*.md" 2>/dev/null | wc -l)
+        csv_count=$(find "$output_dir" -name "*.csv" 2>/dev/null | wc -l)
+        echo "  $output_dir: $png_count PNGs, $md_count MDs, $csv_count CSVs"
+    fi
+done
+# Add exp5.2 file counts
+for t_cas in "${exp5_2_t_cas_values[@]}"; do
+    output_dir="plots/exp5_2_t_cas_${t_cas}ms"
     if [ -d "$output_dir" ]; then
         png_count=$(find "$output_dir" -name "*.png" 2>/dev/null | wc -l)
         md_count=$(find "$output_dir" -name "*.md" 2>/dev/null | wc -l)
