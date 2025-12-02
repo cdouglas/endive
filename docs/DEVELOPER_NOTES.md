@@ -207,7 +207,7 @@ consolidated_file = "experiments/consolidated.parquet"
 ## Performance Notes
 
 - Simulation speed: ~1000× real-time (1 hour sim in ~3.6 seconds)
-- Analysis with consolidated.parquet: 22× faster than individual files
+- Storage: consolidated.parquet provides efficient compression
 - Consolidation time: ~22 minutes for all experiments (incremental script)
 - Each experiment takes ~1 hour to run
 

@@ -176,8 +176,7 @@ df = load_and_aggregate_results(exp_info)
 ```python
 # Loads only relevant rows using filters
 df = load_and_aggregate_results_consolidated(exp_info)
-# Time: ~2 seconds for one experiment (22× faster)
-# Memory: ~200 MB peak (only loads filtered data)
+# Memory: ~200 MB peak (only loads filtered data via predicate pushdown)
 ```
 
 ### Warmup/Cooldown Filtering

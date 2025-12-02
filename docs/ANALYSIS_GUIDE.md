@@ -29,11 +29,11 @@ The **`saturation_analysis.py`** module solves this by:
 
 ### Consolidated Format (v2.0+)
 
-Starting with version 2.0, experiment results are available in a **consolidated Parquet file** for faster analysis:
+Starting with version 2.0, experiment results are available in a **consolidated Parquet file** for efficient storage:
 
 **Benefits:**
-- **22× faster** analysis using predicate pushdown
-- **Lower memory usage** - only loads relevant experiments
+- **Reduced storage** with efficient compression
+- **Lower memory usage** - only loads relevant experiments via predicate pushdown
 - **Single file** instead of 1,800+ individual files
 
 **File:** `experiments/consolidated.parquet` (1.39 GB, 114M rows, 371 experiments)

@@ -5,7 +5,7 @@
 # This script runs saturation analysis for all experiment patterns
 # and generates plots with standard deviation across seeds.
 #
-# Uses consolidated.parquet file if available (22× faster than individual files).
+# Uses consolidated.parquet file if available for efficient compressed storage.
 # Falls back to individual results.parquet files if consolidated file missing.
 #
 # Usage:
@@ -59,7 +59,7 @@ USE_CONSOLIDATED=false
 TEMP_CONFIG=""
 
 if [ -f "$CONSOLIDATED_FILE" ]; then
-    echo "Found consolidated.parquet - using fast mode (22× speedup)"
+    echo "Found consolidated.parquet - using consolidated mode"
     USE_CONSOLIDATED=true
 
     # Create temporary config file to enable consolidated mode
@@ -79,7 +79,7 @@ CONFIGEOF
     export USE_CONSOLIDATED
 else
     echo "No consolidated.parquet found - using individual results files"
-    echo "To speed up analysis 22×, run: python scripts/consolidate_all_experiments_incremental.py"
+    echo "To reduce storage with consolidation, run: python scripts/consolidate_all_experiments_incremental.py"
 fi
 echo ""
 

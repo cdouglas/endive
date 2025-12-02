@@ -89,8 +89,7 @@ python -m icecap.main my_config.toml --yes
 python scripts/consolidate_all_experiments.py
 
 # Result: experiments/consolidated.parquet
-# Contains all experiment data with predicate pushdown support
-# 22× faster analysis than reading individual files
+# Contains all experiment data with efficient compression and predicate pushdown support
 ```
 
 The consolidated format (v2.0+) enables efficient filtering:
@@ -403,7 +402,7 @@ icecap/
 - **Simulation speed**: ~1000× real-time (1 hour simulated in ~3.6 seconds)
 - **Parallel execution**: ~8× speedup with 8 cores
 - **Baseline runtime**: 24 hours with 8 cores (vs 8 days sequential)
-- **Analysis speed** (v2.0+): 22× faster with consolidated format
+- **Storage efficiency** (v2.0+): Consolidated format reduces storage with compression
 - **Test execution**: 136 tests in ~3 minutes
 
 ## Documentation
