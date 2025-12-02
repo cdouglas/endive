@@ -92,6 +92,7 @@ declare -a experiments=(
     "exp3_2_*|plots/exp3_2||Manifest distribution variance"
     "exp3_3_*|plots/exp3_3|num_tables|Multi-table real conflicts"
     "exp3_4_*|plots/exp3_4||Exponential backoff with real conflicts"
+    "exp4_1_*|plots/exp4_1||Single-table backoff comparison"
     "exp5_1_*|plots/exp5_1|t_cas_mean|Single-table catalog latency"
     # Note: exp5_2 handled separately below with filtering
     "exp5_3_*|plots/exp5_3|num_groups|Transaction partitioning catalog latency"
