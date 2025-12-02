@@ -264,8 +264,13 @@ class TestSelectionBias:
                 print(f"  Mean runtime (aborted): {mean_runtime_aborted:.1f}ms")
                 print(f"  Bias ratio (aborted/committed): {bias_ratio:.3f}")
 
-                # Also test statistical significance
-                t_stat, p_value = stats.ttest_ind(aborted['t_runtime'], committed['t_runtime'])
+                # Test statistical significance using Mann-Whitney U test
+                # Non-parametric test is more appropriate for potentially skewed runtime distributions
+                u_stat, p_value = stats.mannwhitneyu(
+                    aborted['t_runtime'],
+                    committed['t_runtime'],
+                    alternative='two-sided'
+                )
 
                 if p_value < 0.05:
                     print(f"  Difference is statistically significant (p={p_value:.4f})")
@@ -324,7 +329,14 @@ class TestSelectionBias:
                 print(f"  Bias ratio (aborted/committed): {bias_ratio:.3f}")
 
                 # Test statistical significance
-                t_stat, p_value = stats.ttest_ind(aborted['n_retries'], committed['n_retries'])
+                # Use Mann-Whitney U test (non-parametric) instead of t-test
+                # This is more appropriate for count data and handles the case where
+                # aborted transactions all have identical retry counts (hit the limit)
+                u_stat, p_value = stats.mannwhitneyu(
+                    aborted['n_retries'],
+                    committed['n_retries'],
+                    alternative='greater'  # Test if aborted > committed
+                )
 
                 assert p_value < 0.05, \
                     f"Retry difference should be statistically significant, got p={p_value:.4f}"
