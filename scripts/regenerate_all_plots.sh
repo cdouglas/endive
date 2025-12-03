@@ -90,8 +90,8 @@ declare -a experiments=(
     "exp2_2_*|plots/exp2_2|num_tables|Multi-table false conflicts"
     "exp3_1_*|plots/exp3_1||Single-table real conflicts"
     "exp3_2_*|plots/exp3_2||Manifest distribution variance"
-    "exp3_3_*|plots/exp3_3|num_tables|Multi-table real conflicts"
-    "exp3_4_*|plots/exp3_4||Exponential backoff with real conflicts"
+    # Note: exp3_3 handled separately below with filtering (sweeps num_tables × real_conflict_probability)
+    # Note: exp3_4 handled separately below with filtering (sweeps num_tables × real_conflict_probability)
     "exp4_1_*|plots/exp4_1||Single-table backoff comparison"
     "exp5_1_*|plots/exp5_1|t_cas_mean|Single-table catalog latency"
     # Note: exp5_2 handled separately below with filtering
@@ -201,7 +201,69 @@ export -f run_analysis_with_filter
 # Run analyses in background with limited parallelism
 pids=()
 
-# Handle exp5.2 first with filtering by T_CAS value
+# Handle exp3.3 with filtering by num_tables × real_conflict_probability
+# This generates 20 separate plots (5 table counts × 4 conflict probabilities)
+declare -a exp3_3_num_tables=(1 2 5 10 20)
+declare -a exp3_3_real_probs=(0.0 0.1 0.3 0.5)
+for num_tables in "${exp3_3_num_tables[@]}"; do
+    for real_prob in "${exp3_3_real_probs[@]}"; do
+        # Wait if we've reached max parallel jobs
+        while [ ${#pids[@]} -ge "$PARALLEL" ]; do
+            for i in "${!pids[@]}"; do
+                if ! kill -0 "${pids[$i]}" 2>/dev/null; then
+                    unset 'pids[i]'
+                fi
+            done
+            pids=("${pids[@]}")
+            sleep 1
+        done
+
+        # Format real_prob for directory name (replace . with _)
+        real_prob_fmt=$(echo "$real_prob" | tr '.' '_')
+
+        # Start analysis in background
+        run_analysis_with_filter \
+            "exp3_3_*" \
+            "plots/exp3_3_t${num_tables}_p${real_prob_fmt}" \
+            "" \
+            "num_tables==$num_tables && real_conflict_probability==$real_prob" \
+            "Multi-table real conflicts (${num_tables} tables, p=${real_prob})" &
+        pids+=($!)
+    done
+done
+
+# Handle exp3.4 with filtering by num_tables × real_conflict_probability
+# This generates 20 separate plots (5 table counts × 4 conflict probabilities)
+declare -a exp3_4_num_tables=(1 2 5 10 20)
+declare -a exp3_4_real_probs=(0.0 0.1 0.3 0.5)
+for num_tables in "${exp3_4_num_tables[@]}"; do
+    for real_prob in "${exp3_4_real_probs[@]}"; do
+        # Wait if we've reached max parallel jobs
+        while [ ${#pids[@]} -ge "$PARALLEL" ]; do
+            for i in "${!pids[@]}"; do
+                if ! kill -0 "${pids[$i]}" 2>/dev/null; then
+                    unset 'pids[i]'
+                fi
+            done
+            pids=("${pids[@]}")
+            sleep 1
+        done
+
+        # Format real_prob for directory name (replace . with _)
+        real_prob_fmt=$(echo "$real_prob" | tr '.' '_')
+
+        # Start analysis in background
+        run_analysis_with_filter \
+            "exp3_4_*" \
+            "plots/exp3_4_t${num_tables}_p${real_prob_fmt}" \
+            "" \
+            "num_tables==$num_tables && real_conflict_probability==$real_prob" \
+            "Exponential backoff with real conflicts (${num_tables} tables, p=${real_prob})" &
+        pids+=($!)
+    done
+done
+
+# Handle exp5.2 with filtering by T_CAS value
 # This generates 6 separate plots, one for each T_CAS value (15, 50, 100, 200, 500, 1000 ms)
 declare -a exp5_2_t_cas_values=(15 50 100 200 500 1000)
 for t_cas in "${exp5_2_t_cas_values[@]}"; do
@@ -279,6 +341,20 @@ for exp_config in "${experiments[@]}"; do
     IFS='|' read -r pattern output_dir group_by description <<< "$exp_config"
     echo "  $description: $output_dir/"
 done
+# Add exp3.3 plots
+for num_tables in "${exp3_3_num_tables[@]}"; do
+    for real_prob in "${exp3_3_real_probs[@]}"; do
+        real_prob_fmt=$(echo "$real_prob" | tr '.' '_')
+        echo "  Multi-table real conflicts (${num_tables} tables, p=${real_prob}): plots/exp3_3_t${num_tables}_p${real_prob_fmt}/"
+    done
+done
+# Add exp3.4 plots
+for num_tables in "${exp3_4_num_tables[@]}"; do
+    for real_prob in "${exp3_4_real_probs[@]}"; do
+        real_prob_fmt=$(echo "$real_prob" | tr '.' '_')
+        echo "  Exponential backoff with real conflicts (${num_tables} tables, p=${real_prob}): plots/exp3_4_t${num_tables}_p${real_prob_fmt}/"
+    done
+done
 # Add exp5.2 plots
 for t_cas in "${exp5_2_t_cas_values[@]}"; do
     echo "  Multi-table catalog latency (T_CAS=${t_cas}ms): plots/exp5_2_t_cas_${t_cas}ms/"
@@ -295,6 +371,32 @@ for exp_config in "${experiments[@]}"; do
         csv_count=$(find "$output_dir" -name "*.csv" 2>/dev/null | wc -l)
         echo "  $output_dir: $png_count PNGs, $md_count MDs, $csv_count CSVs"
     fi
+done
+# Add exp3.3 file counts
+for num_tables in "${exp3_3_num_tables[@]}"; do
+    for real_prob in "${exp3_3_real_probs[@]}"; do
+        real_prob_fmt=$(echo "$real_prob" | tr '.' '_')
+        output_dir="plots/exp3_3_t${num_tables}_p${real_prob_fmt}"
+        if [ -d "$output_dir" ]; then
+            png_count=$(find "$output_dir" -name "*.png" 2>/dev/null | wc -l)
+            md_count=$(find "$output_dir" -name "*.md" 2>/dev/null | wc -l)
+            csv_count=$(find "$output_dir" -name "*.csv" 2>/dev/null | wc -l)
+            echo "  $output_dir: $png_count PNGs, $md_count MDs, $csv_count CSVs"
+        fi
+    done
+done
+# Add exp3.4 file counts
+for num_tables in "${exp3_4_num_tables[@]}"; do
+    for real_prob in "${exp3_4_real_probs[@]}"; do
+        real_prob_fmt=$(echo "$real_prob" | tr '.' '_')
+        output_dir="plots/exp3_4_t${num_tables}_p${real_prob_fmt}"
+        if [ -d "$output_dir" ]; then
+            png_count=$(find "$output_dir" -name "*.png" 2>/dev/null | wc -l)
+            md_count=$(find "$output_dir" -name "*.md" 2>/dev/null | wc -l)
+            csv_count=$(find "$output_dir" -name "*.csv" 2>/dev/null | wc -l)
+            echo "  $output_dir: $png_count PNGs, $md_count MDs, $csv_count CSVs"
+        fi
+    done
 done
 # Add exp5.2 file counts
 for t_cas in "${exp5_2_t_cas_values[@]}"; do
