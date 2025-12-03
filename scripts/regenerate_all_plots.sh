@@ -89,7 +89,7 @@ declare -a experiments=(
     "exp2_1_*|plots/exp2_1||Single-table false conflicts"
     "exp2_2_*|plots/exp2_2|num_tables|Multi-table false conflicts"
     # Note: exp3_1 handled separately below with filtering (sweeps real_conflict_probability)
-    "exp3_2_*|plots/exp3_2||Manifest distribution variance"
+    # Note: exp3_2 handled separately below with filtering (sweeps conflicting_manifests distribution)
     # Note: exp3_3 handled separately below with filtering (sweeps num_tables × real_conflict_probability)
     # Note: exp3_4 handled separately below with filtering (sweeps num_tables × real_conflict_probability)
     "exp4_1_*|plots/exp4_1||Single-table backoff comparison"
@@ -226,6 +226,35 @@ for real_prob in "${exp3_1_real_probs[@]}"; do
         "" \
         "real_conflict_probability==$real_prob" \
         "Single-table real conflicts (p=${real_prob})" &
+    pids+=($!)
+done
+
+# Handle exp3.2 with filtering by conflicting_manifests distribution type
+# This generates 4 separate plots (one for each distribution configuration)
+declare -a exp3_2_dist_types=("fixed-1" "fixed-5" "fixed-10" "exponential")
+declare -a exp3_2_labels=("Fixed 1 manifest" "Fixed 5 manifests" "Fixed 10 manifests" "Exponential distribution")
+for i in "${!exp3_2_dist_types[@]}"; do
+    dist_type="${exp3_2_dist_types[$i]}"
+    label="${exp3_2_labels[$i]}"
+
+    # Wait if we've reached max parallel jobs
+    while [ ${#pids[@]} -ge "$PARALLEL" ]; do
+        for j in "${!pids[@]}"; do
+            if ! kill -0 "${pids[$j]}" 2>/dev/null; then
+                unset 'pids[j]'
+            fi
+        done
+        pids=("${pids[@]}")
+        sleep 1
+    done
+
+    # Start analysis in background
+    run_analysis_with_filter \
+        "exp3_2_*" \
+        "plots/exp3_2_${dist_type}" \
+        "" \
+        "conflicting_manifests_type=='${dist_type}'" \
+        "Manifest distribution (${label})" &
     pids+=($!)
 done
 
@@ -402,6 +431,12 @@ for real_prob in "${exp3_1_real_probs[@]}"; do
     real_prob_fmt=$(echo "$real_prob" | tr '.' '_')
     echo "  Single-table real conflicts (p=${real_prob}): plots/exp3_1_p${real_prob_fmt}/"
 done
+# Add exp3.2 plots
+for i in "${!exp3_2_dist_types[@]}"; do
+    dist_type="${exp3_2_dist_types[$i]}"
+    label="${exp3_2_labels[$i]}"
+    echo "  Manifest distribution (${label}): plots/exp3_2_${dist_type}/"
+done
 # Add exp3.3 plots
 for num_tables in "${exp3_3_num_tables[@]}"; do
     for real_prob in "${exp3_3_real_probs[@]}"; do
@@ -441,6 +476,16 @@ done
 for real_prob in "${exp3_1_real_probs[@]}"; do
     real_prob_fmt=$(echo "$real_prob" | tr '.' '_')
     output_dir="plots/exp3_1_p${real_prob_fmt}"
+    if [ -d "$output_dir" ]; then
+        png_count=$(find "$output_dir" -name "*.png" 2>/dev/null | wc -l)
+        md_count=$(find "$output_dir" -name "*.md" 2>/dev/null | wc -l)
+        csv_count=$(find "$output_dir" -name "*.csv" 2>/dev/null | wc -l)
+        echo "  $output_dir: $png_count PNGs, $md_count MDs, $csv_count CSVs"
+    fi
+done
+# Add exp3.2 file counts
+for dist_type in "${exp3_2_dist_types[@]}"; do
+    output_dir="plots/exp3_2_${dist_type}"
     if [ -d "$output_dir" ]; then
         png_count=$(find "$output_dir" -name "*.png" 2>/dev/null | wc -l)
         md_count=$(find "$output_dir" -name "*.md" 2>/dev/null | wc -l)

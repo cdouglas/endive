@@ -307,6 +307,25 @@ def extract_key_parameters(config: Dict) -> Dict:
     if 'transaction' in config:
         params['real_conflict_probability'] = config['transaction'].get('real_conflict_probability', 0.0)
 
+        # Extract conflicting_manifests configuration
+        if 'conflicting_manifests' in config['transaction']:
+            cm = config['transaction']['conflicting_manifests']
+            if isinstance(cm, dict):
+                dist_type = cm.get('distribution', 'exponential')
+                params['conflicting_manifests_distribution'] = dist_type
+
+                # For fixed distribution, also extract the value
+                if dist_type == 'fixed':
+                    params['conflicting_manifests_value'] = cm.get('value', None)
+                    # Create combined identifier for filtering (e.g., "fixed-1", "fixed-5")
+                    if 'value' in cm:
+                        params['conflicting_manifests_type'] = f"fixed-{cm['value']}"
+                elif dist_type == 'exponential':
+                    params['conflicting_manifests_mean'] = cm.get('mean', None)
+                    params['conflicting_manifests_type'] = 'exponential'
+                elif dist_type == 'uniform':
+                    params['conflicting_manifests_type'] = 'uniform'
+
     # Extract simulation duration
     if 'simulation' in config:
         params['duration_ms'] = config['simulation'].get('duration_ms', None)
