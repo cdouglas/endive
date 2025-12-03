@@ -95,7 +95,7 @@ declare -a experiments=(
     "exp4_1_*|plots/exp4_1||Single-table backoff comparison"
     "exp5_1_*|plots/exp5_1|t_cas_mean|Single-table catalog latency"
     # Note: exp5_2 handled separately below with filtering
-    "exp5_3_*|plots/exp5_3|num_groups|Transaction partitioning catalog latency"
+    # Note: exp5_3 handled separately below with filtering (sweeps T_CAS × num_groups)
 )
 
 # Function to run analysis for one experiment group
@@ -318,6 +318,34 @@ for t_cas in "${exp5_2_t_cas_values[@]}"; do
         "Multi-table catalog latency (T_CAS=${t_cas}ms)" &
     pids+=($!)
 done
+
+# Handle exp5.3 with filtering by T_CAS value
+# This generates 6 separate plots, one for each T_CAS value, with num_groups as series
+declare -a exp5_3_t_cas_values=(15 50 100 200 500 1000)
+for t_cas in "${exp5_3_t_cas_values[@]}"; do
+    # Wait if we've reached max parallel jobs
+    while [ ${#pids[@]} -ge "$PARALLEL" ]; do
+        # Check for completed jobs
+        for i in "${!pids[@]}"; do
+            if ! kill -0 "${pids[$i]}" 2>/dev/null; then
+                # Job completed, remove from array
+                unset 'pids[i]'
+            fi
+        done
+        # Rebuild array to remove gaps
+        pids=("${pids[@]}")
+        sleep 1
+    done
+
+    # Start analysis in background
+    run_analysis_with_filter \
+        "exp5_3_*" \
+        "plots/exp5_3_t_cas_${t_cas}ms" \
+        "num_groups" \
+        "t_cas_mean==$t_cas" \
+        "Transaction partitioning (T_CAS=${t_cas}ms)" &
+    pids+=($!)
+done
 for exp_config in "${experiments[@]}"; do
     IFS='|' read -r pattern output_dir group_by description <<< "$exp_config"
 
@@ -392,6 +420,10 @@ done
 for t_cas in "${exp5_2_t_cas_values[@]}"; do
     echo "  Multi-table catalog latency (T_CAS=${t_cas}ms): plots/exp5_2_t_cas_${t_cas}ms/"
 done
+# Add exp5.3 plots
+for t_cas in "${exp5_3_t_cas_values[@]}"; do
+    echo "  Transaction partitioning (T_CAS=${t_cas}ms): plots/exp5_3_t_cas_${t_cas}ms/"
+done
 echo ""
 
 # Show file counts
@@ -445,6 +477,16 @@ done
 # Add exp5.2 file counts
 for t_cas in "${exp5_2_t_cas_values[@]}"; do
     output_dir="plots/exp5_2_t_cas_${t_cas}ms"
+    if [ -d "$output_dir" ]; then
+        png_count=$(find "$output_dir" -name "*.png" 2>/dev/null | wc -l)
+        md_count=$(find "$output_dir" -name "*.md" 2>/dev/null | wc -l)
+        csv_count=$(find "$output_dir" -name "*.csv" 2>/dev/null | wc -l)
+        echo "  $output_dir: $png_count PNGs, $md_count MDs, $csv_count CSVs"
+    fi
+done
+# Add exp5.3 file counts
+for t_cas in "${exp5_3_t_cas_values[@]}"; do
+    output_dir="plots/exp5_3_t_cas_${t_cas}ms"
     if [ -d "$output_dir" ]; then
         png_count=$(find "$output_dir" -name "*.png" 2>/dev/null | wc -l)
         md_count=$(find "$output_dir" -name "*.md" 2>/dev/null | wc -l)
