@@ -54,8 +54,8 @@ Use the `EXP_ARGS` environment variable to control which experiments run and how
 # Run all phase 3 experiments
 -e EXP_ARGS="--exp3.1 --exp3.2 --exp3.3 --exp3.4 --seeds 5 --parallel 96"
 
-# Run exp5 experiments (catalog latency)
--e EXP_ARGS="--exp5.1 --exp5.2 --exp5.3 --seeds 5"
+# Run phase 4 experiments (backoff strategies)
+-e EXP_ARGS="--exp4.1 --seeds 5"
 ```
 
 ### Available Experiment Flags
@@ -69,9 +69,6 @@ Use the `EXP_ARGS` environment variable to control which experiments run and how
 | `--exp3.3` | Multi-table real conflicts | 9 loads × 5 tables × 4 p_real | 5 | 900 |
 | `--exp3.4` | Exponential backoff | 9 loads | 5 | 45 |
 | `--exp4.1` | Backoff with real conflicts | 9 loads × 6 backoff | 5 | 270 |
-| `--exp5.1` | Single-table catalog latency | 6 T_CAS × 9 loads | 5 | 270 |
-| `--exp5.2` | Multi-table catalog latency | 6 T_CAS × 4 tables × 9 loads | 5 | 1,080 |
-| `--exp5.3` | Transaction partitioning | 5 groups × 6 T_CAS × 9 loads | 5 | 1,350 |
 
 ### Thread Control Environment Variables
 
@@ -195,7 +192,7 @@ Match `--parallel` to available cores:
 -e EXP_ARGS="--exp3.3 --seeds 5 --parallel 96"
 
 # 112-core machine
--e EXP_ARGS="--exp5.2 --seeds 5 --parallel 112"
+-e EXP_ARGS="--exp4.1 --seeds 5 --parallel 112"
 ```
 
 ## Advanced Usage

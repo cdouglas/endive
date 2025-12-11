@@ -21,8 +21,9 @@ Complete documentation for the Iceberg Catalog Simulator.
 - **[WARMUP_PERIOD.md](WARMUP_PERIOD.md)** - Steady-state measurement methodology
 - **[ANALYSIS_GUIDE.md](ANALYSIS_GUIDE.md)** - Analysis pipeline details
 - **[RUNNING_EXPERIMENTS.md](RUNNING_EXPERIMENTS.md)** - Parallel execution guide
-- **[ANALYSIS_SUMMARY.md](ANALYSIS_SUMMARY.md)** - Analysis capabilities overview
 - **[ORGANIZATION_SUMMARY.md](ORGANIZATION_SUMMARY.md)** - Experiment organization
+- **[APPENDIX_SIMULATOR_DETAILS.md](APPENDIX_SIMULATOR_DETAILS.md)** - Technical appendix for blog posts
+- **[CONSOLIDATED_FORMAT.md](CONSOLIDATED_FORMAT.md)** - Consolidated results format
 
 ## Documentation by Task
 
@@ -41,7 +42,7 @@ Complete documentation for the Iceberg Catalog Simulator.
 → Follow [QUICKSTART.md](QUICKSTART.md) "Analyze Results" section or [ANALYSIS_GUIDE.md](ANALYSIS_GUIDE.md)
 
 **...understand the key findings**
-→ Read [BASELINE_RESULTS.md](BASELINE_RESULTS.md) and check [../README.md](../README.md) "Key Findings" section
+→ Read [BASELINE_RESULTS.md](BASELINE_RESULTS.md) for comprehensive analysis results
 
 **...understand overhead scaling**
 → Read [OVERHEAD_ANALYSIS.md](OVERHEAD_ANALYSIS.md)
@@ -78,7 +79,7 @@ docs/
 │   ├── BASELINE_RESULTS.md         # Exp 2.1 & 2.2 findings
 │   ├── OVERHEAD_ANALYSIS.md        # Commit overhead deep dive
 │   ├── ANALYSIS_GUIDE.md           # Analysis workflow
-│   └── ANALYSIS_SUMMARY.md         # Analysis capabilities
+│   └── CONSOLIDATED_FORMAT.md      # Consolidated results format
 │
 ├── Research & Design
 │   ├── ANALYSIS_PLAN.md            # Research questions & status
@@ -88,7 +89,8 @@ docs/
 └── Advanced Topics
     ├── WARMUP_PERIOD.md            # Steady-state methodology
     ├── RUNNING_EXPERIMENTS.md      # Parallel execution
-    └── ORGANIZATION_SUMMARY.md     # Experiment organization
+    ├── ORGANIZATION_SUMMARY.md     # Experiment organization
+    └── APPENDIX_SIMULATOR_DETAILS.md  # Technical appendix for blog posts
 ```
 
 ## Project Structure

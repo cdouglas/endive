@@ -30,20 +30,25 @@
 - **Latency paradox**: More tables = higher throughput but WORSE tail latency
 - Overhead at 50 tables: 59% (commit takes MORE time than transaction!)
 
-### 🔬 Ready to Run
+### ✅ Recently Implemented
 
 **Phase 3 - Real Conflict Experiments:**
-- ⏳ Exp 3.1: Single-table real conflicts (Question 1b)
-- ⏳ Exp 3.2: Manifest count distribution variance
-- ⏳ Exp 3.3: Multi-table real conflicts (Question 2b)
+- ✅ Exp 3.1: Single-table real conflicts (implemented, ready for analysis)
+- ✅ Exp 3.2: Manifest count distribution variance (implemented, ready for analysis)
+- ✅ Exp 3.3: Multi-table real conflicts (implemented, ready for analysis)
 
-**Phase 4 - Exponential Backoff Experiments (NEW):**
-- ⏳ Exp 4.1: Single-table false conflicts with backoff (Question 4a)
-- ⏳ Exp 3.4: Multi-table real conflicts with backoff (Question 4b)
+**Phase 4 - Exponential Backoff Experiments:**
+- ✅ Exp 3.4: Multi-table real conflicts with backoff (implemented, ready for analysis)
+- ✅ Exp 4.1: Backoff strategy comparison (implemented, ready for analysis)
 
-**Outstanding questions:**
+**Plotting Improvements:**
+- ✅ Composite plots with `--group-by` for parameter variations
+- ✅ Fixed filter syntax (separate `--filter` arguments, not `&&`)
+- ✅ Automated plot generation via `./scripts/regenerate_all_plots.sh`
+
+**Questions to Explore:**
 - How do real conflicts shift saturation point?
-- Cost difference: false (~1ms) vs real (~400ms)?
+- Cost difference: false (~2ms) vs real (~100ms)?
 - How do real conflicts compound in multi-table transactions?
 - Does exponential backoff improve performance under contention?
 - Is backoff more beneficial with expensive real conflicts?
