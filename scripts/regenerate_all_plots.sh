@@ -201,33 +201,24 @@ export -f run_analysis_with_filter
 # Run analyses in background with limited parallelism
 pids=()
 
-# Handle exp3.1 with filtering by real_conflict_probability
-# This generates 7 separate plots (one for each conflict probability)
-declare -a exp3_1_real_probs=(0.0 0.1 0.2 0.3 0.5 0.7 1.0)
-for real_prob in "${exp3_1_real_probs[@]}"; do
-    # Wait if we've reached max parallel jobs
-    while [ ${#pids[@]} -ge "$PARALLEL" ]; do
-        for i in "${!pids[@]}"; do
-            if ! kill -0 "${pids[$i]}" 2>/dev/null; then
-                unset 'pids[i]'
-            fi
-        done
-        pids=("${pids[@]}")
-        sleep 1
+# Handle exp3.1 with grouping by real_conflict_probability
+# This generates 1 composite plot with all conflict probabilities
+while [ ${#pids[@]} -ge "$PARALLEL" ]; do
+    for i in "${!pids[@]}"; do
+        if ! kill -0 "${pids[$i]}" 2>/dev/null; then
+            unset 'pids[i]'
+        fi
     done
-
-    # Format real_prob for directory name (replace . with _)
-    real_prob_fmt=$(echo "$real_prob" | tr '.' '_')
-
-    # Start analysis in background
-    run_analysis_with_filter \
-        "exp3_1_*" \
-        "plots/exp3_1_p${real_prob_fmt}" \
-        "" \
-        "real_conflict_probability==$real_prob" \
-        "Single-table real conflicts (p=${real_prob})" &
-    pids+=($!)
+    pids=("${pids[@]}")
+    sleep 1
 done
+
+run_analysis \
+    "exp3_1_*" \
+    "plots/exp3_1" \
+    "real_conflict_probability" \
+    "Single-table real conflicts" &
+pids+=($!)
 
 # Handle exp3.2 with filtering by conflicting_manifests distribution type
 # This generates 4 separate plots (one for each distribution configuration)
@@ -258,66 +249,54 @@ for i in "${!exp3_2_dist_types[@]}"; do
     pids+=($!)
 done
 
-# Handle exp3.3 with filtering by num_tables × real_conflict_probability
-# This generates 20 separate plots (5 table counts × 4 conflict probabilities)
+# Handle exp3.3 with grouping by real_conflict_probability and filtering by num_tables
+# This generates 5 composite plots (one per table count, each with multiple conflict probabilities)
 declare -a exp3_3_num_tables=(1 2 5 10 20)
-declare -a exp3_3_real_probs=(0.0 0.1 0.3 0.5)
 for num_tables in "${exp3_3_num_tables[@]}"; do
-    for real_prob in "${exp3_3_real_probs[@]}"; do
-        # Wait if we've reached max parallel jobs
-        while [ ${#pids[@]} -ge "$PARALLEL" ]; do
-            for i in "${!pids[@]}"; do
-                if ! kill -0 "${pids[$i]}" 2>/dev/null; then
-                    unset 'pids[i]'
-                fi
-            done
-            pids=("${pids[@]}")
-            sleep 1
+    # Wait if we've reached max parallel jobs
+    while [ ${#pids[@]} -ge "$PARALLEL" ]; do
+        for i in "${!pids[@]}"; do
+            if ! kill -0 "${pids[$i]}" 2>/dev/null; then
+                unset 'pids[i]'
+            fi
         done
-
-        # Format real_prob for directory name (replace . with _)
-        real_prob_fmt=$(echo "$real_prob" | tr '.' '_')
-
-        # Start analysis in background
-        run_analysis_with_filter \
-            "exp3_3_*" \
-            "plots/exp3_3_t${num_tables}_p${real_prob_fmt}" \
-            "" \
-            "num_tables==$num_tables && real_conflict_probability==$real_prob" \
-            "Multi-table real conflicts (${num_tables} tables, p=${real_prob})" &
-        pids+=($!)
+        pids=("${pids[@]}")
+        sleep 1
     done
+
+    # Start analysis in background
+    run_analysis_with_filter \
+        "exp3_3_*" \
+        "plots/exp3_3_t${num_tables}" \
+        "real_conflict_probability" \
+        "num_tables==$num_tables" \
+        "Multi-table real conflicts (${num_tables} tables)" &
+    pids+=($!)
 done
 
-# Handle exp3.4 with filtering by num_tables × real_conflict_probability
-# This generates 20 separate plots (5 table counts × 4 conflict probabilities)
+# Handle exp3.4 with grouping by real_conflict_probability and filtering by num_tables
+# This generates 5 composite plots (one per table count, each with multiple conflict probabilities)
 declare -a exp3_4_num_tables=(1 2 5 10 20)
-declare -a exp3_4_real_probs=(0.0 0.1 0.3 0.5)
 for num_tables in "${exp3_4_num_tables[@]}"; do
-    for real_prob in "${exp3_4_real_probs[@]}"; do
-        # Wait if we've reached max parallel jobs
-        while [ ${#pids[@]} -ge "$PARALLEL" ]; do
-            for i in "${!pids[@]}"; do
-                if ! kill -0 "${pids[$i]}" 2>/dev/null; then
-                    unset 'pids[i]'
-                fi
-            done
-            pids=("${pids[@]}")
-            sleep 1
+    # Wait if we've reached max parallel jobs
+    while [ ${#pids[@]} -ge "$PARALLEL" ]; do
+        for i in "${!pids[@]}"; do
+            if ! kill -0 "${pids[$i]}" 2>/dev/null; then
+                unset 'pids[i]'
+            fi
         done
-
-        # Format real_prob for directory name (replace . with _)
-        real_prob_fmt=$(echo "$real_prob" | tr '.' '_')
-
-        # Start analysis in background
-        run_analysis_with_filter \
-            "exp3_4_*" \
-            "plots/exp3_4_t${num_tables}_p${real_prob_fmt}" \
-            "" \
-            "num_tables==$num_tables && real_conflict_probability==$real_prob" \
-            "Exponential backoff with real conflicts (${num_tables} tables, p=${real_prob})" &
-        pids+=($!)
+        pids=("${pids[@]}")
+        sleep 1
     done
+
+    # Start analysis in background
+    run_analysis_with_filter \
+        "exp3_4_*" \
+        "plots/exp3_4_t${num_tables}" \
+        "real_conflict_probability" \
+        "num_tables==$num_tables" \
+        "Exponential backoff with real conflicts (${num_tables} tables)" &
+    pids+=($!)
 done
 
 # Handle exp5.2 with filtering by T_CAS value
@@ -426,11 +405,8 @@ for exp_config in "${experiments[@]}"; do
     IFS='|' read -r pattern output_dir group_by description <<< "$exp_config"
     echo "  $description: $output_dir/"
 done
-# Add exp3.1 plots
-for real_prob in "${exp3_1_real_probs[@]}"; do
-    real_prob_fmt=$(echo "$real_prob" | tr '.' '_')
-    echo "  Single-table real conflicts (p=${real_prob}): plots/exp3_1_p${real_prob_fmt}/"
-done
+# Add exp3.1 plot
+echo "  Single-table real conflicts: plots/exp3_1/"
 # Add exp3.2 plots
 for i in "${!exp3_2_dist_types[@]}"; do
     dist_type="${exp3_2_dist_types[$i]}"
@@ -439,17 +415,11 @@ for i in "${!exp3_2_dist_types[@]}"; do
 done
 # Add exp3.3 plots
 for num_tables in "${exp3_3_num_tables[@]}"; do
-    for real_prob in "${exp3_3_real_probs[@]}"; do
-        real_prob_fmt=$(echo "$real_prob" | tr '.' '_')
-        echo "  Multi-table real conflicts (${num_tables} tables, p=${real_prob}): plots/exp3_3_t${num_tables}_p${real_prob_fmt}/"
-    done
+    echo "  Multi-table real conflicts (${num_tables} tables): plots/exp3_3_t${num_tables}/"
 done
 # Add exp3.4 plots
 for num_tables in "${exp3_4_num_tables[@]}"; do
-    for real_prob in "${exp3_4_real_probs[@]}"; do
-        real_prob_fmt=$(echo "$real_prob" | tr '.' '_')
-        echo "  Exponential backoff with real conflicts (${num_tables} tables, p=${real_prob}): plots/exp3_4_t${num_tables}_p${real_prob_fmt}/"
-    done
+    echo "  Exponential backoff with real conflicts (${num_tables} tables): plots/exp3_4_t${num_tables}/"
 done
 # Add exp5.2 plots
 for t_cas in "${exp5_2_t_cas_values[@]}"; do
@@ -472,17 +442,14 @@ for exp_config in "${experiments[@]}"; do
         echo "  $output_dir: $png_count PNGs, $md_count MDs, $csv_count CSVs"
     fi
 done
-# Add exp3.1 file counts
-for real_prob in "${exp3_1_real_probs[@]}"; do
-    real_prob_fmt=$(echo "$real_prob" | tr '.' '_')
-    output_dir="plots/exp3_1_p${real_prob_fmt}"
-    if [ -d "$output_dir" ]; then
-        png_count=$(find "$output_dir" -name "*.png" 2>/dev/null | wc -l)
-        md_count=$(find "$output_dir" -name "*.md" 2>/dev/null | wc -l)
-        csv_count=$(find "$output_dir" -name "*.csv" 2>/dev/null | wc -l)
-        echo "  $output_dir: $png_count PNGs, $md_count MDs, $csv_count CSVs"
-    fi
-done
+# Add exp3.1 file count
+output_dir="plots/exp3_1"
+if [ -d "$output_dir" ]; then
+    png_count=$(find "$output_dir" -name "*.png" 2>/dev/null | wc -l)
+    md_count=$(find "$output_dir" -name "*.md" 2>/dev/null | wc -l)
+    csv_count=$(find "$output_dir" -name "*.csv" 2>/dev/null | wc -l)
+    echo "  $output_dir: $png_count PNGs, $md_count MDs, $csv_count CSVs"
+fi
 # Add exp3.2 file counts
 for dist_type in "${exp3_2_dist_types[@]}"; do
     output_dir="plots/exp3_2_${dist_type}"
@@ -495,29 +462,23 @@ for dist_type in "${exp3_2_dist_types[@]}"; do
 done
 # Add exp3.3 file counts
 for num_tables in "${exp3_3_num_tables[@]}"; do
-    for real_prob in "${exp3_3_real_probs[@]}"; do
-        real_prob_fmt=$(echo "$real_prob" | tr '.' '_')
-        output_dir="plots/exp3_3_t${num_tables}_p${real_prob_fmt}"
-        if [ -d "$output_dir" ]; then
-            png_count=$(find "$output_dir" -name "*.png" 2>/dev/null | wc -l)
-            md_count=$(find "$output_dir" -name "*.md" 2>/dev/null | wc -l)
-            csv_count=$(find "$output_dir" -name "*.csv" 2>/dev/null | wc -l)
-            echo "  $output_dir: $png_count PNGs, $md_count MDs, $csv_count CSVs"
-        fi
-    done
+    output_dir="plots/exp3_3_t${num_tables}"
+    if [ -d "$output_dir" ]; then
+        png_count=$(find "$output_dir" -name "*.png" 2>/dev/null | wc -l)
+        md_count=$(find "$output_dir" -name "*.md" 2>/dev/null | wc -l)
+        csv_count=$(find "$output_dir" -name "*.csv" 2>/dev/null | wc -l)
+        echo "  $output_dir: $png_count PNGs, $md_count MDs, $csv_count CSVs"
+    fi
 done
 # Add exp3.4 file counts
 for num_tables in "${exp3_4_num_tables[@]}"; do
-    for real_prob in "${exp3_4_real_probs[@]}"; do
-        real_prob_fmt=$(echo "$real_prob" | tr '.' '_')
-        output_dir="plots/exp3_4_t${num_tables}_p${real_prob_fmt}"
-        if [ -d "$output_dir" ]; then
-            png_count=$(find "$output_dir" -name "*.png" 2>/dev/null | wc -l)
-            md_count=$(find "$output_dir" -name "*.md" 2>/dev/null | wc -l)
-            csv_count=$(find "$output_dir" -name "*.csv" 2>/dev/null | wc -l)
-            echo "  $output_dir: $png_count PNGs, $md_count MDs, $csv_count CSVs"
-        fi
-    done
+    output_dir="plots/exp3_4_t${num_tables}"
+    if [ -d "$output_dir" ]; then
+        png_count=$(find "$output_dir" -name "*.png" 2>/dev/null | wc -l)
+        md_count=$(find "$output_dir" -name "*.md" 2>/dev/null | wc -l)
+        csv_count=$(find "$output_dir" -name "*.csv" 2>/dev/null | wc -l)
+        echo "  $output_dir: $png_count PNGs, $md_count MDs, $csv_count CSVs"
+    fi
 done
 # Add exp5.2 file counts
 for t_cas in "${exp5_2_t_cas_values[@]}"; do
