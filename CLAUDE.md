@@ -61,11 +61,13 @@ nohup ./scripts/run_baseline_experiments.sh --seeds 3 > baseline.log 2>&1 &
 # Generate plots for single experiment set
 python -m icecap.saturation_analysis -i experiments -p "exp2_1_*" -o plots/exp2_1
 
-# With grouping (multi-line plots by parameter)
+# With grouping (composite multi-line plots by parameter)
 python -m icecap.saturation_analysis -i experiments -p "exp2_2_*" -o plots/exp2_2 --group-by num_tables
+python -m icecap.saturation_analysis -i experiments -p "exp3_1_*" -o plots/exp3_1 --group-by real_conflict_probability
 
-# With filtering (for multi-dimensional parameter sweeps)
-python -m icecap.saturation_analysis -i experiments -p "exp5_2_*" -o plots/exp5_2_t50 --group-by num_tables --filter "t_cas_mean==50"
+# With filtering and grouping (for multi-dimensional sweeps)
+# IMPORTANT: Use separate --filter arguments (NOT "&&" operator)
+python -m icecap.saturation_analysis -i experiments -p "exp3_3_*" -o plots/exp3_3_t10 --group-by real_conflict_probability --filter "num_tables==10"
 
 # Regenerate all plots (parallel, ~5 minutes)
 ./scripts/regenerate_all_plots.sh --parallel 4
@@ -118,6 +120,9 @@ docker run -d \
 - Parallel execution with configurable concurrency
 
 **`scripts/regenerate_all_plots.sh`** - Batch analysis with parallel execution
+- Generates composite plots for exp3.1, exp3.3, exp3.4 (multi-line plots grouped by parameter)
+- Uses `--group-by` for parameter variations within each experiment
+- Filters multi-dimensional sweeps with separate `--filter` arguments (NOT `&&`)
 
 ### Critical Design Patterns
 
@@ -217,22 +222,26 @@ For batch experiments, use `create_config_variant()` in run_baseline_experiments
 
 ### Parameter Filtering
 
-For multi-dimensional parameter sweeps (e.g., exp5.2: T_CAS × num_tables × inter_arrival):
+For multi-dimensional parameter sweeps (e.g., exp3.3: num_tables × real_conflict_probability × inter_arrival):
 
 ```bash
-# Filter to single T_CAS value, group by num_tables
+# Filter to single num_tables value, group by real_conflict_probability
 python -m icecap.saturation_analysis \
     -i experiments \
-    -p "exp5_2_*" \
-    -o plots/exp5_2_t50 \
-    --group-by num_tables \
-    --filter "t_cas_mean==50"
+    -p "exp3_3_*" \
+    -o plots/exp3_3_t10 \
+    --group-by real_conflict_probability \
+    --filter "num_tables==10"
 
-# Multiple filters (AND logic)
---filter "t_cas_mean>=50" --filter "num_tables<=10"
+# Multiple filters (AND logic) - use SEPARATE --filter arguments
+--filter "num_tables>=5" --filter "real_conflict_probability<=0.5"
+
+# WRONG: Do NOT use && operator (not supported)
+--filter "num_tables==10 && real_conflict_probability==0.3"  # FAILS
 ```
 
-Supported operators: `==`, `!=`, `<`, `<=`, `>`, `>=`
+**Supported operators**: `==`, `!=`, `<`, `<=`, `>`, `>=`
+**Filter logic**: Multiple `--filter` arguments are AND'd together
 
 ## Common Workflows
 
@@ -308,13 +317,15 @@ python -c "import pyarrow.parquet as pq; meta = pq.read_metadata('experiments/co
 
 ## Key Documentation
 
+- **README.md** - Concise getting started guide (installation, usage, analysis, testing)
+- **docs/APPENDIX_SIMULATOR_DETAILS.md** - Technical appendix for blog posts (distributions, parameters, formulas)
 - **docs/ARCHITECTURE.md** - Detailed design, invariants, code locations
-- **docs/QUICKSTART.md** - Installation and first simulation
+- **docs/QUICKSTART.md** - Installation and first simulation walkthrough
 - **docs/ANALYSIS_GUIDE.md** - How to generate plots and interpret results
 - **docs/CONSOLIDATED_FORMAT.md** - Consolidated parquet format details
 - **docs/DEVELOPER_NOTES.md** - Common issues, token-saving strategies, quick reference
 - **docs/DOCKER.md** - Container-based execution with EXP_ARGS
-- **docs/BASELINE_RESULTS.md** - Key findings from experiments
+- **docs/BASELINE_RESULTS.md** - Key findings from baseline experiments
 - **experiment_configs/README.md** - Experiment descriptions and parameter sweeps
 
 ## Important Constraints
@@ -331,6 +342,22 @@ python -c "import pyarrow.parquet as pq; meta = pq.read_metadata('experiments/co
 
 - **Simulation speed**: ~1000× real-time (1 hour sim in ~3.6 seconds)
 - **Parallel execution**: Near-linear speedup with CPU core count
-- **Baseline runtime**: ~24 hours with 8 cores for full Phase 2+3+4 experiments
+- **Baseline runtime**: ~24 hours with 8 cores for full experiment suite
 - **Memory usage**: Analysis loads ~200MB per experiment with consolidated format
 - **Test execution**: 136 tests in ~3 minutes
+
+## Current Experiment Coverage
+
+**Implemented Experiments:**
+- **exp2.1**: Single-table false conflicts (baseline saturation)
+- **exp2.2**: Multi-table false conflicts (scaling analysis)
+- **exp3.1**: Single-table real conflicts (conflict cost impact)
+- **exp3.2**: Manifest distribution variance (conflict resolution variance)
+- **exp3.3**: Multi-table real conflicts (interaction effects)
+- **exp3.4**: Exponential backoff with real conflicts
+- **exp4.1**: Backoff strategy comparison
+
+**Plotting Approach:**
+- Composite plots with `--group-by` for parameter variations (exp2.2, exp3.1, exp3.3, exp3.4)
+- Filtered views for multi-dimensional sweeps using separate `--filter` arguments
+- Automatic generation via `./scripts/regenerate_all_plots.sh`
