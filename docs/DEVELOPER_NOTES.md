@@ -5,7 +5,7 @@ This document provides quick reference information to help navigate and modify t
 ## Quick Architecture Overview
 
 ```
-icecap/
+endive/
 ├── main.py              # Simulation entry point (1088 lines)
 │   ├── SIM_SEED: Global for random seed (from config or auto-generated)
 │   ├── prepare_experiment_output(): Creates experiments/$label-$hash/$seed/
@@ -85,7 +85,7 @@ min_seeds = 1
 
 ### Issue: Docker execution fails with "unrecognized arguments: --seed"
 **Symptom**: `main.py: error: unrecognized arguments: --seed 3083532295`
-**Cause**: icecap.main doesn't accept --seed argument
+**Cause**: endive.main doesn't accept --seed argument
 
 **Solution**: Set seed in config file:
 ```toml
@@ -97,30 +97,30 @@ seed = 3083532295
 **Pattern**: For remote execution, create separate config files with seeds pre-set:
 ```bash
 # Wrong: Try to pass --seed at runtime
-python -m icecap.main cfg.toml --seed 12345  # FAILS
+python -m endive.main cfg.toml --seed 12345  # FAILS
 
 # Right: Pre-create configs with seeds
 sed "s/^# seed = .*/seed = 12345/" cfg.toml > seed_12345.toml
-python -m icecap.main seed_12345.toml
+python -m endive.main seed_12345.toml
 ```
 
 ## Common grep Patterns
 
 ```bash
 # Find where seed is used
-grep -n "SIM_SEED\|\.get.*seed" icecap/main.py
+grep -n "SIM_SEED\|\.get.*seed" endive/main.py
 
 # Find filtering logic
-grep -n "min_seeds\|< min_seeds" icecap/saturation_analysis.py
+grep -n "min_seeds\|< min_seeds" endive/saturation_analysis.py
 
 # Find config loading
-grep -n "CONFIG\s*=" icecap/saturation_analysis.py
+grep -n "CONFIG\s*=" endive/saturation_analysis.py
 ```
 
 ## File Size Reference
 ```
-icecap/main.py:                  1088 lines (~35KB)
-icecap/saturation_analysis.py:   1551 lines (~55KB)
+endive/main.py:                  1088 lines (~35KB)
+endive/saturation_analysis.py:   1551 lines (~55KB)
 tests/test_saturation_analysis.py: 1260 lines (~45KB)
 scripts/prepare_missing_experiments.sh: 352 lines (~12KB)
 ```
@@ -165,7 +165,7 @@ scripts/prepare_missing_experiments.sh: 352 lines (~12KB)
 # Interactive container
 docker run -it \
     -v "$(pwd)/experiment_batch:/app/experiment_batch" \
-    cdouglas/icecap-sim:latest bash
+    cdouglas/endive-sim:latest bash
 
 # Using docker-compose
 BATCH_PARALLEL=8 docker-compose --profile batch up

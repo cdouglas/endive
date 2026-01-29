@@ -3,9 +3,9 @@ requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "icecap"
+name = "endive"
 version = "0.1.0"
-description = "Iceberg Catalog Simulator - Saturation Experiments"
+description = "Endive - Iceberg Catalog Simulator for Saturation Experiments"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
@@ -18,9 +18,9 @@ dependencies = [
 ]
 
 [project.scripts]
-icecap = "icecap.main:cli"
-icecap-experiment = "icecap.experiment:cli"
-icecap-analysis = "icecap.analysis:cli"
+endive = "endive.main:cli"
+endive-experiment = "endive.experiment:cli"
+endive-analysis = "endive.analysis:cli"
 
 [tool.setuptools]
-packages = ["icecap"]
+packages = ["endive"]

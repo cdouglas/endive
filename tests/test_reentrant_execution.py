@@ -14,8 +14,8 @@ import shutil
 from pathlib import Path
 import tomllib
 
-from icecap.main import check_existing_experiment, compute_experiment_hash, prepare_experiment_output
-from icecap.test_utils import create_test_config
+from endive.main import check_existing_experiment, compute_experiment_hash, prepare_experiment_output
+from endive.test_utils import create_test_config
 
 
 class TestCheckExistingExperiment:

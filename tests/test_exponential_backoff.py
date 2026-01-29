@@ -7,9 +7,9 @@ import pandas as pd
 import numpy as np
 from pathlib import Path
 
-from icecap.main import configure_from_toml, calculate_backoff_time
-import icecap.main
-from icecap.capstats import Stats
+from endive.main import configure_from_toml, calculate_backoff_time
+import endive.main
+from endive.capstats import Stats
 import simpy
 
 
@@ -104,7 +104,7 @@ class TestExponentialBackoff:
                 configure_from_toml(config_file)
 
                 # Test that backoff is disabled
-                assert icecap.main.RETRY_BACKOFF_ENABLED is False
+                assert endive.main.RETRY_BACKOFF_ENABLED is False
 
                 # Calculate backoff for various retry numbers
                 for retry_num in range(1, 10):
@@ -131,10 +131,10 @@ class TestExponentialBackoff:
                 configure_from_toml(config_file)
 
                 # Test that backoff is enabled
-                assert icecap.main.RETRY_BACKOFF_ENABLED is True
-                assert icecap.main.RETRY_BACKOFF_BASE_MS == 10.0
-                assert icecap.main.RETRY_BACKOFF_MULTIPLIER == 2.0
-                assert icecap.main.RETRY_BACKOFF_JITTER == 0.0
+                assert endive.main.RETRY_BACKOFF_ENABLED is True
+                assert endive.main.RETRY_BACKOFF_BASE_MS == 10.0
+                assert endive.main.RETRY_BACKOFF_MULTIPLIER == 2.0
+                assert endive.main.RETRY_BACKOFF_JITTER == 0.0
 
                 # Seed for reproducibility
                 np.random.seed(42)
@@ -237,20 +237,20 @@ class TestExponentialBackoff:
                 configure_from_toml(config_file)
 
                 # Reset stats and run simulation
-                icecap.main.STATS = Stats()
+                endive.main.STATS = Stats()
                 np.random.seed(42)
 
                 # Setup and run simulation
                 env = simpy.Environment()
-                icecap.main.TABLE_TO_GROUP, icecap.main.GROUP_TO_TABLES = icecap.main.partition_tables_into_groups(
-                    icecap.main.N_TABLES, icecap.main.N_GROUPS,
-                    icecap.main.GROUP_SIZE_DIST, icecap.main.LONGTAIL_PARAMS
+                endive.main.TABLE_TO_GROUP, endive.main.GROUP_TO_TABLES = endive.main.partition_tables_into_groups(
+                    endive.main.N_TABLES, endive.main.N_GROUPS,
+                    endive.main.GROUP_SIZE_DIST, endive.main.LONGTAIL_PARAMS
                 )
-                env.process(icecap.main.setup(env))
-                env.run(until=icecap.main.SIM_DURATION_MS)
+                env.process(endive.main.setup(env))
+                env.run(until=endive.main.SIM_DURATION_MS)
 
                 # Export results
-                icecap.main.STATS.export_parquet(output_path)
+                endive.main.STATS.export_parquet(output_path)
 
                 # Verify results
                 assert os.path.exists(output_path), "Results file should be created"
@@ -296,17 +296,17 @@ class TestExponentialBackoff:
 
             try:
                 configure_from_toml(config_no_backoff)
-                icecap.main.STATS = Stats()
+                endive.main.STATS = Stats()
                 np.random.seed(seed)
 
                 env = simpy.Environment()
-                icecap.main.TABLE_TO_GROUP, icecap.main.GROUP_TO_TABLES = icecap.main.partition_tables_into_groups(
-                    icecap.main.N_TABLES, icecap.main.N_GROUPS,
-                    icecap.main.GROUP_SIZE_DIST, icecap.main.LONGTAIL_PARAMS
+                endive.main.TABLE_TO_GROUP, endive.main.GROUP_TO_TABLES = endive.main.partition_tables_into_groups(
+                    endive.main.N_TABLES, endive.main.N_GROUPS,
+                    endive.main.GROUP_SIZE_DIST, endive.main.LONGTAIL_PARAMS
                 )
-                env.process(icecap.main.setup(env))
-                env.run(until=icecap.main.SIM_DURATION_MS)
-                icecap.main.STATS.export_parquet(output_no_backoff)
+                env.process(endive.main.setup(env))
+                env.run(until=endive.main.SIM_DURATION_MS)
+                endive.main.STATS.export_parquet(output_no_backoff)
 
                 df_no_backoff = pd.read_parquet(output_no_backoff)
 
@@ -329,17 +329,17 @@ class TestExponentialBackoff:
 
             try:
                 configure_from_toml(config_with_backoff)
-                icecap.main.STATS = Stats()
+                endive.main.STATS = Stats()
                 np.random.seed(seed)
 
                 env = simpy.Environment()
-                icecap.main.TABLE_TO_GROUP, icecap.main.GROUP_TO_TABLES = icecap.main.partition_tables_into_groups(
-                    icecap.main.N_TABLES, icecap.main.N_GROUPS,
-                    icecap.main.GROUP_SIZE_DIST, icecap.main.LONGTAIL_PARAMS
+                endive.main.TABLE_TO_GROUP, endive.main.GROUP_TO_TABLES = endive.main.partition_tables_into_groups(
+                    endive.main.N_TABLES, endive.main.N_GROUPS,
+                    endive.main.GROUP_SIZE_DIST, endive.main.LONGTAIL_PARAMS
                 )
-                env.process(icecap.main.setup(env))
-                env.run(until=icecap.main.SIM_DURATION_MS)
-                icecap.main.STATS.export_parquet(output_with_backoff)
+                env.process(endive.main.setup(env))
+                env.run(until=endive.main.SIM_DURATION_MS)
+                endive.main.STATS.export_parquet(output_with_backoff)
 
                 df_with_backoff = pd.read_parquet(output_with_backoff)
 
@@ -412,11 +412,11 @@ T_MANIFEST_FILE.write.stddev = 6
             configure_from_toml(config_file)
 
             # Verify defaults
-            assert icecap.main.RETRY_BACKOFF_ENABLED is False  # Disabled by default
-            assert icecap.main.RETRY_BACKOFF_BASE_MS == 10.0
-            assert icecap.main.RETRY_BACKOFF_MULTIPLIER == 2.0
-            assert icecap.main.RETRY_BACKOFF_MAX_MS == 5000.0
-            assert icecap.main.RETRY_BACKOFF_JITTER == 0.1
+            assert endive.main.RETRY_BACKOFF_ENABLED is False  # Disabled by default
+            assert endive.main.RETRY_BACKOFF_BASE_MS == 10.0
+            assert endive.main.RETRY_BACKOFF_MULTIPLIER == 2.0
+            assert endive.main.RETRY_BACKOFF_MAX_MS == 5000.0
+            assert endive.main.RETRY_BACKOFF_JITTER == 0.1
 
         finally:
             os.unlink(config_file)

@@ -6,10 +6,10 @@ Validates that the chosen warmup period is sufficient by visualizing
 how metrics evolve over the simulation duration.
 
 Usage:
-    python -m icecap.warmup_validation <experiment_dir> [--window-size SECONDS]
+    python -m endive.warmup_validation <experiment_dir> [--window-size SECONDS]
 
 Example:
-    python -m icecap.warmup_validation experiments/exp2_1_single_table_false-abc123/12345
+    python -m endive.warmup_validation experiments/exp2_1_single_table_false-abc123/12345
 """
 
 import argparse

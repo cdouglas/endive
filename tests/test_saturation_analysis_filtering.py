@@ -13,7 +13,7 @@ import os
 # Add parent directory to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from icecap.saturation_analysis import parse_filter_expression, apply_filters
+from endive.saturation_analysis import parse_filter_expression, apply_filters
 
 
 class TestParseFilterExpression:

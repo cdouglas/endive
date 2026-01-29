@@ -17,7 +17,7 @@ from pathlib import Path
 import pandas as pd
 import numpy as np
 
-from icecap.saturation_analysis import (
+from endive.saturation_analysis import (
     scan_experiment_directories,
     extract_key_parameters,
     load_and_aggregate_results,
@@ -28,7 +28,7 @@ from icecap.saturation_analysis import (
     load_config,
     compute_transient_period_duration
 )
-import icecap.saturation_analysis as saturation_analysis
+import endive.saturation_analysis as saturation_analysis
 
 
 class TestExperimentScanning:
@@ -899,7 +899,7 @@ latency_vs_throughput_table = "my_latency.md"
 
         # Check default values
         sat_config = config['plots']['saturation']
-        assert sat_config['enabled'] is True
+        assert sat_config['enabled'] is False  # Disabled by default
         assert sat_config['threshold'] == 50.0
         assert sat_config['tolerance'] == 5.0
 
@@ -1084,7 +1084,7 @@ retry = 10
 
             # Run CLI with overrides
             result = subprocess.run([
-                sys.executable, "-m", "icecap.saturation_analysis",
+                sys.executable, "-m", "endive.saturation_analysis",
                 "--config", str(config_path),
                 "-i", str(tmpdir),
                 "-o", str(output_dir),
@@ -1158,7 +1158,7 @@ retry = 10
 
             # Run CLI without config file
             result = subprocess.run([
-                sys.executable, "-m", "icecap.saturation_analysis",
+                sys.executable, "-m", "endive.saturation_analysis",
                 "-i", str(tmpdir),
                 "-o", str(output_dir),
                 "-p", "default_exp-*"
@@ -1239,7 +1239,7 @@ retry = 10
 
             # Run CLI with --group-by override
             result = subprocess.run([
-                sys.executable, "-m", "icecap.saturation_analysis",
+                sys.executable, "-m", "endive.saturation_analysis",
                 "--config", str(config_path),
                 "-i", str(tmpdir),
                 "-o", str(output_dir),

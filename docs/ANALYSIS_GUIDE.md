@@ -48,13 +48,13 @@ See [CONSOLIDATED_FORMAT.md](CONSOLIDATED_FORMAT.md) for complete details.
 
 ```bash
 # Analyze Experiment 2.1 (single table)
-python -m icecap.saturation_analysis \
+python -m endive.saturation_analysis \
     -i experiments \
     -p "exp2_1_*" \
     -o plots/exp2_1
 
 # Analyze Experiment 2.2 (multi-table)
-python -m icecap.saturation_analysis \
+python -m endive.saturation_analysis \
     -i experiments \
     -p "exp2_2_*" \
     -o plots/exp2_2 \
@@ -145,7 +145,7 @@ Point: 56.23 commits/sec, P95=7847ms, Success=41%
 
 ```bash
 # Generate plot with separate lines for each table count
-python -m icecap.saturation_analysis \
+python -m endive.saturation_analysis \
     -i experiments \
     -p "exp2_2_*" \
     -o plots/exp2_2_grouped \
@@ -158,7 +158,7 @@ This creates a plot with multiple lines showing how table count affects saturati
 
 ```bash
 # Analyze only specific experiment
-python -m icecap.saturation_analysis \
+python -m endive.saturation_analysis \
     -i experiments \
     -p "exp2_1_single_table_false-*" \
     -o plots/exp2_1_only
@@ -168,7 +168,7 @@ python -m icecap.saturation_analysis \
 
 ```bash
 # Organize plots by date
-python -m icecap.saturation_analysis \
+python -m endive.saturation_analysis \
     -i experiments \
     -p "exp2_*" \
     -o plots/$(date +%Y%m%d)
@@ -201,13 +201,13 @@ find experiments/exp2_* -name "results.parquet" | wc -l
 
 ```bash
 # Experiment 2.1: Single table saturation
-python -m icecap.saturation_analysis \
+python -m endive.saturation_analysis \
     -i experiments \
     -p "exp2_1_*" \
     -o plots/exp2_1
 
 # Experiment 2.2: Multi-table saturation
-python -m icecap.saturation_analysis \
+python -m endive.saturation_analysis \
     -i experiments \
     -p "exp2_2_*" \
     -o plots/exp2_2 \
@@ -285,7 +285,7 @@ plt.savefig('custom_plot.png', dpi=300)
 
 **Commands:**
 ```bash
-python -m icecap.saturation_analysis -i experiments -p "exp2_1_*" -o plots/exp2_1
+python -m endive.saturation_analysis -i experiments -p "exp2_1_*" -o plots/exp2_1
 cat plots/exp2_1/experiment_index.csv
 ```
 
@@ -303,7 +303,7 @@ cat plots/exp2_1/experiment_index.csv
 
 **Commands:**
 ```bash
-python -m icecap.saturation_analysis \
+python -m endive.saturation_analysis \
     -i experiments -p "exp2_2_*" -o plots/exp2_2 --group-by num_tables
 ```
 
@@ -321,7 +321,7 @@ python -m icecap.saturation_analysis \
 ls experiments/exp2_*
 
 # Try broader pattern
-python -m icecap.saturation_analysis -i experiments -p "exp*" -o plots/all
+python -m endive.saturation_analysis -i experiments -p "exp*" -o plots/all
 ```
 
 ### Missing cfg.toml
@@ -380,4 +380,4 @@ After analyzing baseline experiments:
 - **ANALYSIS_PLAN.md** - Complete research plan and methodology
 - **RUNNING_EXPERIMENTS.md** - How to run baseline experiments
 - **experiment_configs/README.md** - Configuration details
-- **icecap/saturation_analysis.py** - Implementation source code
+- **endive/saturation_analysis.py** - Implementation source code

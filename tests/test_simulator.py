@@ -1,4 +1,4 @@
-"""Tests for the icecap simulator core functionality."""
+"""Tests for the endive simulator core functionality."""
 
 import os
 import tempfile
@@ -7,8 +7,8 @@ import pandas as pd
 import numpy as np
 from pathlib import Path
 
-from icecap.main import configure_from_toml, generate_inter_arrival_time
-from icecap.capstats import Stats
+from endive.main import configure_from_toml, generate_inter_arrival_time
+from endive.capstats import Stats
 import simpy
 
 
@@ -77,25 +77,25 @@ T_MANIFEST_FILE.write.stddev = 6
 
 def run_simulation_from_config(config_path: str) -> pd.DataFrame:
     """Run simulation and return results as DataFrame."""
-    import icecap.main
+    import endive.main
 
     # Reset global stats
-    icecap.main.STATS = Stats()
+    endive.main.STATS = Stats()
 
     # Load configuration
     configure_from_toml(config_path)
 
     # Setup random seed if specified
-    if icecap.main.SIM_SEED is not None:
-        np.random.seed(icecap.main.SIM_SEED)
+    if endive.main.SIM_SEED is not None:
+        np.random.seed(endive.main.SIM_SEED)
 
     # Run simulation
     env = simpy.Environment()
-    env.process(icecap.main.setup(env))
-    env.run(until=icecap.main.SIM_DURATION_MS)
+    env.process(endive.main.setup(env))
+    env.run(until=endive.main.SIM_DURATION_MS)
 
     # Return results as DataFrame
-    return pd.DataFrame(icecap.main.STATS.transactions)
+    return pd.DataFrame(endive.main.STATS.transactions)
 
 
 class TestDeterminism:

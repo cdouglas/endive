@@ -1,11 +1,11 @@
-# Dockerfile for Iceberg Catalog Simulator
+# Dockerfile for Endive - Iceberg Catalog Simulator
 #
 # This image runs the Iceberg catalog saturation experiments and exports
 # results via a mounted volume.
 #
 # Usage:
-#   docker build -t icecap-sim .
-#   docker run -v $(pwd)/experiments:/app/experiments icecap-sim
+#   docker build -t endive-sim .
+#   docker run -v $(pwd)/experiments:/app/experiments endive-sim
 #
 # Or use docker-compose:
 #   docker-compose up
@@ -28,7 +28,7 @@ RUN pip install --no-cache-dir -r requirements.txt && \
     pip install --no-cache-dir tomli
 
 # Copy source code
-COPY icecap/ ./icecap/
+COPY endive/ ./endive/
 COPY tests/ ./tests/
 COPY scripts/ ./scripts/
 COPY experiment_configs/ ./experiment_configs/

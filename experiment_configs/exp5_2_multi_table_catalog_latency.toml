@@ -27,7 +27,7 @@
 # IMPORTANT: Set num_groups = num_tables for table-level conflicts
 #
 # For each combination, run multiple seeds:
-#   python -m icecap.main experiment_configs/exp5_2_multi_table_catalog_latency.toml
+#   python -m endive.main experiment_configs/exp5_2_multi_table_catalog_latency.toml
 
 [simulation]
 duration_ms = 3600000  # 1 hour (extended for stable statistics)

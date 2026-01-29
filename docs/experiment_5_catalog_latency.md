@@ -101,8 +101,8 @@ With 96 parallel jobs at ~1 hour per run: ~28 hours wall-clock time
 
 ### 1. Simulator Modifications: NONE REQUIRED ✓
 The simulator already supports:
-- `T_CAS` configuration (used in icecap/main.py:847)
-- `T_METADATA_ROOT` configuration (used in icecap/main.py:705, 730)
+- `T_CAS` configuration (used in endive/main.py:847)
+- `T_METADATA_ROOT` configuration (used in endive/main.py:705, 730)
 - Both use normal distributions with mean/stddev
 
 ### 2. Configuration File Creation
@@ -117,7 +117,7 @@ Update `scripts/run_baseline_experiments.sh` to support:
 - Sweeping over catalog latencies and num_groups in addition to loads
 
 ### 4. Analysis Scripts
-Modify `icecap/saturation_analysis.py` or create new analysis:
+Modify `endive/saturation_analysis.py` or create new analysis:
 - Plot throughput vs load, grouped by catalog latency
 - Show how saturation point shifts with catalog latency
 - Compare catalog latency impact across different workload types

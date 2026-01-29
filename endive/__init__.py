@@ -1,5 +1,5 @@
 """
-Icecap: Iceberg Catalog Simulator
+Endive: Iceberg Catalog Simulator
 
 A discrete-event simulator for exploring commit latency tradeoffs
 in shared-storage catalog formats like Apache Iceberg.

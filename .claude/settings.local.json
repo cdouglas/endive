@@ -5,7 +5,7 @@
       "Bash(python scripts/warmup_validation.py:*)",
       "Bash(git log:*)",
       "Bash(for commit in 976667a a3dc85f 2895a4f 861be8b)",
-      "Bash(do echo '=== $commit ===' git show $commit:icecap/main.py)",
+      "Bash(do echo '=== $commit ===' git show $commit:endive/main.py)",
       "Bash(xargs cat:*)",
       "Bash(python scripts/plot_distributions.py:*)",
       "Bash(docker build:*)",
@@ -49,7 +49,17 @@
       "Bash(for exp in exp5_1 exp5_2 exp5_3)",
       "Bash(do echo '=== $exp ===' ls -d experiments/$exp_*)",
       "Bash(for script in scripts/*.py scripts/*.sh)",
-      "Bash(git show:*)"
+      "Bash(git show:*)",
+      "Bash(git mv:*)",
+      "Bash(find:*)",
+      "Bash(source:*)",
+      "Bash(pip install:*)",
+      "Bash(/home/chris/work/endive/bin/pip install:*)",
+      "Bash(/home/chris/work/endive/bin/python -m pip install:*)",
+      "Bash(/home/chris/work/endive/bin/pytest:*)",
+      "Bash(/home/chris/work/endive/bin/python -m pytest:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)"
     ],
     "deny": [],
     "ask": []

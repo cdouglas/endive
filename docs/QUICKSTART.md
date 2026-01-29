@@ -15,13 +15,13 @@ pip install -r requirements.txt
 pip install -e .
 
 # Verify installation
-python -m icecap.main --help
+python -m endive.main --help
 pytest tests/ -v  # Optional: run 63 tests
 ```
 
 ## Understanding the Simulator
 
-Icecap models Apache Iceberg's optimistic concurrency control with:
+Endive models Apache Iceberg's optimistic concurrency control with:
 
 - **Compare-and-swap (CAS)** for atomic catalog updates
 - **Conflict detection** when catalog advances during transaction execution
@@ -37,7 +37,7 @@ Icecap models Apache Iceberg's optimistic concurrency control with:
 
 ```bash
 # Use pre-configured experiment
-echo "Y" | python -m icecap.main experiment_configs/exp2_1_single_table_false_conflicts.toml
+echo "Y" | python -m endive.main experiment_configs/exp2_1_single_table_false_conflicts.toml
 
 # The simulator will:
 # 1. Display configuration summary
@@ -112,20 +112,20 @@ nohup ./scripts/run_baseline_experiments.sh --seeds 3 > baseline.log 2>&1 &
 
 ```bash
 # Single-table experiments
-python -m icecap.saturation_analysis \
+python -m endive.saturation_analysis \
     -i experiments \
     -p "exp2_1_*" \
     -o plots/exp2_1
 
 # Multi-table experiments (grouped by table count)
-python -m icecap.saturation_analysis \
+python -m endive.saturation_analysis \
     -i experiments \
     -p "exp2_2_*" \
     -o plots/exp2_2 \
     --group-by num_tables
 
 # With custom configuration
-python -m icecap.saturation_analysis \
+python -m endive.saturation_analysis \
     --config analysis.toml \
     -i experiments \
     -p "exp2_*" \
@@ -181,11 +181,11 @@ See `analysis.toml` and `example_saturation_config.toml` for complete options.
 Visualize metric convergence to verify steady-state:
 
 ```bash
-python -m icecap.warmup_validation \
+python -m endive.warmup_validation \
     experiments/exp2_1_single_table_false-abc123/12345
 
 # Custom window size
-python -m icecap.warmup_validation \
+python -m endive.warmup_validation \
     experiments/exp2_1_*/12345 \
     --window-size 30
 ```
@@ -339,7 +339,7 @@ cp experiment_configs/exp2_1_single_table_false_conflicts.toml my_test.toml
 
 # Edit parameters (e.g., inter_arrival.scale = 100)
 # Run
-echo "Y" | python -m icecap.main my_test.toml
+echo "Y" | python -m endive.main my_test.toml
 ```
 
 ### Sweep Parameters
@@ -349,7 +349,7 @@ echo "Y" | python -m icecap.main my_test.toml
 for scale in 10 20 50 100 200 500 1000; do
     sed "s/inter_arrival.scale = .*/inter_arrival.scale = $scale/" \
         experiment_configs/exp2_1_single_table_false_conflicts.toml > temp.toml
-    echo "Y" | python -m icecap.main temp.toml
+    echo "Y" | python -m endive.main temp.toml
 done
 rm temp.toml
 ```
@@ -416,7 +416,7 @@ find experiments/ -name '.running.parquet' -delete
 - Warmup period appropriate (9 min for baseline, longer for longer transactions)
 - Multiple seeds averaged (`--seeds 3` minimum)
 - Simulation duration sufficient (1 hour for stable statistics)
-- Validate with: `python -m icecap.warmup_validation experiments/exp2_1_*/12345`
+- Validate with: `python -m endive.warmup_validation experiments/exp2_1_*/12345`
 
 ### Analysis Errors
 
@@ -437,13 +437,13 @@ find experiments/ -name '.running.parquet' -delete
 ./scripts/run_baseline_experiments.sh --quick --seeds 1
 
 # Analyze single-table
-python -m icecap.saturation_analysis -i experiments -p "exp2_1_*" -o plots/exp2_1
+python -m endive.saturation_analysis -i experiments -p "exp2_1_*" -o plots/exp2_1
 
 # Analyze multi-table
-python -m icecap.saturation_analysis -i experiments -p "exp2_2_*" -o plots/exp2_2 --group-by num_tables
+python -m endive.saturation_analysis -i experiments -p "exp2_2_*" -o plots/exp2_2 --group-by num_tables
 
 # Validate warmup
-python -m icecap.warmup_validation experiments/exp2_1_*/12345
+python -m endive.warmup_validation experiments/exp2_1_*/12345
 
 # Run tests
 pytest tests/ -v
@@ -459,7 +459,7 @@ pytest tests/ -v
 | Results | `experiments/` |
 | Plots & analysis | `plots/` |
 | Tests | `tests/` |
-| Core simulator | `icecap/main.py` |
+| Core simulator | `endive/main.py` |
 
 ### Key Metrics
 
@@ -474,7 +474,7 @@ pytest tests/ -v
 ## Next Steps
 
 1. **Run baseline**: `./scripts/run_baseline_experiments.sh --quick --seeds 1`
-2. **Analyze**: `python -m icecap.saturation_analysis -i experiments -p "exp2_*" -o plots`
+2. **Analyze**: `python -m endive.saturation_analysis -i experiments -p "exp2_*" -o plots`
 3. **Review results**: `open plots/exp2_1/latency_vs_throughput.png`
 4. **Read detailed findings**: [`BASELINE_RESULTS.md`](BASELINE_RESULTS.md)
 5. **Understand methodology**: [`ANALYSIS_PLAN.md`](ANALYSIS_PLAN.md)
@@ -494,7 +494,7 @@ pytest tests/ -v
 ### Testing
 ```bash
 pytest tests/ -v                              # All 63 tests
-pytest tests/ --cov=icecap --cov-report=html  # With coverage
+pytest tests/ --cov=endive --cov-report=html  # With coverage
 pytest tests/test_saturation_analysis.py -v   # Analysis tests only
 ```
 

@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Overview
 
-Icecap is a discrete-event simulator for Apache Iceberg's optimistic concurrency control (OCC). It models catalog contention, conflict resolution, and commit latency under varying workloads to answer: **When does commit throughput saturate? What causes latency to explode?**
+Endive is a discrete-event simulator for Apache Iceberg's optimistic concurrency control (OCC). It models catalog contention, conflict resolution, and commit latency under varying workloads to answer: **When does commit throughput saturate? What causes latency to explode?**
 
 ## Development Commands
 
@@ -32,7 +32,7 @@ pytest tests/test_statistical_rigor.py -v              # Distribution conformanc
 pytest tests/test_simulator.py::test_deterministic_seed -v
 
 # With coverage
-pytest tests/ --cov=icecap --cov-report=html
+pytest tests/ --cov=endive --cov-report=html
 
 # Fast subset (core tests only, ~30 seconds)
 pytest tests/test_simulator.py tests/test_conflict_resolution.py -v
@@ -41,10 +41,10 @@ pytest tests/test_simulator.py tests/test_conflict_resolution.py -v
 ### Running Simulations
 ```bash
 # Single experiment (1 hour simulation, ~3.6 seconds wall-clock)
-python -m icecap.main experiment_configs/exp2_1_single_table_false_conflicts.toml --yes
+python -m endive.main experiment_configs/exp2_1_single_table_false_conflicts.toml --yes
 
 # With specific seed
-python -m icecap.main my_config.toml --seed 42 --yes
+python -m endive.main my_config.toml --seed 42 --yes
 
 # Quick test mode (2 minutes, 1 seed, 10s duration)
 ./scripts/run_baseline_experiments.sh --quick --seeds 1
@@ -59,15 +59,15 @@ nohup ./scripts/run_baseline_experiments.sh --seeds 3 > baseline.log 2>&1 &
 ### Analysis
 ```bash
 # Generate plots for single experiment set
-python -m icecap.saturation_analysis -i experiments -p "exp2_1_*" -o plots/exp2_1
+python -m endive.saturation_analysis -i experiments -p "exp2_1_*" -o plots/exp2_1
 
 # With grouping (composite multi-line plots by parameter)
-python -m icecap.saturation_analysis -i experiments -p "exp2_2_*" -o plots/exp2_2 --group-by num_tables
-python -m icecap.saturation_analysis -i experiments -p "exp3_1_*" -o plots/exp3_1 --group-by real_conflict_probability
+python -m endive.saturation_analysis -i experiments -p "exp2_2_*" -o plots/exp2_2 --group-by num_tables
+python -m endive.saturation_analysis -i experiments -p "exp3_1_*" -o plots/exp3_1 --group-by real_conflict_probability
 
 # With filtering and grouping (for multi-dimensional sweeps)
 # IMPORTANT: Use separate --filter arguments (NOT "&&" operator)
-python -m icecap.saturation_analysis -i experiments -p "exp3_3_*" -o plots/exp3_3_t10 --group-by real_conflict_probability --filter "num_tables==10"
+python -m endive.saturation_analysis -i experiments -p "exp3_3_*" -o plots/exp3_3_t10 --group-by real_conflict_probability --filter "num_tables==10"
 
 # Regenerate all plots (parallel, ~5 minutes)
 ./scripts/regenerate_all_plots.sh --parallel 4
@@ -79,7 +79,7 @@ python scripts/consolidate_all_experiments_incremental.py
 ### Docker
 ```bash
 # Build image
-docker build -t cdouglas/icecap-sim:latest .
+docker build -t cdouglas/endive-sim:latest .
 
 # Run experiments in container
 docker run -d \
@@ -88,7 +88,7 @@ docker run -d \
     -e OMP_NUM_THREADS=1 \
     -v $(pwd)/experiments:/app/experiments \
     -v $(pwd)/plots:/app/plots \
-    cdouglas/icecap-sim:latest \
+    cdouglas/endive-sim:latest \
     bash -c "scripts/run_baseline_experiments.sh \${EXP_ARGS}"
 
 # See docs/DOCKER.md for full details
@@ -98,21 +98,21 @@ docker run -d \
 
 ### Core Components
 
-**`icecap/main.py` (1088 lines)** - Simulation engine
+**`endive/main.py` (1088 lines)** - Simulation engine
 - `Catalog` class: Versioned state with compare-and-swap operations
 - `Txn` class: Transaction lifecycle (capture snapshot → execute → commit → retry)
 - `ConflictResolver` class: Distinguishes false vs real conflicts, handles manifest operations
 - `txn_gen()`: Transaction generator with configurable inter-arrival distributions
 - `calculate_backoff_time()`: Exponential backoff with jitter
 
-**`icecap/saturation_analysis.py` (1700+ lines)** - Analysis pipeline
+**`endive/saturation_analysis.py` (1700+ lines)** - Analysis pipeline
 - `build_experiment_index()`: Scans experiments/, extracts parameters from cfg.toml files
 - `load_and_aggregate_results()`: Loads individual per-seed parquet files
 - `load_and_aggregate_results_consolidated()`: Efficient loading from consolidated.parquet with predicate pushdown
 - `plot_*()` functions: Generate saturation curves, overhead analysis, time-series plots
 - `parse_filter_expression()` / `apply_filters()`: Filter experiments by parameter values
 
-**`icecap/capstats.py`** - Statistics collection during simulation
+**`endive/capstats.py`** - Statistics collection during simulation
 
 **`scripts/run_baseline_experiments.sh`** - Parallel experiment runner
 - Supports experiment selection (--exp2.1, --exp3.1, etc.)
@@ -178,10 +178,10 @@ experiments/
 **Hash computation**: `compute_experiment_hash()` creates deterministic hash from parameters (excludes seed, output_path). Same parameters → same hash → same directory.
 
 #### 5. Seeds and Determinism
-**IMPORTANT**: Seeds must be in config file, NOT passed as CLI argument to icecap.main:
+**IMPORTANT**: Seeds must be in config file, NOT passed as CLI argument to endive.main:
 ```bash
-# WRONG: icecap.main doesn't accept --seed
-python -m icecap.main config.toml --seed 42  # FAILS
+# WRONG: endive.main doesn't accept --seed
+python -m endive.main config.toml --seed 42  # FAILS
 
 # RIGHT: Set seed in config file
 [simulation]
@@ -226,7 +226,7 @@ For multi-dimensional parameter sweeps (e.g., exp3.3: num_tables × real_conflic
 
 ```bash
 # Filter to single num_tables value, group by real_conflict_probability
-python -m icecap.saturation_analysis \
+python -m endive.saturation_analysis \
     -i experiments \
     -p "exp3_3_*" \
     -o plots/exp3_3_t10 \
@@ -299,7 +299,7 @@ real_conflict_probability = 0.0
 
 **Pattern**: Use targeted edits instead of reading entire 1700-line file. Use grep with context:
 ```bash
-grep -A 10 -B 5 "def extract_key_parameters" icecap/saturation_analysis.py
+grep -A 10 -B 5 "def extract_key_parameters" endive/saturation_analysis.py
 ```
 
 ### Working with Results
@@ -335,7 +335,7 @@ python -c "import pyarrow.parquet as pq; meta = pq.read_metadata('experiments/co
 3. **Warmup/cooldown periods** - Always filter transient data before analysis
 4. **Seed determinism** - Same seed + same config = bitwise identical results
 5. **Manifest list reads** - Must read exactly n lists for n missed snapshots
-6. **Config file seeds** - Seeds go in TOML, not CLI arguments to icecap.main
+6. **Config file seeds** - Seeds go in TOML, not CLI arguments to endive.main
 7. **Hash stability** - Changing parameter extraction breaks experiment directory matching
 
 ## Performance Notes

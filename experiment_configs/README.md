@@ -17,7 +17,7 @@ Each configuration file is ready to run and includes:
 source bin/activate
 
 # Run with default parameters
-python -m icecap.main experiment_configs/exp2_1_single_table_false_conflicts.toml
+python -m endive.main experiment_configs/exp2_1_single_table_false_conflicts.toml
 ```
 
 ### Running Parameter Sweeps
@@ -29,7 +29,7 @@ Each experiment specifies parameters to sweep. For example, to sweep offered loa
 for scale in 10 20 50 100 200 500 1000 2000 5000; do
     sed "s/inter_arrival.scale = .*/inter_arrival.scale = $scale/" \
         experiment_configs/exp2_1_single_table_false_conflicts.toml > temp.toml
-    echo "Y" | python -m icecap.main temp.toml
+    echo "Y" | python -m endive.main temp.toml
 done
 ```
 
@@ -40,7 +40,7 @@ To average results across multiple runs:
 ```bash
 # Run same config 10 times with different random seeds
 for i in {1..10}; do
-    echo "Y" | python -m icecap.main experiment_configs/exp2_1_single_table_false_conflicts.toml
+    echo "Y" | python -m endive.main experiment_configs/exp2_1_single_table_false_conflicts.toml
 done
 ```
 
@@ -144,7 +144,7 @@ experiments/
 
 The hash (e.g., `a1b2c3d4`) is deterministic based on:
 - All config parameters (except seed and label)
-- Simulator code (all `icecap/*.py` files)
+- Simulator code (all `endive/*.py` files)
 
 This means:
 - Same config + code → same hash (easy to find related runs)
@@ -157,16 +157,16 @@ After running experiments, use the analysis tools:
 
 ```bash
 # Generate all plots for an experiment
-python -m icecap.analysis all \
+python -m endive.analysis all \
     -i experiments/exp2_1_single_table_false-* \
     -o plots/exp2_1
 
 # Generate specific plots
-python -m icecap.analysis cdf -i experiments/exp2_1_* -o plots/exp2_1
-python -m icecap.analysis success-rate -i experiments/exp2_1_* -o plots/exp2_1
+python -m endive.analysis cdf -i experiments/exp2_1_* -o plots/exp2_1
+python -m endive.analysis success-rate -i experiments/exp2_1_* -o plots/exp2_1
 
 # Generate summary table
-python -m icecap.analysis summary -i experiments/exp2_1_* -o plots/exp2_1
+python -m endive.analysis summary -i experiments/exp2_1_* -o plots/exp2_1
 ```
 
 ## Tips
@@ -187,7 +187,7 @@ PARAM_VALUES=("$@")
 for value in "${PARAM_VALUES[@]}"; do
     echo "Running with $PARAM_NAME = $value"
     sed "s/$PARAM_NAME = .*/$PARAM_NAME = $value/" "$CONFIG_FILE" > temp.toml
-    echo "Y" | python -m icecap.main temp.toml
+    echo "Y" | python -m endive.main temp.toml
 done
 
 rm temp.toml
@@ -216,7 +216,7 @@ OUTPUT_DIR=$2
 mkdir -p "$OUTPUT_DIR"
 
 # Generate all plots
-python -m icecap.analysis all \
+python -m endive.analysis all \
     -i experiments/$EXPERIMENT_PATTERN \
     -o "$OUTPUT_DIR"
 
@@ -239,7 +239,7 @@ Before running full experiment sweeps, validate with quick tests:
 sed 's/duration_ms = .*/duration_ms = 10000/' \
     experiment_configs/exp2_1_single_table_false_conflicts.toml > test.toml
 
-echo "Y" | python -m icecap.main test.toml -v
+echo "Y" | python -m endive.main test.toml -v
 
 # Check that:
 # - Configuration loads correctly

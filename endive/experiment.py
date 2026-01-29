@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 """
-Experiment runner for icecap simulator.
+Experiment runner for endive simulator.
 
 This script generates configuration files for parameter sweeps and runs experiments.
 """
@@ -195,7 +195,7 @@ def sweep_combined(
 
 def run_experiment(config_path: str, verbose: bool = False):
     """Run a single experiment with the given config."""
-    cmd = ["python", "-m", "icecap.main", config_path, "--yes", "--no-progress"]
+    cmd = ["python", "-m", "endive.main", config_path, "--yes", "--no-progress"]
     if verbose:
         cmd.append("-v")
     else:
@@ -214,7 +214,7 @@ def run_experiment(config_path: str, verbose: bool = False):
 
 def cli():
     parser = argparse.ArgumentParser(
-        description="Generate and run icecap experiments"
+        description="Generate and run endive experiments"
     )
     parser.add_argument(
         "-b", "--base-config",

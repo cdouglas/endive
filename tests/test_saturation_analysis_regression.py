@@ -16,14 +16,14 @@ import pandas as pd
 import numpy as np
 from pathlib import Path
 
-from icecap.saturation_analysis import (
+from endive.saturation_analysis import (
     load_and_aggregate_results,
     compute_aggregate_statistics,
     compute_per_seed_statistics,
     compute_transient_period_duration,
     build_experiment_index
 )
-import icecap.saturation_analysis as saturation_analysis
+import endive.saturation_analysis as saturation_analysis
 
 
 class TestThroughputCalculationAccuracy:

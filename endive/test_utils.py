@@ -1,4 +1,4 @@
-"""Test utilities for icecap simulator.
+"""Test utilities for endive simulator.
 
 Provides builder pattern for creating test fixtures with minimal boilerplate.
 """
@@ -9,8 +9,8 @@ from typing import Optional
 import tempfile
 import os
 
-from icecap.main import Catalog, Txn, configure_from_toml
-import icecap.main
+from endive.main import Catalog, Txn, configure_from_toml
+import endive.main
 
 
 class SimulationBuilder:
@@ -97,8 +97,8 @@ class SimulationBuilder:
         np.random.seed(self._seed)
 
         # Create table grouping
-        icecap.main.TABLE_TO_GROUP, icecap.main.GROUP_TO_TABLES = (
-            icecap.main.partition_tables_into_groups(
+        endive.main.TABLE_TO_GROUP, endive.main.GROUP_TO_TABLES = (
+            endive.main.partition_tables_into_groups(
                 self._num_tables,
                 self._num_groups,
                 self._group_distribution,
@@ -138,33 +138,33 @@ class SimulationBuilder:
 
     def _configure_minimal(self):
         """Configure minimal simulation parameters for testing."""
-        icecap.main.N_TABLES = self._num_tables
-        icecap.main.N_GROUPS = self._num_groups
-        icecap.main.GROUP_SIZE_DIST = self._group_distribution
-        icecap.main.LONGTAIL_PARAMS = {}
-        icecap.main.N_TXN_RETRY = 10
-        icecap.main.MAX_PARALLEL = 4
-        icecap.main.MIN_LATENCY = 5
+        endive.main.N_TABLES = self._num_tables
+        endive.main.N_GROUPS = self._num_groups
+        endive.main.GROUP_SIZE_DIST = self._group_distribution
+        endive.main.LONGTAIL_PARAMS = {}
+        endive.main.N_TXN_RETRY = 10
+        endive.main.MAX_PARALLEL = 4
+        endive.main.MIN_LATENCY = 5
 
         # Simple latency configurations
-        icecap.main.T_CAS = {'mean': 100, 'stddev': 10}
-        icecap.main.T_METADATA_ROOT = {
+        endive.main.T_CAS = {'mean': 100, 'stddev': 10}
+        endive.main.T_METADATA_ROOT = {
             'read': {'mean': 50, 'stddev': 5},
             'write': {'mean': 60, 'stddev': 6}
         }
-        icecap.main.T_MANIFEST_LIST = {
+        endive.main.T_MANIFEST_LIST = {
             'read': {'mean': 50, 'stddev': 5},
             'write': {'mean': 60, 'stddev': 6}
         }
-        icecap.main.T_MANIFEST_FILE = {
+        endive.main.T_MANIFEST_FILE = {
             'read': {'mean': 50, 'stddev': 5},
             'write': {'mean': 60, 'stddev': 6}
         }
 
         # PMF placeholders (not used in most unit tests)
-        icecap.main.N_TBL_PMF = [1.0] + [0.0] * self._num_tables
-        icecap.main.TBL_R_PMF = [1.0 / self._num_tables] * self._num_tables
-        icecap.main.N_TBL_W_PMF = [[1.0]] * (self._num_tables + 1)
+        endive.main.N_TBL_PMF = [1.0] + [0.0] * self._num_tables
+        endive.main.TBL_R_PMF = [1.0 / self._num_tables] * self._num_tables
+        endive.main.N_TBL_W_PMF = [[1.0]] * (self._num_tables + 1)
 
 
 def create_test_config(

@@ -78,7 +78,7 @@ scripts/
 │   ├── exp2_2_*.toml                  # Multi-table experiments
 │   └── exp3_*.toml                    # Real conflict experiments
 │
-├── icecap/                            # Simulator code
+├── endive/                            # Simulator code
 │   ├── main.py                        # Core simulator
 │   ├── capstats.py                    # Statistics module
 │   ├── analysis.py                    # Legacy analysis
@@ -170,7 +170,7 @@ pytest tests/test_saturation_analysis.py -v
 pytest tests/test_saturation_analysis.py::TestExperimentScanning -v
 
 # With coverage
-pytest tests/ --cov=icecap --cov-report=html
+pytest tests/ --cov=endive --cov-report=html
 ```
 
 ## Documentation Navigation
@@ -194,7 +194,7 @@ pytest tests/ --cov=icecap --cov-report=html
 **For Development:**
 1. [README.md](../README.md) - Architecture and testing
 2. `tests/` - Test suite examples
-3. `icecap/*.py` - Implementation code
+3. `endive/*.py` - Implementation code
 
 ## Quick Commands
 
@@ -228,13 +228,13 @@ pytest tests/test_saturation_analysis.py -v
 
 ```bash
 # Analyze Experiment 2.1 (single table)
-python -m icecap.saturation_analysis \
+python -m endive.saturation_analysis \
     -i experiments \
     -p "exp2_1_*" \
     -o plots/exp2_1
 
 # Analyze Experiment 2.2 (multi-table)
-python -m icecap.saturation_analysis \
+python -m endive.saturation_analysis \
     -i experiments \
     -p "exp2_2_*" \
     -o plots/exp2_2 \
@@ -286,7 +286,7 @@ With baseline experiments complete and organization finished:
 
 1. **Analyze baseline results:**
    ```bash
-   python -m icecap.saturation_analysis -i experiments -p "exp2_*" -o plots/baseline
+   python -m endive.saturation_analysis -i experiments -p "exp2_*" -o plots/baseline
    ```
 
 2. **Review findings:**

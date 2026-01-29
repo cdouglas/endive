@@ -14,8 +14,8 @@ import pytest
 import shutil
 from pathlib import Path
 
-from icecap.main import compute_experiment_hash, prepare_experiment_output
-from icecap.test_utils import create_test_config
+from endive.main import compute_experiment_hash, prepare_experiment_output
+from endive.test_utils import create_test_config
 
 
 class TestExperimentHash:

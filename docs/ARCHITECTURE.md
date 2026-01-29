@@ -26,7 +26,7 @@
 4. **Monotonicity**: `catalog.seq` advances by exactly 1 on each successful commit
 5. **Table versions**: Never decrease
 
-**Implementation**: `icecap/main.py:527` (txn_gen), `359-393` (try_CAS), `437` (version update)
+**Implementation**: `endive/main.py:527` (txn_gen), `359-393` (try_CAS), `437` (version update)
 
 ### Table Grouping (CRITICAL)
 
@@ -38,7 +38,7 @@
    - `1<G<T`: Group-level (multi-tenant isolation)
 4. **Determinism**: Group assignment controlled by seed
 
-**Implementation**: `icecap/main.py:52-131` (partition), `460-497` (table selection), `369-384` (conflict detection)
+**Implementation**: `endive/main.py:52-131` (partition), `460-497` (table selection), `369-384` (conflict detection)
 
 ### Conflict Resolution (NEW)
 
@@ -55,7 +55,7 @@
 
 **Probability**: Controlled by `real_conflict_probability` (0.0 to 1.0)
 
-**Implementation**: `icecap/main.py:627-719` (conflict resolution split)
+**Implementation**: `endive/main.py:627-719` (conflict resolution split)
 
 ### Exponential Backoff (NEW)
 
@@ -78,7 +78,7 @@
 - **Cost**: Longer time to eventual success, increased latency
 - **Hypothesis**: More beneficial with expensive real conflicts
 
-**Implementation**: `icecap/main.py:547-570` (calculate_backoff_time), `939-944` (apply in retry loop)
+**Implementation**: `endive/main.py:547-570` (calculate_backoff_time), `939-944` (apply in retry loop)
 
 ## Storage Model
 
@@ -106,7 +106,7 @@ All operations use normal distributions with mean ± stddev:
   - Batch 3: max(2 latencies) → e.g., 49ms
   - Total: 159ms (vs 500ms+ sequential)
 
-**Implementation**: `icecap/main.py:443-452` (manifest list reading), `695-713` (manifest file reading/writing)
+**Implementation**: `endive/main.py:443-452` (manifest list reading), `695-713` (manifest file reading/writing)
 
 ## Simulation Fidelity
 
@@ -146,21 +146,21 @@ All operations use normal distributions with mean ± stddev:
 
 ```python
 # 1. Transaction generation
-# icecap/main.py:527-580 (txn_gen)
+# endive/main.py:527-580 (txn_gen)
 txn = Txn(...)
 txn.v_catalog_seq = catalog.seq  # Capture snapshot version
 yield env.process(txn.execute())  # Execute transaction work
 yield env.process(txn.commit())   # Attempt commit
 
 # 2. CAS attempt
-# icecap/main.py:585-625 (Txn.commit)
+# endive/main.py:585-625 (Txn.commit)
 success, v_current = yield catalog.try_CAS(txn)
 while not success and txn.retries < MAX_RETRIES:
     yield ConflictResolver.resolve_conflicts(...)
     success, v_current = yield catalog.try_CAS(txn)
 
 # 3. Conflict resolution
-# icecap/main.py:627-719 (ConflictResolver)
+# endive/main.py:627-719 (ConflictResolver)
 def merge_table_conflicts(sim, txn, v_catalog):
     for t, v in txn.v_dirty.items():
         if v_catalog[t] != v:
@@ -212,7 +212,7 @@ txn.v_dirty[table_id] = v_catalog[table_id]
 
 ### Configuration Loading
 
-**Location**: `icecap/main.py:134-240` (configure_from_toml)
+**Location**: `endive/main.py:134-240` (configure_from_toml)
 
 **Key parameters**:
 ```python
@@ -230,7 +230,7 @@ CONFLICTING_MANIFESTS_PARAMS = {
 
 ## Statistics Collection
 
-**Location**: `icecap/capstats.py`
+**Location**: `endive/capstats.py`
 
 **Per-transaction metrics**:
 - `t_submit`: Arrival time
@@ -257,30 +257,30 @@ CONFLICTING_MANIFESTS_PARAMS = {
 
 **Total tests**: 63
 
-### Core Simulator (icecap/main.py)
+### Core Simulator (endive/main.py)
 - Determinism (same seed → identical results)
 - Parameter effects (more load → more retries)
 - Conflict type distribution
 - Manifest count sampling
 
-### Conflict Resolution (icecap/main.py:627-719)
+### Conflict Resolution (endive/main.py:627-719)
 - False conflict handling
 - Real conflict handling
 - Parallel manifest operations
 - Stochastic behavior validation
 
-### Table Grouping (icecap/main.py:52-131)
+### Table Grouping (endive/main.py:52-131)
 - Partitioning correctness
 - Transaction boundary enforcement
 - Deterministic assignment
 
-### Snapshot Versioning (icecap/main.py:359-452)
+### Snapshot Versioning (endive/main.py:359-452)
 - Version capture at start
 - CAS correctness
 - Manifest list reading (exactly n lists)
 - Multi-retry version progression
 
-### Analysis Pipeline (icecap/saturation_analysis.py)
+### Analysis Pipeline (endive/saturation_analysis.py)
 - Parameter extraction from configs
 - Multi-seed aggregation
 - Warmup period filtering

@@ -13,7 +13,7 @@ This file contains key insights and decisions from development sessions to help 
 - `compute_aggregate_statistics()`: Computes mean/stddev across seed DataFrame
 - Backward compatible: Falls back to direct aggregation if no seed column
 
-**Key Code Location**: `icecap/saturation_analysis.py:372-520`
+**Key Code Location**: `endive/saturation_analysis.py:372-520`
 
 ### Mean Retries Calculation
 
@@ -25,7 +25,7 @@ This file contains key insights and decisions from development sessions to help 
 ### Table-Level vs Catalog-Level Conflicts
 
 **Decision**: When `num_groups == num_tables`, use table-level conflict detection
-**Code**: `icecap/main.py:789-804`
+**Code**: `endive/main.py:789-804`
 **Behavior**:
 - Table-level: Only check versions of tables transaction touched
 - Catalog-level: Check global catalog sequence number
@@ -34,7 +34,7 @@ This file contains key insights and decisions from development sessions to help 
 ### Conflict Resolution Cost
 
 **Decision**: Only resolve conflicts for tables with version mismatches
-**Code**: `icecap/main.py:676-686`
+**Code**: `endive/main.py:676-686`
 **Behavior**:
 - Iterates through `txn.v_dirty` (all tables touched)
 - Only processes tables where `v_catalog[t] != v`
@@ -45,7 +45,7 @@ This file contains key insights and decisions from development sessions to help 
 **Decision**: Skip experiments with < min_seeds during index building
 **Default**: 3 seeds minimum
 **Rationale**: Ensures reliable standard deviation estimates
-**Code**: `icecap/saturation_analysis.py:557-562`
+**Code**: `endive/saturation_analysis.py:557-562`
 
 ## Configuration Structure
 
@@ -145,8 +145,8 @@ Test each change immediately instead of batch changes
 
 ## File Sizes (Reference)
 
-- `icecap/saturation_analysis.py`: ~1400 lines, ~45KB
-- `icecap/main.py`: ~950 lines, ~35KB
+- `endive/saturation_analysis.py`: ~1400 lines, ~45KB
+- `endive/main.py`: ~950 lines, ~35KB
 - `tests/test_saturation_analysis.py`: ~600 lines, ~20KB
 - `analysis.toml`: ~130 lines, ~4KB
 
@@ -188,13 +188,13 @@ Regenerates all 8 output files for each experiment group
 ### Analysis Commands
 ```bash
 # Single group
-python -m icecap.saturation_analysis -i experiments -p "exp2_1_*" -o plots/exp2_1
+python -m endive.saturation_analysis -i experiments -p "exp2_1_*" -o plots/exp2_1
 
 # With grouping
-python -m icecap.saturation_analysis -i experiments -p "exp2_2_*" -o plots/exp2_2 --group-by num_tables
+python -m endive.saturation_analysis -i experiments -p "exp2_2_*" -o plots/exp2_2 --group-by num_tables
 
 # With custom config
-python -m icecap.saturation_analysis --config analysis.toml
+python -m endive.saturation_analysis --config analysis.toml
 ```
 
 ## Testing Strategy

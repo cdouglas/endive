@@ -13,10 +13,10 @@ import numpy as np
 from pathlib import Path
 from scipy import stats
 
-from icecap.main import configure_from_toml
-import icecap.main
-from icecap.capstats import Stats
-from icecap.test_utils import create_test_config
+from endive.main import configure_from_toml
+import endive.main
+from endive.capstats import Stats
+from endive.test_utils import create_test_config
 import simpy
 
 
@@ -47,19 +47,19 @@ class TestDistributionConformance:
             try:
                 configure_from_toml(config_path)
                 np.random.seed(42)
-                icecap.main.STATS = Stats()
-                icecap.main.TABLE_TO_GROUP, icecap.main.GROUP_TO_TABLES = icecap.main.partition_tables_into_groups(
-                    icecap.main.N_TABLES, icecap.main.N_GROUPS,
-                    icecap.main.GROUP_SIZE_DIST, icecap.main.LONGTAIL_PARAMS
+                endive.main.STATS = Stats()
+                endive.main.TABLE_TO_GROUP, endive.main.GROUP_TO_TABLES = endive.main.partition_tables_into_groups(
+                    endive.main.N_TABLES, endive.main.N_GROUPS,
+                    endive.main.GROUP_SIZE_DIST, endive.main.LONGTAIL_PARAMS
                 )
 
                 # Run simulation
                 env = simpy.Environment()
-                env.process(icecap.main.setup(env))
-                env.run(until=icecap.main.SIM_DURATION_MS)
+                env.process(endive.main.setup(env))
+                env.run(until=endive.main.SIM_DURATION_MS)
 
                 # Analyze runtimes
-                df = pd.DataFrame(icecap.main.STATS.transactions)
+                df = pd.DataFrame(endive.main.STATS.transactions)
                 runtimes = df['t_runtime'].values
 
                 assert len(runtimes) > 100, "Need sufficient samples for K-S test"
@@ -116,19 +116,19 @@ class TestDistributionConformance:
             try:
                 configure_from_toml(config_path)
                 np.random.seed(42)
-                icecap.main.STATS = Stats()
-                icecap.main.TABLE_TO_GROUP, icecap.main.GROUP_TO_TABLES = icecap.main.partition_tables_into_groups(
-                    icecap.main.N_TABLES, icecap.main.N_GROUPS,
-                    icecap.main.GROUP_SIZE_DIST, icecap.main.LONGTAIL_PARAMS
+                endive.main.STATS = Stats()
+                endive.main.TABLE_TO_GROUP, endive.main.GROUP_TO_TABLES = endive.main.partition_tables_into_groups(
+                    endive.main.N_TABLES, endive.main.N_GROUPS,
+                    endive.main.GROUP_SIZE_DIST, endive.main.LONGTAIL_PARAMS
                 )
 
                 # Run simulation
                 env = simpy.Environment()
-                env.process(icecap.main.setup(env))
-                env.run(until=icecap.main.SIM_DURATION_MS)
+                env.process(endive.main.setup(env))
+                env.run(until=endive.main.SIM_DURATION_MS)
 
                 # Calculate inter-arrival times from submit times
-                df = pd.DataFrame(icecap.main.STATS.transactions)
+                df = pd.DataFrame(endive.main.STATS.transactions)
                 df = df.sort_values('t_submit')
                 inter_arrivals = df['t_submit'].diff().dropna().values
 
@@ -171,20 +171,20 @@ class TestDistributionConformance:
             try:
                 configure_from_toml(config_path)
                 np.random.seed(42)
-                icecap.main.STATS = Stats()
-                icecap.main.TABLE_TO_GROUP, icecap.main.GROUP_TO_TABLES = icecap.main.partition_tables_into_groups(
-                    icecap.main.N_TABLES, icecap.main.N_GROUPS,
-                    icecap.main.GROUP_SIZE_DIST, icecap.main.LONGTAIL_PARAMS
+                endive.main.STATS = Stats()
+                endive.main.TABLE_TO_GROUP, endive.main.GROUP_TO_TABLES = endive.main.partition_tables_into_groups(
+                    endive.main.N_TABLES, endive.main.N_GROUPS,
+                    endive.main.GROUP_SIZE_DIST, endive.main.LONGTAIL_PARAMS
                 )
 
                 # Run simulation
                 env = simpy.Environment()
-                env.process(icecap.main.setup(env))
-                env.run(until=icecap.main.SIM_DURATION_MS)
+                env.process(endive.main.setup(env))
+                env.run(until=endive.main.SIM_DURATION_MS)
 
                 # CAS latencies are embedded in commit_latency
                 # For committed transactions, commit_latency includes CAS operations
-                df = pd.DataFrame(icecap.main.STATS.transactions)
+                df = pd.DataFrame(endive.main.STATS.transactions)
                 committed = df[df['status'] == 'committed']
 
                 # We can't directly extract CAS latencies, but we can verify
@@ -226,19 +226,19 @@ class TestSelectionBias:
             try:
                 configure_from_toml(config_path)
                 np.random.seed(42)
-                icecap.main.STATS = Stats()
-                icecap.main.TABLE_TO_GROUP, icecap.main.GROUP_TO_TABLES = icecap.main.partition_tables_into_groups(
-                    icecap.main.N_TABLES, icecap.main.N_GROUPS,
-                    icecap.main.GROUP_SIZE_DIST, icecap.main.LONGTAIL_PARAMS
+                endive.main.STATS = Stats()
+                endive.main.TABLE_TO_GROUP, endive.main.GROUP_TO_TABLES = endive.main.partition_tables_into_groups(
+                    endive.main.N_TABLES, endive.main.N_GROUPS,
+                    endive.main.GROUP_SIZE_DIST, endive.main.LONGTAIL_PARAMS
                 )
 
                 # Run simulation
                 env = simpy.Environment()
-                env.process(icecap.main.setup(env))
-                env.run(until=icecap.main.SIM_DURATION_MS)
+                env.process(endive.main.setup(env))
+                env.run(until=endive.main.SIM_DURATION_MS)
 
                 # Analyze runtime distribution by status
-                df = pd.DataFrame(icecap.main.STATS.transactions)
+                df = pd.DataFrame(endive.main.STATS.transactions)
                 committed = df[df['status'] == 'committed']
                 aborted = df[df['status'] == 'aborted']
 
@@ -294,19 +294,19 @@ class TestSelectionBias:
             try:
                 configure_from_toml(config_path)
                 np.random.seed(42)
-                icecap.main.STATS = Stats()
-                icecap.main.TABLE_TO_GROUP, icecap.main.GROUP_TO_TABLES = icecap.main.partition_tables_into_groups(
-                    icecap.main.N_TABLES, icecap.main.N_GROUPS,
-                    icecap.main.GROUP_SIZE_DIST, icecap.main.LONGTAIL_PARAMS
+                endive.main.STATS = Stats()
+                endive.main.TABLE_TO_GROUP, endive.main.GROUP_TO_TABLES = endive.main.partition_tables_into_groups(
+                    endive.main.N_TABLES, endive.main.N_GROUPS,
+                    endive.main.GROUP_SIZE_DIST, endive.main.LONGTAIL_PARAMS
                 )
 
                 # Run simulation
                 env = simpy.Environment()
-                env.process(icecap.main.setup(env))
-                env.run(until=icecap.main.SIM_DURATION_MS)
+                env.process(endive.main.setup(env))
+                env.run(until=endive.main.SIM_DURATION_MS)
 
                 # Analyze retry distribution by status
-                df = pd.DataFrame(icecap.main.STATS.transactions)
+                df = pd.DataFrame(endive.main.STATS.transactions)
                 committed = df[df['status'] == 'committed']
                 aborted = df[df['status'] == 'aborted']
 
@@ -380,18 +380,18 @@ class TestCrossExperimentConsistency:
 
                     configure_from_toml(config_path)
                     np.random.seed(42)  # Same seed for numpy
-                    icecap.main.STATS = Stats()
-                    icecap.main.TABLE_TO_GROUP, icecap.main.GROUP_TO_TABLES = icecap.main.partition_tables_into_groups(
-                        icecap.main.N_TABLES, icecap.main.N_GROUPS,
-                        icecap.main.GROUP_SIZE_DIST, icecap.main.LONGTAIL_PARAMS
+                    endive.main.STATS = Stats()
+                    endive.main.TABLE_TO_GROUP, endive.main.GROUP_TO_TABLES = endive.main.partition_tables_into_groups(
+                        endive.main.N_TABLES, endive.main.N_GROUPS,
+                        endive.main.GROUP_SIZE_DIST, endive.main.LONGTAIL_PARAMS
                     )
 
                     # Run simulation
                     env = simpy.Environment()
-                    env.process(icecap.main.setup(env))
-                    env.run(until=icecap.main.SIM_DURATION_MS)
+                    env.process(endive.main.setup(env))
+                    env.run(until=endive.main.SIM_DURATION_MS)
 
-                    df = pd.DataFrame(icecap.main.STATS.transactions)
+                    df = pd.DataFrame(endive.main.STATS.transactions)
                     results.append(df)
 
                     os.unlink(config_path)

@@ -28,7 +28,7 @@
 # Note: num_tables is fixed at 20 to allow meaningful group variations
 #
 # For each combination, run multiple seeds:
-#   python -m icecap.main experiment_configs/exp5_3_transaction_partitioning_catalog_latency.toml
+#   python -m endive.main experiment_configs/exp5_3_transaction_partitioning_catalog_latency.toml
 
 [simulation]
 duration_ms = 3600000  # 1 hour (extended for stable statistics)

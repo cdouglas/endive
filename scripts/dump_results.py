@@ -2,7 +2,7 @@
 """Dump results.parquet file contents to stdout.
 
 This tool displays the schema and contents of results.parquet files generated
-by the Icecap simulator. Supports various output formats and filtering options.
+by the Endive simulator. Supports various output formats and filtering options.
 
 Supports both:
 - Individual results.parquet files (small, < 10 MiB)

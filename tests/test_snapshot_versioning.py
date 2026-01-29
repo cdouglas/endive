@@ -17,10 +17,10 @@ from pathlib import Path
 from unittest.mock import patch, MagicMock
 import simpy
 
-from icecap.main import configure_from_toml, Catalog, Txn, txn_commit, txn_gen, setup
-import icecap.main
-from icecap.capstats import Stats
-from icecap.test_utils import SimulationBuilder, create_test_config
+from endive.main import configure_from_toml, Catalog, Txn, txn_commit, txn_gen, setup
+import endive.main
+from endive.capstats import Stats
+from endive.test_utils import SimulationBuilder, create_test_config
 
 
 class TestSnapshotCapture:
@@ -107,15 +107,15 @@ class TestManifestListReading:
             try:
                 configure_from_toml(config_path)
                 np.random.seed(42)
-                icecap.main.TABLE_TO_GROUP = {i: 0 for i in range(icecap.main.N_TABLES)}
-                icecap.main.GROUP_TO_TABLES = {0: list(range(icecap.main.N_TABLES))}
+                endive.main.TABLE_TO_GROUP = {i: 0 for i in range(endive.main.N_TABLES)}
+                endive.main.GROUP_TO_TABLES = {0: list(range(endive.main.N_TABLES))}
 
                 env = simpy.Environment()
                 catalog = Catalog(env)
 
                 # Track manifest list reads
                 manifest_list_reads = []
-                original_get_manifest_list_latency = icecap.main.get_manifest_list_latency
+                original_get_manifest_list_latency = endive.main.get_manifest_list_latency
 
                 def tracked_get_manifest_list_latency(op):
                     if op == 'read':
@@ -123,7 +123,7 @@ class TestManifestListReading:
                     return original_get_manifest_list_latency(op)
 
                 # Patch the function
-                icecap.main.get_manifest_list_latency = tracked_get_manifest_list_latency
+                endive.main.get_manifest_list_latency = tracked_get_manifest_list_latency
 
                 try:
                     # Create transaction at S_0
@@ -156,7 +156,7 @@ class TestManifestListReading:
 
                 finally:
                     # Restore original function
-                    icecap.main.get_manifest_list_latency = original_get_manifest_list_latency
+                    endive.main.get_manifest_list_latency = original_get_manifest_list_latency
 
             finally:
                 os.unlink(config_path)
@@ -291,15 +291,15 @@ class TestEndToEndVersioning:
             try:
                 configure_from_toml(config_path)
                 np.random.seed(42)
-                icecap.main.STATS = Stats()
-                icecap.main.TABLE_TO_GROUP = {i: 0 for i in range(icecap.main.N_TABLES)}
-                icecap.main.GROUP_TO_TABLES = {0: list(range(icecap.main.N_TABLES))}
+                endive.main.STATS = Stats()
+                endive.main.TABLE_TO_GROUP = {i: 0 for i in range(endive.main.N_TABLES)}
+                endive.main.GROUP_TO_TABLES = {0: list(range(endive.main.N_TABLES))}
 
                 env = simpy.Environment()
                 env.process(setup(env))
-                env.run(until=icecap.main.SIM_DURATION_MS)
+                env.run(until=endive.main.SIM_DURATION_MS)
 
-                df = pd.DataFrame(icecap.main.STATS.transactions)
+                df = pd.DataFrame(endive.main.STATS.transactions)
 
                 # Verify we have transactions with retries
                 committed = df[df['status'] == 'committed']

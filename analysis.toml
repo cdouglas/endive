@@ -1,13 +1,13 @@
-# Icecap Analysis Configuration
+# Endive Analysis Configuration
 #
 # This file configures the saturation analysis script that generates
 # latency vs throughput graphs and statistical tables from experiment results.
 #
 # Usage:
-#   python -m icecap.saturation_analysis --config analysis.toml
+#   python -m endive.saturation_analysis --config analysis.toml
 #
 # CLI overrides:
-#   python -m icecap.saturation_analysis --config analysis.toml -i experiments -o plots
+#   python -m endive.saturation_analysis --config analysis.toml -i experiments -o plots
 
 [paths]
 # Input directory containing experiment results

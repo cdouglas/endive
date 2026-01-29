@@ -7,7 +7,7 @@ This document explains how to run the simulator experiments using Docker.
 ### Build the Image
 
 ```bash
-docker build -t cdouglas/icecap-sim:latest .
+docker build -t cdouglas/endive-sim:latest .
 ```
 
 ### Run Experiments
@@ -24,7 +24,7 @@ docker run -d \
     -v $(pwd)/experiments:/app/experiments \
     -v $(pwd)/plots:/app/plots \
     -v $(pwd)/experiment_logs:/app/experiment_logs \
-    cdouglas/icecap-sim:latest \
+    cdouglas/endive-sim:latest \
     bash -c "scripts/run_baseline_experiments.sh \${EXP_ARGS} 2>&1 | tee experiment_logs/run_\$(date +%Y%m%d_%H%M%S).log"
 ```
 
@@ -108,7 +108,7 @@ After experiments complete, generate plots:
 docker run --rm \
     -v $(pwd)/experiments:/app/experiments:ro \
     -v $(pwd)/plots:/app/plots \
-    cdouglas/icecap-sim:latest \
+    cdouglas/endive-sim:latest \
     bash -c "scripts/regenerate_all_plots.sh"
 ```
 
@@ -122,17 +122,17 @@ For manual experimentation:
 docker run -it --rm \
     -v $(pwd)/experiments:/app/experiments \
     -v $(pwd)/plots:/app/plots \
-    cdouglas/icecap-sim:latest \
+    cdouglas/endive-sim:latest \
     bash
 ```
 
 Inside the container:
 ```bash
 # Run a single experiment
-python -m icecap.main experiment_configs/exp2_1_single_table_false_conflicts.toml --yes
+python -m endive.main experiment_configs/exp2_1_single_table_false_conflicts.toml --yes
 
 # Run analysis for specific experiments
-python -m icecap.saturation_analysis -i experiments -o plots/custom -p "exp2_1_*"
+python -m endive.saturation_analysis -i experiments -o plots/custom -p "exp2_1_*"
 
 # Run tests
 pytest tests/ -v
@@ -203,8 +203,8 @@ Match `--parallel` to available cores:
 docker run --rm \
     -v $(pwd)/experiments:/app/experiments \
     -v $(pwd)/experiment_configs:/app/experiment_configs:ro \
-    cdouglas/icecap-sim:latest \
-    bash -c "python -m icecap.main experiment_configs/exp2_1_single_table_false_conflicts.toml --yes"
+    cdouglas/endive-sim:latest \
+    bash -c "python -m endive.main experiment_configs/exp2_1_single_table_false_conflicts.toml --yes"
 ```
 
 ### Custom Configuration
@@ -215,8 +215,8 @@ docker run --rm \
 docker run --rm \
     -v $(pwd)/experiments:/app/experiments \
     -v $(pwd)/experiment_configs:/app/experiment_configs:ro \
-    cdouglas/icecap-sim:latest \
-    bash -c "python -m icecap.main experiment_configs/my_experiment.toml --yes"
+    cdouglas/endive-sim:latest \
+    bash -c "python -m endive.main experiment_configs/my_experiment.toml --yes"
 ```
 
 ### Consolidate Results
@@ -226,7 +226,7 @@ Create single consolidated.parquet file for efficient storage:
 ```bash
 docker run --rm \
     -v $(pwd)/experiments:/app/experiments \
-    cdouglas/icecap-sim:latest \
+    cdouglas/endive-sim:latest \
     python scripts/consolidate_all_experiments_incremental.py
 ```
 
@@ -276,7 +276,7 @@ rm -rf experiments/* plots/* experiment_logs/*
 ### Remove Docker Images
 
 ```bash
-docker rmi cdouglas/icecap-sim:latest
+docker rmi cdouglas/endive-sim:latest
 ```
 
 ## Multi-Architecture Support
@@ -285,14 +285,14 @@ Build for different platforms:
 
 ```bash
 # Build for Linux AMD64 (most common)
-docker build --platform linux/amd64 -t cdouglas/icecap-sim:amd64 .
+docker build --platform linux/amd64 -t cdouglas/endive-sim:amd64 .
 
 # Build for Linux ARM64 (Mac M1/M2)
-docker build --platform linux/arm64 -t cdouglas/icecap-sim:arm64 .
+docker build --platform linux/arm64 -t cdouglas/endive-sim:arm64 .
 
 # Multi-platform build
 docker buildx build --platform linux/amd64,linux/arm64 \
-    -t cdouglas/icecap-sim:latest .
+    -t cdouglas/endive-sim:latest .
 ```
 
 ## Performance Tips
@@ -304,5 +304,5 @@ docker buildx build --platform linux/amd64,linux/arm64 \
 5. **Run analysis separately** after experiments complete
 6. **Use `--no-cache`** when rebuilding after code changes:
    ```bash
-   docker build --no-cache -t cdouglas/icecap-sim:latest .
+   docker build --no-cache -t cdouglas/endive-sim:latest .
    ```

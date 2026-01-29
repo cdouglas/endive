@@ -7,9 +7,9 @@ import pandas as pd
 import numpy as np
 from pathlib import Path
 
-from icecap.main import configure_from_toml, partition_tables_into_groups
-import icecap.main
-from icecap.capstats import Stats
+from endive.main import configure_from_toml, partition_tables_into_groups
+import endive.main
+from endive.capstats import Stats
 import simpy
 
 
@@ -88,30 +88,30 @@ T_MANIFEST_FILE.write.stddev = 6
 def run_simulation_from_config(config_path: str) -> pd.DataFrame:
     """Run simulation and return results as DataFrame."""
     # Reset global stats
-    icecap.main.STATS = Stats()
+    endive.main.STATS = Stats()
 
     # Load configuration
     configure_from_toml(config_path)
 
     # Setup random seed if specified
-    if icecap.main.SIM_SEED is not None:
-        np.random.seed(icecap.main.SIM_SEED)
+    if endive.main.SIM_SEED is not None:
+        np.random.seed(endive.main.SIM_SEED)
 
     # Partition tables into groups (after seed for determinism)
-    icecap.main.TABLE_TO_GROUP, icecap.main.GROUP_TO_TABLES = partition_tables_into_groups(
-        icecap.main.N_TABLES,
-        icecap.main.N_GROUPS,
-        icecap.main.GROUP_SIZE_DIST,
-        icecap.main.LONGTAIL_PARAMS
+    endive.main.TABLE_TO_GROUP, endive.main.GROUP_TO_TABLES = partition_tables_into_groups(
+        endive.main.N_TABLES,
+        endive.main.N_GROUPS,
+        endive.main.GROUP_SIZE_DIST,
+        endive.main.LONGTAIL_PARAMS
     )
 
     # Run simulation
     env = simpy.Environment()
-    env.process(icecap.main.setup(env))
-    env.run(until=icecap.main.SIM_DURATION_MS)
+    env.process(endive.main.setup(env))
+    env.run(until=endive.main.SIM_DURATION_MS)
 
     # Return results as DataFrame
-    return pd.DataFrame(icecap.main.STATS.transactions)
+    return pd.DataFrame(endive.main.STATS.transactions)
 
 
 class TestTablePartitioning:
@@ -242,24 +242,24 @@ class TestGroupedTransactions:
                 np.random.seed(42)
 
                 # Partition tables
-                icecap.main.TABLE_TO_GROUP, icecap.main.GROUP_TO_TABLES = partition_tables_into_groups(
-                    icecap.main.N_TABLES,
-                    icecap.main.N_GROUPS,
-                    icecap.main.GROUP_SIZE_DIST,
-                    icecap.main.LONGTAIL_PARAMS
+                endive.main.TABLE_TO_GROUP, endive.main.GROUP_TO_TABLES = partition_tables_into_groups(
+                    endive.main.N_TABLES,
+                    endive.main.N_GROUPS,
+                    endive.main.GROUP_SIZE_DIST,
+                    endive.main.LONGTAIL_PARAMS
                 )
 
                 # Create catalog and generate several transactions
                 env = simpy.Environment()
-                catalog = icecap.main.Catalog(env)
+                catalog = endive.main.Catalog(env)
 
                 violations = 0
                 for i in range(100):
-                    tblr, tblw = icecap.main.rand_tbl(catalog)
+                    tblr, tblw = endive.main.rand_tbl(catalog)
 
                     # All tables in transaction should be from same group
                     all_tables = set(tblr.keys()) | set(tblw.keys())
-                    groups = set(icecap.main.TABLE_TO_GROUP[t] for t in all_tables)
+                    groups = set(endive.main.TABLE_TO_GROUP[t] for t in all_tables)
 
                     if len(groups) > 1:
                         violations += 1
@@ -383,21 +383,21 @@ class TestGroupSizeHandling:
                 np.random.seed(42)
 
                 # Partition tables
-                icecap.main.TABLE_TO_GROUP, icecap.main.GROUP_TO_TABLES = partition_tables_into_groups(
-                    icecap.main.N_TABLES,
-                    icecap.main.N_GROUPS,
-                    icecap.main.GROUP_SIZE_DIST,
-                    icecap.main.LONGTAIL_PARAMS
+                endive.main.TABLE_TO_GROUP, endive.main.GROUP_TO_TABLES = partition_tables_into_groups(
+                    endive.main.N_TABLES,
+                    endive.main.N_GROUPS,
+                    endive.main.GROUP_SIZE_DIST,
+                    endive.main.LONGTAIL_PARAMS
                 )
 
                 # Create catalog and generate transactions until we hit a warning
                 env = simpy.Environment()
-                catalog = icecap.main.Catalog(env)
+                catalog = endive.main.Catalog(env)
 
                 # Generate many transactions to likely trigger warning
                 with caplog.at_level("WARNING"):
                     for i in range(1000):
-                        tblr, tblw = icecap.main.rand_tbl(catalog)
+                        tblr, tblw = endive.main.rand_tbl(catalog)
 
                 # Check if any warnings were logged
                 warnings = [record for record in caplog.records if record.levelname == "WARNING"]

@@ -96,7 +96,7 @@ docs/
 ## Project Structure
 
 ```
-icecap/
+endive/
 ├── README.md                       # Project overview with key findings
 │
 ├── docs/                           # Documentation (you are here)
@@ -110,7 +110,7 @@ icecap/
 │   ├── SNAPSHOT_VERSIONING.md      # Version tracking
 │   └── ... (other guides)
 │
-├── icecap/                         # Core simulator
+├── endive/                         # Core simulator
 │   ├── main.py                     # Simulation engine
 │   ├── capstats.py                 # Statistics collection
 │   ├── saturation_analysis.py      # Saturation analysis
@@ -141,11 +141,11 @@ icecap/
 ./scripts/run_baseline_experiments.sh --quick --seeds 1 # Quick test (2min)
 
 # Analyze
-python -m icecap.saturation_analysis -i experiments -p "exp2_1_*" -o plots/exp2_1
-python -m icecap.saturation_analysis -i experiments -p "exp2_2_*" -o plots/exp2_2 --group-by num_tables
+python -m endive.saturation_analysis -i experiments -p "exp2_1_*" -o plots/exp2_1
+python -m endive.saturation_analysis -i experiments -p "exp2_2_*" -o plots/exp2_2 --group-by num_tables
 
 # Validate
-python -m icecap.warmup_validation experiments/exp2_1_*/12345
+python -m endive.warmup_validation experiments/exp2_1_*/12345
 
 # Test
 pytest tests/ -v
@@ -161,7 +161,7 @@ pytest tests/ -v
 | Results | `../experiments/` |
 | Plots | `../plots/` |
 | Tests | `../tests/` |
-| Core simulator | `../icecap/main.py` |
+| Core simulator | `../endive/main.py` |
 
 ### Key Metrics
 
@@ -239,7 +239,7 @@ Transient exclusion for steady-state measurement:
 1. Read [QUICKSTART.md](QUICKSTART.md) installation section
 2. Install: `pip install -r requirements.txt && pip install -e .`
 3. Test: `pytest tests/ -v`
-4. Run single simulation: `echo "Y" | python -m icecap.main experiment_configs/exp2_1_single_table_false_conflicts.toml`
+4. Run single simulation: `echo "Y" | python -m endive.main experiment_configs/exp2_1_single_table_false_conflicts.toml`
 
 ### Workflow 2: Running Baseline Experiments
 
@@ -253,8 +253,8 @@ Transient exclusion for steady-state measurement:
 
 1. Generate saturation curves:
    ```bash
-   python -m icecap.saturation_analysis -i experiments -p "exp2_1_*" -o plots/exp2_1
-   python -m icecap.saturation_analysis -i experiments -p "exp2_2_*" -o plots/exp2_2 --group-by num_tables
+   python -m endive.saturation_analysis -i experiments -p "exp2_1_*" -o plots/exp2_1
+   python -m endive.saturation_analysis -i experiments -p "exp2_2_*" -o plots/exp2_2 --group-by num_tables
    ```
 
 2. View outputs:

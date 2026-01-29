@@ -6,7 +6,7 @@ permalink: /appendix/simulator
 
 # Appendix: Simulator Implementation Details
 
-This appendix provides technical details about the discrete-event simulator used to study Apache Iceberg's optimistic concurrency control. For complete implementation, see the [simulator code](https://github.com/cdouglas/icecap) and [`docs/ARCHITECTURE.md`](ARCHITECTURE.md).
+This appendix provides technical details about the discrete-event simulator used to study Apache Iceberg's optimistic concurrency control. For complete implementation, see the [simulator code](https://github.com/cdouglas/endive) and [`docs/ARCHITECTURE.md`](ARCHITECTURE.md).
 
 ## Probability Distributions
 
@@ -107,7 +107,7 @@ See `saturation_analysis.py:compute_warmup_duration()` for implementation.
 ## Implementation
 
 - **Simulator speed:** $$\approx 1000 \times$$ real-time (1 hour in 3.6 seconds)
-- **Core engine:** [`icecap/main.py`](../icecap/main.py) (~1100 lines)
-- **Analysis pipeline:** [`icecap/saturation_analysis.py`](../icecap/saturation_analysis.py) (~1700 lines)
+- **Core engine:** [`endive/main.py`](../endive/main.py) (~1100 lines)
+- **Analysis pipeline:** [`endive/saturation_analysis.py`](../endive/saturation_analysis.py) (~1700 lines)
 - **Experiment configs:** [`experiment_configs/`](../experiment_configs/)
 - **Architecture docs:** [`docs/ARCHITECTURE.md`](ARCHITECTURE.md)

@@ -4,7 +4,7 @@
 # that appears in latency vs throughput plots.
 #
 # Usage:
-#   python -m icecap.saturation_analysis --config example_saturation_config.toml
+#   python -m endive.saturation_analysis --config example_saturation_config.toml
 
 [paths]
 input_dir = "experiments"

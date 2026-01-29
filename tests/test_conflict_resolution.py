@@ -8,9 +8,9 @@ import numpy as np
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
-from icecap.main import configure_from_toml, generate_latency
-import icecap.main
-from icecap.capstats import Stats
+from endive.main import configure_from_toml, generate_latency
+import endive.main
+from endive.capstats import Stats
 import simpy
 
 
@@ -82,22 +82,22 @@ T_MANIFEST_FILE.write.stddev = 6
 def run_simulation_from_config(config_path: str) -> pd.DataFrame:
     """Run simulation and return results as DataFrame."""
     # Reset global stats
-    icecap.main.STATS = Stats()
+    endive.main.STATS = Stats()
 
     # Load configuration
     configure_from_toml(config_path)
 
     # Setup random seed if specified
-    if icecap.main.SIM_SEED is not None:
-        np.random.seed(icecap.main.SIM_SEED)
+    if endive.main.SIM_SEED is not None:
+        np.random.seed(endive.main.SIM_SEED)
 
     # Run simulation
     env = simpy.Environment()
-    env.process(icecap.main.setup(env))
-    env.run(until=icecap.main.SIM_DURATION_MS)
+    env.process(endive.main.setup(env))
+    env.run(until=endive.main.SIM_DURATION_MS)
 
     # Return results as DataFrame
-    return pd.DataFrame(icecap.main.STATS.transactions)
+    return pd.DataFrame(endive.main.STATS.transactions)
 
 
 class TestMinimumLatency:
@@ -124,16 +124,16 @@ class TestMinimumLatency:
                 samples = [generate_latency(20.0, 15.0) for _ in range(1000)]
 
                 # All should be >= minimum
-                assert all(s >= icecap.main.MIN_LATENCY for s in samples), \
-                    f"Some latencies below minimum: min={min(samples)}, MIN_LATENCY={icecap.main.MIN_LATENCY}"
+                assert all(s >= endive.main.MIN_LATENCY for s in samples), \
+                    f"Some latencies below minimum: min={min(samples)}, MIN_LATENCY={endive.main.MIN_LATENCY}"
 
                 # Verify minimum is actually being enforced
-                assert icecap.main.MIN_LATENCY == 10.0
+                assert endive.main.MIN_LATENCY == 10.0
                 assert min(samples) >= 10.0
 
                 print(f"✓ Minimum latency test passed")
                 print(f"  Generated 1000 samples with mean=20, stddev=15")
-                print(f"  Minimum value: {min(samples):.2f}ms (>= {icecap.main.MIN_LATENCY}ms)")
+                print(f"  Minimum value: {min(samples):.2f}ms (>= {endive.main.MIN_LATENCY}ms)")
                 print(f"  Mean value: {np.mean(samples):.2f}ms")
 
             finally:
@@ -322,7 +322,7 @@ class TestStochasticLatencies:
                 configure_from_toml(config_path)
 
                 # Generate large sample
-                samples = [icecap.main.get_cas_latency() for _ in range(1000)]
+                samples = [endive.main.get_cas_latency() for _ in range(1000)]
 
                 sample_mean = np.mean(samples)
                 sample_std = np.std(samples)
@@ -336,7 +336,7 @@ class TestStochasticLatencies:
                     f"Sample std {sample_std} outside expected range"
 
                 # All samples should be >= MIN_LATENCY
-                assert min(samples) >= icecap.main.MIN_LATENCY
+                assert min(samples) >= endive.main.MIN_LATENCY
 
                 print(f"✓ Stochastic latency distribution test passed")
                 print(f"  Configured: mean=100, stddev=15, min=5")
@@ -357,8 +357,8 @@ class TestStochasticLatencies:
                 configure_from_toml(config_path)
 
                 # Generate samples for read and write
-                read_samples = [icecap.main.get_manifest_list_latency('read') for _ in range(500)]
-                write_samples = [icecap.main.get_manifest_list_latency('write') for _ in range(500)]
+                read_samples = [endive.main.get_manifest_list_latency('read') for _ in range(500)]
+                write_samples = [endive.main.get_manifest_list_latency('write') for _ in range(500)]
 
                 read_mean = np.mean(read_samples)
                 write_mean = np.mean(write_samples)

@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 """
-Analysis and plotting module for icecap experiment results.
+Analysis and plotting module for endive experiment results.
 
 This module provides functions to generate:
 1. CDF plots for commit latency across different client loads
@@ -327,7 +327,7 @@ def generate_summary_table(
 
 def cli():
     parser = argparse.ArgumentParser(
-        description="Analyze and plot icecap experiment results"
+        description="Analyze and plot endive experiment results"
     )
     parser.add_argument(
         "-i", "--input-dir",

@@ -105,7 +105,7 @@ Characterize workloads that could (not) be supported by a storage-only catalog a
 
 #### Gap 1: Real vs False Conflict Distinction → ✅ IMPLEMENTED
 
-**Implementation** (`icecap/main.py:627-719`):
+**Implementation** (`endive/main.py:627-719`):
 ```python
 def merge_table_conflicts(sim, txn, v_catalog):
     for t, v in txn.v_dirty.items():
@@ -139,7 +139,7 @@ def merge_table_conflicts(sim, txn, v_catalog):
 
 #### Gap 2: Variable Conflict Resolution Cost → ✅ IMPLEMENTED
 
-**Implementation** (`icecap/main.py:235-250`):
+**Implementation** (`endive/main.py:235-250`):
 ```python
 def sample_conflicting_manifests() -> int:
     dist = CONFLICTING_MANIFESTS_DIST
@@ -821,9 +821,9 @@ Run same experiment with different seeds → results should be statistically sim
 
 ### Code Deliverables
 
-1. ✅ Extended `icecap/main.py` with false/real conflict modeling
-2. ✅ New experiment script: `icecap/saturation_analysis.py`
-3. ✅ Enhanced `icecap/analysis.py` with saturation curve plotting
+1. ✅ Extended `endive/main.py` with false/real conflict modeling
+2. ✅ New experiment script: `endive/saturation_analysis.py`
+3. ✅ Enhanced `endive/analysis.py` with saturation curve plotting
 4. ✅ Configuration templates for each experiment
 
 ### Analysis Deliverables

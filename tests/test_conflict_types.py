@@ -14,10 +14,10 @@ import pandas as pd
 import numpy as np
 from pathlib import Path
 
-from icecap.main import configure_from_toml
-import icecap.main
-from icecap.capstats import Stats
-from icecap.test_utils import create_test_config
+from endive.main import configure_from_toml
+import endive.main
+from endive.capstats import Stats
+from endive.test_utils import create_test_config
 
 
 class TestFalseConflicts:
@@ -49,25 +49,25 @@ class TestFalseConflicts:
             try:
                 configure_from_toml(config_path)
                 np.random.seed(42)
-                icecap.main.TABLE_TO_GROUP = {i: 0 for i in range(icecap.main.N_TABLES)}
-                icecap.main.GROUP_TO_TABLES = {0: list(range(icecap.main.N_TABLES))}
-                icecap.main.STATS = Stats()
+                endive.main.TABLE_TO_GROUP = {i: 0 for i in range(endive.main.N_TABLES)}
+                endive.main.GROUP_TO_TABLES = {0: list(range(endive.main.N_TABLES))}
+                endive.main.STATS = Stats()
 
                 # Run simulation
                 import simpy
                 env = simpy.Environment()
-                env.process(icecap.main.setup(env))
-                env.run(until=icecap.main.SIM_DURATION_MS)
+                env.process(endive.main.setup(env))
+                env.run(until=endive.main.SIM_DURATION_MS)
 
                 # Verify only false conflicts occurred
-                assert icecap.main.STATS.false_conflicts > 0, "Should have some false conflicts"
-                assert icecap.main.STATS.real_conflicts == 0, "Should have no real conflicts"
-                assert icecap.main.STATS.manifest_files_read == 0, "Should not read manifest files"
-                assert icecap.main.STATS.manifest_files_written == 0, "Should not write manifest files"
+                assert endive.main.STATS.false_conflicts > 0, "Should have some false conflicts"
+                assert endive.main.STATS.real_conflicts == 0, "Should have no real conflicts"
+                assert endive.main.STATS.manifest_files_read == 0, "Should not read manifest files"
+                assert endive.main.STATS.manifest_files_written == 0, "Should not write manifest files"
 
                 print(f"✓ False conflicts only test passed")
-                print(f"  False conflicts: {icecap.main.STATS.false_conflicts}")
-                print(f"  Real conflicts: {icecap.main.STATS.real_conflicts}")
+                print(f"  False conflicts: {endive.main.STATS.false_conflicts}")
+                print(f"  Real conflicts: {endive.main.STATS.real_conflicts}")
 
             finally:
                 os.unlink(config_path)
@@ -105,34 +105,34 @@ class TestRealConflicts:
             try:
                 configure_from_toml(config_path)
                 np.random.seed(42)
-                icecap.main.TABLE_TO_GROUP = {i: 0 for i in range(icecap.main.N_TABLES)}
-                icecap.main.GROUP_TO_TABLES = {0: list(range(icecap.main.N_TABLES))}
-                icecap.main.STATS = Stats()
+                endive.main.TABLE_TO_GROUP = {i: 0 for i in range(endive.main.N_TABLES)}
+                endive.main.GROUP_TO_TABLES = {0: list(range(endive.main.N_TABLES))}
+                endive.main.STATS = Stats()
 
                 # Run simulation
                 import simpy
                 env = simpy.Environment()
-                env.process(icecap.main.setup(env))
-                env.run(until=icecap.main.SIM_DURATION_MS)
+                env.process(endive.main.setup(env))
+                env.run(until=endive.main.SIM_DURATION_MS)
 
                 # Verify only real conflicts occurred
-                assert icecap.main.STATS.real_conflicts > 0, "Should have some real conflicts"
-                assert icecap.main.STATS.false_conflicts == 0, "Should have no false conflicts"
-                assert icecap.main.STATS.manifest_files_read > 0, "Should read manifest files"
-                assert icecap.main.STATS.manifest_files_written > 0, "Should write manifest files"
+                assert endive.main.STATS.real_conflicts > 0, "Should have some real conflicts"
+                assert endive.main.STATS.false_conflicts == 0, "Should have no false conflicts"
+                assert endive.main.STATS.manifest_files_read > 0, "Should read manifest files"
+                assert endive.main.STATS.manifest_files_written > 0, "Should write manifest files"
 
                 # Verify approximately 3 manifest files per real conflict (fixed distribution)
-                avg_read = icecap.main.STATS.manifest_files_read / icecap.main.STATS.real_conflicts
-                avg_written = icecap.main.STATS.manifest_files_written / icecap.main.STATS.real_conflicts
+                avg_read = endive.main.STATS.manifest_files_read / endive.main.STATS.real_conflicts
+                avg_written = endive.main.STATS.manifest_files_written / endive.main.STATS.real_conflicts
 
                 assert 2.5 <= avg_read <= 3.5, f"Expected ~3 manifest files read per conflict, got {avg_read:.1f}"
                 assert 2.5 <= avg_written <= 3.5, f"Expected ~3 manifest files written per conflict, got {avg_written:.1f}"
 
                 print(f"✓ Real conflicts only test passed")
-                print(f"  False conflicts: {icecap.main.STATS.false_conflicts}")
-                print(f"  Real conflicts: {icecap.main.STATS.real_conflicts}")
-                print(f"  Manifest files read: {icecap.main.STATS.manifest_files_read} (avg {avg_read:.1f})")
-                print(f"  Manifest files written: {icecap.main.STATS.manifest_files_written} (avg {avg_written:.1f})")
+                print(f"  False conflicts: {endive.main.STATS.false_conflicts}")
+                print(f"  Real conflicts: {endive.main.STATS.real_conflicts}")
+                print(f"  Manifest files read: {endive.main.STATS.manifest_files_read} (avg {avg_read:.1f})")
+                print(f"  Manifest files written: {endive.main.STATS.manifest_files_written} (avg {avg_written:.1f})")
 
             finally:
                 os.unlink(config_path)
@@ -163,32 +163,32 @@ class TestRealConflicts:
             try:
                 configure_from_toml(config_path)
                 np.random.seed(42)
-                icecap.main.TABLE_TO_GROUP = {i: 0 for i in range(icecap.main.N_TABLES)}
-                icecap.main.GROUP_TO_TABLES = {0: list(range(icecap.main.N_TABLES))}
-                icecap.main.STATS = Stats()
+                endive.main.TABLE_TO_GROUP = {i: 0 for i in range(endive.main.N_TABLES)}
+                endive.main.GROUP_TO_TABLES = {0: list(range(endive.main.N_TABLES))}
+                endive.main.STATS = Stats()
 
                 # Run simulation
                 import simpy
                 env = simpy.Environment()
-                env.process(icecap.main.setup(env))
-                env.run(until=icecap.main.SIM_DURATION_MS)
+                env.process(endive.main.setup(env))
+                env.run(until=endive.main.SIM_DURATION_MS)
 
                 # Verify both types of conflicts occurred
-                assert icecap.main.STATS.false_conflicts > 0, "Should have some false conflicts"
-                assert icecap.main.STATS.real_conflicts > 0, "Should have some real conflicts"
+                assert endive.main.STATS.false_conflicts > 0, "Should have some false conflicts"
+                assert endive.main.STATS.real_conflicts > 0, "Should have some real conflicts"
 
                 # Verify ratio is approximately 50/50 (within reasonable tolerance)
-                total = icecap.main.STATS.false_conflicts + icecap.main.STATS.real_conflicts
-                false_ratio = icecap.main.STATS.false_conflicts / total
-                real_ratio = icecap.main.STATS.real_conflicts / total
+                total = endive.main.STATS.false_conflicts + endive.main.STATS.real_conflicts
+                false_ratio = endive.main.STATS.false_conflicts / total
+                real_ratio = endive.main.STATS.real_conflicts / total
 
                 # Allow 20% deviation from expected 0.5
                 assert 0.3 <= false_ratio <= 0.7, f"Expected ~50% false conflicts, got {false_ratio*100:.1f}%"
                 assert 0.3 <= real_ratio <= 0.7, f"Expected ~50% real conflicts, got {real_ratio*100:.1f}%"
 
                 print(f"✓ Mixed conflicts test passed")
-                print(f"  False conflicts: {icecap.main.STATS.false_conflicts} ({false_ratio*100:.1f}%)")
-                print(f"  Real conflicts: {icecap.main.STATS.real_conflicts} ({real_ratio*100:.1f}%)")
+                print(f"  False conflicts: {endive.main.STATS.false_conflicts} ({false_ratio*100:.1f}%)")
+                print(f"  Real conflicts: {endive.main.STATS.real_conflicts} ({real_ratio*100:.1f}%)")
 
             finally:
                 os.unlink(config_path)
@@ -200,15 +200,15 @@ class TestConflictingManifestsDistribution:
     def test_fixed_distribution(self):
         """Verify fixed distribution returns constant value."""
         # Save current config
-        old_dist = icecap.main.CONFLICTING_MANIFESTS_DIST
-        old_params = icecap.main.CONFLICTING_MANIFESTS_PARAMS
+        old_dist = endive.main.CONFLICTING_MANIFESTS_DIST
+        old_params = endive.main.CONFLICTING_MANIFESTS_PARAMS
 
         try:
-            icecap.main.CONFLICTING_MANIFESTS_DIST = "fixed"
-            icecap.main.CONFLICTING_MANIFESTS_PARAMS = {"value": 5}
+            endive.main.CONFLICTING_MANIFESTS_DIST = "fixed"
+            endive.main.CONFLICTING_MANIFESTS_PARAMS = {"value": 5}
 
             # Sample many times
-            samples = [icecap.main.sample_conflicting_manifests() for _ in range(100)]
+            samples = [endive.main.sample_conflicting_manifests() for _ in range(100)]
 
             # All should be exactly 5
             assert all(s == 5 for s in samples), "Fixed distribution should always return same value"
@@ -217,21 +217,21 @@ class TestConflictingManifestsDistribution:
             print(f"  All 100 samples = 5")
 
         finally:
-            icecap.main.CONFLICTING_MANIFESTS_DIST = old_dist
-            icecap.main.CONFLICTING_MANIFESTS_PARAMS = old_params
+            endive.main.CONFLICTING_MANIFESTS_DIST = old_dist
+            endive.main.CONFLICTING_MANIFESTS_PARAMS = old_params
 
     def test_uniform_distribution(self):
         """Verify uniform distribution respects min/max bounds."""
-        old_dist = icecap.main.CONFLICTING_MANIFESTS_DIST
-        old_params = icecap.main.CONFLICTING_MANIFESTS_PARAMS
+        old_dist = endive.main.CONFLICTING_MANIFESTS_DIST
+        old_params = endive.main.CONFLICTING_MANIFESTS_PARAMS
 
         try:
             np.random.seed(42)
-            icecap.main.CONFLICTING_MANIFESTS_DIST = "uniform"
-            icecap.main.CONFLICTING_MANIFESTS_PARAMS = {"min": 1, "max": 10}
+            endive.main.CONFLICTING_MANIFESTS_DIST = "uniform"
+            endive.main.CONFLICTING_MANIFESTS_PARAMS = {"min": 1, "max": 10}
 
             # Sample many times
-            samples = [icecap.main.sample_conflicting_manifests() for _ in range(1000)]
+            samples = [endive.main.sample_conflicting_manifests() for _ in range(1000)]
 
             # All should be in range [1, 10]
             assert all(1 <= s <= 10 for s in samples), "Uniform distribution should respect bounds"
@@ -243,21 +243,21 @@ class TestConflictingManifestsDistribution:
             print(f"  Min: {min(samples)}, Max: {max(samples)}, Unique values: {len(set(samples))}")
 
         finally:
-            icecap.main.CONFLICTING_MANIFESTS_DIST = old_dist
-            icecap.main.CONFLICTING_MANIFESTS_PARAMS = old_params
+            endive.main.CONFLICTING_MANIFESTS_DIST = old_dist
+            endive.main.CONFLICTING_MANIFESTS_PARAMS = old_params
 
     def test_exponential_distribution(self):
         """Verify exponential distribution respects bounds and mean."""
-        old_dist = icecap.main.CONFLICTING_MANIFESTS_DIST
-        old_params = icecap.main.CONFLICTING_MANIFESTS_PARAMS
+        old_dist = endive.main.CONFLICTING_MANIFESTS_DIST
+        old_params = endive.main.CONFLICTING_MANIFESTS_PARAMS
 
         try:
             np.random.seed(42)
-            icecap.main.CONFLICTING_MANIFESTS_DIST = "exponential"
-            icecap.main.CONFLICTING_MANIFESTS_PARAMS = {"mean": 3.0, "min": 1, "max": 10}
+            endive.main.CONFLICTING_MANIFESTS_DIST = "exponential"
+            endive.main.CONFLICTING_MANIFESTS_PARAMS = {"mean": 3.0, "min": 1, "max": 10}
 
             # Sample many times
-            samples = [icecap.main.sample_conflicting_manifests() for _ in range(1000)]
+            samples = [endive.main.sample_conflicting_manifests() for _ in range(1000)]
 
             # All should be in range [1, 10]
             assert all(1 <= s <= 10 for s in samples), "Exponential distribution should respect bounds"
@@ -271,8 +271,8 @@ class TestConflictingManifestsDistribution:
             print(f"  Min: {min(samples)}, Max: {max(samples)}, Mean: {sample_mean:.1f}")
 
         finally:
-            icecap.main.CONFLICTING_MANIFESTS_DIST = old_dist
-            icecap.main.CONFLICTING_MANIFESTS_PARAMS = old_params
+            endive.main.CONFLICTING_MANIFESTS_DIST = old_dist
+            endive.main.CONFLICTING_MANIFESTS_PARAMS = old_params
 
 
 class TestConflictLatencyDifference:
@@ -317,18 +317,18 @@ class TestConflictLatencyDifference:
                 try:
                     configure_from_toml(config_path)
                     np.random.seed(42)
-                    icecap.main.TABLE_TO_GROUP = {i: 0 for i in range(icecap.main.N_TABLES)}
-                    icecap.main.GROUP_TO_TABLES = {0: list(range(icecap.main.N_TABLES))}
-                    icecap.main.STATS = Stats()
+                    endive.main.TABLE_TO_GROUP = {i: 0 for i in range(endive.main.N_TABLES)}
+                    endive.main.GROUP_TO_TABLES = {0: list(range(endive.main.N_TABLES))}
+                    endive.main.STATS = Stats()
 
                     # Run simulation
                     import simpy
                     env = simpy.Environment()
-                    env.process(icecap.main.setup(env))
-                    env.run(until=icecap.main.SIM_DURATION_MS)
+                    env.process(endive.main.setup(env))
+                    env.run(until=endive.main.SIM_DURATION_MS)
 
                     # Get average latency for transactions with retries
-                    df = pd.DataFrame(icecap.main.STATS.transactions)
+                    df = pd.DataFrame(endive.main.STATS.transactions)
                     with_retries = df[(df['status'] == 'committed') & (df['n_retries'] > 0)]
 
                     if len(with_retries) > 0:

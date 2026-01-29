@@ -19,7 +19,7 @@
 #   inter_arrival.scale = [10, 20, 50, 100, 200, 500, 1000, 2000, 5000]
 #
 # For each combination, run multiple seeds:
-#   python -m icecap.main experiment_configs/exp3_1_single_table_real_conflicts.toml
+#   python -m endive.main experiment_configs/exp3_1_single_table_real_conflicts.toml
 
 [simulation]
 duration_ms = 3600000  # 1 hour (matches baseline for proper comparison)

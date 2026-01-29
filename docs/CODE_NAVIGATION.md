@@ -4,7 +4,7 @@ Quick reference for efficiently navigating and modifying the codebase.
 
 ## Key Files and Their Purpose
 
-### Analysis Pipeline (`icecap/saturation_analysis.py`)
+### Analysis Pipeline (`endive/saturation_analysis.py`)
 
 **Size**: ~1400 lines
 **Token-saving tip**: Use function-level grep instead of reading full file
@@ -34,7 +34,7 @@ Quick reference for efficiently navigating and modifying the codebase.
 - Modify statistics: Edit compute_aggregate_statistics() or compute_per_seed_statistics()
 - Change table format: Edit generate_*_table() functions
 
-### Simulator Core (`icecap/main.py`)
+### Simulator Core (`endive/main.py`)
 
 **Key Sections**:
 - Lines 65-141: Table grouping logic (partition_tables_into_groups)
@@ -86,7 +86,7 @@ Quick reference for efficiently navigating and modifying the codebase.
 1. **Add function** after line 900 in saturation_analysis.py
 2. **Add filename** to CONFIG['output']['files'] in get_default_config()
 3. **Wire into CLI** in cli() function after line 1400
-4. **Test** with: `python -m icecap.saturation_analysis -i experiments -p "exp2_1_*" -o plots/test`
+4. **Test** with: `python -m endive.saturation_analysis -i experiments -p "exp2_1_*" -o plots/test`
 
 ### Adding a Configuration Option
 
@@ -145,16 +145,16 @@ df_filtered = df[
 
 ```bash
 # Find function definition with line number
-grep -n "def function_name" icecap/saturation_analysis.py
+grep -n "def function_name" endive/saturation_analysis.py
 
 # Count functions in a file
-grep -c "^def " icecap/saturation_analysis.py
+grep -c "^def " endive/saturation_analysis.py
 
 # Find all references to a variable
-grep -n "CONFIG\['analysis'\]" icecap/saturation_analysis.py
+grep -n "CONFIG\['analysis'\]" endive/saturation_analysis.py
 
 # Find where stats are computed
-grep -n "mean_retries\|p50_commit_latency" icecap/saturation_analysis.py
+grep -n "mean_retries\|p50_commit_latency" endive/saturation_analysis.py
 
 # Test a specific function
 pytest tests/test_saturation_analysis.py::TestClass::test_function -v
@@ -178,7 +178,7 @@ This session added:
 4. **Plot regeneration script**: `scripts/regenerate_all_plots.sh`
 
 Key files modified:
-- `icecap/saturation_analysis.py`: +200 lines (stddev, commit rate plot)
+- `endive/saturation_analysis.py`: +200 lines (stddev, commit rate plot)
 - `analysis.toml`: +min_seeds, +commit_rate_over_time_plot
 - `scripts/regenerate_all_plots.sh`: New automation script
 

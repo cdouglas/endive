@@ -1,4 +1,4 @@
-# Icecap: Iceberg Catalog Simulator
+# Endive: Iceberg Catalog Simulator
 
 A discrete-event simulator for Apache Iceberg's optimistic concurrency control (OCC) that characterizes commit throughput and latency under varying workloads.
 
@@ -28,7 +28,7 @@ pip install -e .
 
 ```bash
 # Run experiment 2.1 (single table, false conflicts)
-python -m icecap.main experiment_configs/exp2_1_single_table_false_conflicts.toml --yes
+python -m endive.main experiment_configs/exp2_1_single_table_false_conflicts.toml --yes
 
 # Results saved to: experiments/exp2_1_single_table_false-<hash>/
 ```
@@ -39,7 +39,7 @@ This simulates 1 hour of workload in ~3.6 seconds.
 
 ```bash
 # Run with specific seed
-python -m icecap.main my_config.toml --seed 42 --yes
+python -m endive.main my_config.toml --seed 42 --yes
 
 # Run batch experiments (multiple seeds)
 ./scripts/run_baseline_experiments.sh --seeds 3
@@ -54,13 +54,13 @@ python -m icecap.main my_config.toml --seed 42 --yes
 
 ```bash
 # Analyze experiment 2.1 results
-python -m icecap.saturation_analysis \
+python -m endive.saturation_analysis \
     -i experiments \
     -p "exp2_1_*" \
     -o plots/exp2_1
 
 # Analyze with grouping (e.g., experiment 2.2 by table count)
-python -m icecap.saturation_analysis \
+python -m endive.saturation_analysis \
     -i experiments \
     -p "exp2_2_*" \
     -o plots/exp2_2 \
@@ -122,7 +122,7 @@ pytest tests/test_numerical_accuracy.py -v           # Numerical validation
 pytest tests/test_statistical_rigor.py -v            # Distribution conformance
 
 # With coverage
-pytest tests/ --cov=icecap --cov-report=html
+pytest tests/ --cov=endive --cov-report=html
 
 # Fast subset
 pytest tests/test_simulator.py tests/test_conflict_resolution.py -v

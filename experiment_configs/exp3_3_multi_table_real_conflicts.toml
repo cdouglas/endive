@@ -33,7 +33,7 @@
 # vs (num_tables, real_conflict_probability) for analysis.
 #
 # For each combination, run multiple seeds:
-#   python -m icecap.main experiment_configs/exp3_3_multi_table_real_conflicts.toml
+#   python -m endive.main experiment_configs/exp3_3_multi_table_real_conflicts.toml
 
 [simulation]
 duration_ms = 3600000  # 1 hour (matches baseline for proper comparison)

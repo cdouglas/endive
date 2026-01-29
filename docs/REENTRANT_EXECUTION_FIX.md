@@ -14,7 +14,7 @@
 for seed_num in $(seq 1 $NUM_SEEDS); do
     create_config_variant "$CONFIG" "$TEMP_CONFIG" \
         "inter_arrival.scale=${load}"  # ← No seed parameter!
-    python -m icecap.main "$TEMP_CONFIG"  # ← Generates random seed
+    python -m endive.main "$TEMP_CONFIG"  # ← Generates random seed
 done
 ```
 
@@ -115,11 +115,11 @@ All experiments have been updated with deterministic seed generation. The script
 2. ✅ ~~Test with `--dry-run` and `--quick` modes~~ - **VERIFIED**
 3. **Rebuild Docker image** with fixed script:
    ```bash
-   docker build -t cdouglas/icecap-sim:latest .
+   docker build -t cdouglas/endive-sim:latest .
    ```
 4. **Restart experiments** - will automatically skip all existing results:
    ```bash
    docker run -v $(pwd)/experiments:/app/experiments \
-       cdouglas/icecap-sim:latest \
+       cdouglas/endive-sim:latest \
        ./scripts/run_baseline_experiments.sh --exp3.1 --exp3.2 --exp3.3
    ```

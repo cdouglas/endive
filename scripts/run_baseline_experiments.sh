@@ -249,9 +249,9 @@ else
     source bin/activate
 fi
 
-# Verify icecap module is available
-if ! python -c "import icecap.main" 2>/dev/null; then
-    echo "Error: icecap module not found. Please install with 'pip install -e .'"
+# Verify endive module is available
+if ! python -c "import endive.main" 2>/dev/null; then
+    echo "Error: endive module not found. Please install with 'pip install -e .'"
     exit 1
 fi
 
@@ -294,13 +294,13 @@ run_experiment_background() {
     local description=$3
 
     if [ "$DRY_RUN" = true ]; then
-        log "[DRY RUN] Would run: python -m icecap.main $output_file"
+        log "[DRY RUN] Would run: python -m endive.main $output_file"
         return 0
     fi
 
     # Run simulation in background (auto-confirm with 'Y', disable progress bar for clean logs)
     {
-        echo "Y" | python -m icecap.main --no-progress "$output_file" >> "$LOG_FILE" 2>&1
+        echo "Y" | python -m endive.main --no-progress "$output_file" >> "$LOG_FILE" 2>&1
         exit_code=$?
 
         # Write result to temp file
@@ -1131,16 +1131,16 @@ log "  1. Verify results: find experiments/ -name 'results.parquet' | wc -l"
 log "  2. Check for incomplete runs: find experiments/ -name '.running.parquet'"
 log "  3. Run analysis:"
 if [ "$RUN_EXP2_1" = true ]; then
-    log "     python -m icecap.saturation_analysis -i experiments -p 'exp2_1_*' -o plots/exp2_1"
+    log "     python -m endive.saturation_analysis -i experiments -p 'exp2_1_*' -o plots/exp2_1"
 fi
 if [ "$RUN_EXP2_2" = true ]; then
-    log "     python -m icecap.saturation_analysis -i experiments -p 'exp2_2_*' -o plots/exp2_2 --group-by num_tables"
+    log "     python -m endive.saturation_analysis -i experiments -p 'exp2_2_*' -o plots/exp2_2 --group-by num_tables"
 fi
 if [ "$RUN_EXP3_1" = true ]; then
-    log "     python -m icecap.saturation_analysis -i experiments -p 'exp3_1_*' -o plots/exp3_1 --group-by real_conflict_probability"
+    log "     python -m endive.saturation_analysis -i experiments -p 'exp3_1_*' -o plots/exp3_1 --group-by real_conflict_probability"
 fi
 if [ "$RUN_EXP3_3" = true ]; then
-    log "     python -m icecap.saturation_analysis -i experiments -p 'exp3_3_*' -o plots/exp3_3 --group-by num_tables,real_conflict_probability"
+    log "     python -m endive.saturation_analysis -i experiments -p 'exp3_3_*' -o plots/exp3_3 --group-by num_tables,real_conflict_probability"
 fi
 
 if [ "$DRY_RUN" = true ]; then

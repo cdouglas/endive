@@ -18,7 +18,7 @@ The simulator must implement the following snapshot versioning logic:
 
 ### 1. Transaction Captures Initial Snapshot
 
-**Location**: `icecap/main.py:527`
+**Location**: `endive/main.py:527`
 
 ```python
 def txn_gen(sim, txn_id, catalog):
@@ -33,7 +33,7 @@ def txn_gen(sim, txn_id, catalog):
 
 ### 2. CAS Checks Version Match
 
-**Location**: `icecap/main.py:359-393` (Catalog.try_CAS)
+**Location**: `endive/main.py:359-393` (Catalog.try_CAS)
 
 For catalog-level conflicts (N_GROUPS = 1):
 ```python
@@ -66,7 +66,7 @@ For table-level conflicts (N_GROUPS = N_TABLES):
 
 ### 3. Manifest List Reading on CAS Failure
 
-**Location**: `icecap/main.py:424-452`
+**Location**: `endive/main.py:424-452`
 
 ```python
 def txn_commit(sim, txn, catalog):
@@ -95,7 +95,7 @@ def txn_commit(sim, txn, catalog):
 
 ### 4. Version Update for Next Retry
 
-**Location**: `icecap/main.py:437-480`
+**Location**: `endive/main.py:437-480`
 
 ```python
     # Update to current catalog state
@@ -117,7 +117,7 @@ def txn_commit(sim, txn, catalog):
 
 ### 5. Retry Loop Handles Repeated Failures
 
-**Location**: `icecap/main.py:534-537`
+**Location**: `endive/main.py:534-537`
 
 ```python
 def txn_gen(sim, txn_id, catalog):

@@ -1,1 +1,1 @@
-"""Tests for icecap simulator."""
+"""Tests for endive simulator."""

@@ -15,10 +15,10 @@ import pandas as pd
 import numpy as np
 from pathlib import Path
 
-from icecap.main import configure_from_toml, Catalog, Txn, txn_commit
-import icecap.main
-from icecap.capstats import Stats
-from icecap.test_utils import create_test_config
+from endive.main import configure_from_toml, Catalog, Txn, txn_commit
+import endive.main
+from endive.capstats import Stats
+from endive.test_utils import create_test_config
 import simpy
 
 
@@ -40,17 +40,17 @@ class TestZeroRetries:
             try:
                 configure_from_toml(config_path)
                 np.random.seed(42)
-                icecap.main.STATS = Stats()
-                icecap.main.TABLE_TO_GROUP = {0: 0}
-                icecap.main.GROUP_TO_TABLES = {0: [0]}
+                endive.main.STATS = Stats()
+                endive.main.TABLE_TO_GROUP = {0: 0}
+                endive.main.GROUP_TO_TABLES = {0: [0]}
 
                 # Run simulation
                 env = simpy.Environment()
-                env.process(icecap.main.setup(env))
-                env.run(until=icecap.main.SIM_DURATION_MS)
+                env.process(endive.main.setup(env))
+                env.run(until=endive.main.SIM_DURATION_MS)
 
                 # Analyze results
-                df = pd.DataFrame(icecap.main.STATS.transactions)
+                df = pd.DataFrame(endive.main.STATS.transactions)
                 assert len(df) > 0, "Should have generated transactions"
 
                 # With high contention and zero retries, many should fail
@@ -90,19 +90,19 @@ class TestZeroRetries:
             try:
                 configure_from_toml(config_path)
                 np.random.seed(42)
-                icecap.main.STATS = Stats()
-                icecap.main.TABLE_TO_GROUP, icecap.main.GROUP_TO_TABLES = icecap.main.partition_tables_into_groups(
-                    icecap.main.N_TABLES, icecap.main.N_GROUPS,
-                    icecap.main.GROUP_SIZE_DIST, icecap.main.LONGTAIL_PARAMS
+                endive.main.STATS = Stats()
+                endive.main.TABLE_TO_GROUP, endive.main.GROUP_TO_TABLES = endive.main.partition_tables_into_groups(
+                    endive.main.N_TABLES, endive.main.N_GROUPS,
+                    endive.main.GROUP_SIZE_DIST, endive.main.LONGTAIL_PARAMS
                 )
 
                 # Run simulation
                 env = simpy.Environment()
-                env.process(icecap.main.setup(env))
-                env.run(until=icecap.main.SIM_DURATION_MS)
+                env.process(endive.main.setup(env))
+                env.run(until=endive.main.SIM_DURATION_MS)
 
                 # Analyze results
-                df = pd.DataFrame(icecap.main.STATS.transactions)
+                df = pd.DataFrame(endive.main.STATS.transactions)
                 committed = df[df['status'] == 'committed']
 
                 # With low contention, should have high success rate even with zero retries
@@ -134,19 +134,19 @@ class TestSingleTransaction:
             try:
                 configure_from_toml(config_path)
                 np.random.seed(42)
-                icecap.main.STATS = Stats()
-                icecap.main.TABLE_TO_GROUP, icecap.main.GROUP_TO_TABLES = icecap.main.partition_tables_into_groups(
-                    icecap.main.N_TABLES, icecap.main.N_GROUPS,
-                    icecap.main.GROUP_SIZE_DIST, icecap.main.LONGTAIL_PARAMS
+                endive.main.STATS = Stats()
+                endive.main.TABLE_TO_GROUP, endive.main.GROUP_TO_TABLES = endive.main.partition_tables_into_groups(
+                    endive.main.N_TABLES, endive.main.N_GROUPS,
+                    endive.main.GROUP_SIZE_DIST, endive.main.LONGTAIL_PARAMS
                 )
 
                 # Run simulation
                 env = simpy.Environment()
-                env.process(icecap.main.setup(env))
-                env.run(until=icecap.main.SIM_DURATION_MS)
+                env.process(endive.main.setup(env))
+                env.run(until=endive.main.SIM_DURATION_MS)
 
                 # Analyze results
-                df = pd.DataFrame(icecap.main.STATS.transactions)
+                df = pd.DataFrame(endive.main.STATS.transactions)
 
                 # Should have at least 1 transaction
                 assert len(df) >= 1, "Should have at least one transaction"
@@ -180,17 +180,17 @@ class TestExtremeLoad:
             try:
                 configure_from_toml(config_path)
                 np.random.seed(42)
-                icecap.main.STATS = Stats()
-                icecap.main.TABLE_TO_GROUP = {0: 0}
-                icecap.main.GROUP_TO_TABLES = {0: [0]}
+                endive.main.STATS = Stats()
+                endive.main.TABLE_TO_GROUP = {0: 0}
+                endive.main.GROUP_TO_TABLES = {0: [0]}
 
                 # Run simulation
                 env = simpy.Environment()
-                env.process(icecap.main.setup(env))
-                env.run(until=icecap.main.SIM_DURATION_MS)
+                env.process(endive.main.setup(env))
+                env.run(until=endive.main.SIM_DURATION_MS)
 
                 # Analyze results
-                df = pd.DataFrame(icecap.main.STATS.transactions)
+                df = pd.DataFrame(endive.main.STATS.transactions)
                 assert len(df) > 50, "Should have many transactions with extreme load"
 
                 aborted = df[df['status'] == 'aborted']
@@ -232,17 +232,17 @@ class TestExtremeLoad:
             try:
                 configure_from_toml(config_path)
                 np.random.seed(42)
-                icecap.main.STATS = Stats()
-                icecap.main.TABLE_TO_GROUP = {0: 0}
-                icecap.main.GROUP_TO_TABLES = {0: [0]}
+                endive.main.STATS = Stats()
+                endive.main.TABLE_TO_GROUP = {0: 0}
+                endive.main.GROUP_TO_TABLES = {0: [0]}
 
                 # Run simulation - should complete without errors
                 env = simpy.Environment()
-                env.process(icecap.main.setup(env))
-                env.run(until=icecap.main.SIM_DURATION_MS)
+                env.process(endive.main.setup(env))
+                env.run(until=endive.main.SIM_DURATION_MS)
 
                 # Verify results are valid
-                df = pd.DataFrame(icecap.main.STATS.transactions)
+                df = pd.DataFrame(endive.main.STATS.transactions)
                 assert len(df) > 0, "Should complete with transactions"
 
                 # Verify no NaN or inf values
@@ -272,9 +272,9 @@ class TestLargeVersionGaps:
             try:
                 configure_from_toml(config_path)
                 np.random.seed(42)
-                icecap.main.TABLE_TO_GROUP, icecap.main.GROUP_TO_TABLES = icecap.main.partition_tables_into_groups(
-                    icecap.main.N_TABLES, icecap.main.N_GROUPS,
-                    icecap.main.GROUP_SIZE_DIST, icecap.main.LONGTAIL_PARAMS
+                endive.main.TABLE_TO_GROUP, endive.main.GROUP_TO_TABLES = endive.main.partition_tables_into_groups(
+                    endive.main.N_TABLES, endive.main.N_GROUPS,
+                    endive.main.GROUP_SIZE_DIST, endive.main.LONGTAIL_PARAMS
                 )
 
                 env = simpy.Environment()
@@ -288,7 +288,7 @@ class TestLargeVersionGaps:
 
                 # Manually advance catalog by 150 snapshots
                 catalog.seq = 150
-                for i in range(icecap.main.N_TABLES):
+                for i in range(endive.main.N_TABLES):
                     catalog.tbl[i] = 150
 
                 # Attempt commit - should handle large gap correctly
@@ -327,17 +327,17 @@ class TestBoundaryConditions:
             try:
                 configure_from_toml(config_path)
                 np.random.seed(42)
-                icecap.main.STATS = Stats()
-                icecap.main.TABLE_TO_GROUP = {0: 0}
-                icecap.main.GROUP_TO_TABLES = {0: [0]}
+                endive.main.STATS = Stats()
+                endive.main.TABLE_TO_GROUP = {0: 0}
+                endive.main.GROUP_TO_TABLES = {0: [0]}
 
                 # Run simulation
                 env = simpy.Environment()
-                env.process(icecap.main.setup(env))
-                env.run(until=icecap.main.SIM_DURATION_MS)
+                env.process(endive.main.setup(env))
+                env.run(until=endive.main.SIM_DURATION_MS)
 
                 # Should complete successfully
-                df = pd.DataFrame(icecap.main.STATS.transactions)
+                df = pd.DataFrame(endive.main.STATS.transactions)
                 assert len(df) > 0, "Should generate transactions"
 
                 print(f"✓ Minimum configuration (1 table, 1 group) works")
@@ -367,19 +367,19 @@ class TestBoundaryConditions:
 
                 configure_from_toml(config_path)
                 np.random.seed(42)
-                icecap.main.STATS = Stats()
-                icecap.main.TABLE_TO_GROUP, icecap.main.GROUP_TO_TABLES = icecap.main.partition_tables_into_groups(
-                    icecap.main.N_TABLES, icecap.main.N_GROUPS,
-                    icecap.main.GROUP_SIZE_DIST, icecap.main.LONGTAIL_PARAMS
+                endive.main.STATS = Stats()
+                endive.main.TABLE_TO_GROUP, endive.main.GROUP_TO_TABLES = endive.main.partition_tables_into_groups(
+                    endive.main.N_TABLES, endive.main.N_GROUPS,
+                    endive.main.GROUP_SIZE_DIST, endive.main.LONGTAIL_PARAMS
                 )
 
                 # Run simulation
                 env = simpy.Environment()
-                env.process(icecap.main.setup(env))
-                env.run(until=icecap.main.SIM_DURATION_MS)
+                env.process(endive.main.setup(env))
+                env.run(until=endive.main.SIM_DURATION_MS)
 
                 # Should complete successfully
-                df = pd.DataFrame(icecap.main.STATS.transactions)
+                df = pd.DataFrame(endive.main.STATS.transactions)
                 assert len(df) > 0, "Should generate transactions"
 
                 print(f"✓ Large configuration (100 tables, 50 groups) works")
@@ -410,19 +410,19 @@ class TestBoundaryConditions:
             try:
                 configure_from_toml(config_path)
                 np.random.seed(42)
-                icecap.main.STATS = Stats()
-                icecap.main.TABLE_TO_GROUP, icecap.main.GROUP_TO_TABLES = icecap.main.partition_tables_into_groups(
-                    icecap.main.N_TABLES, icecap.main.N_GROUPS,
-                    icecap.main.GROUP_SIZE_DIST, icecap.main.LONGTAIL_PARAMS
+                endive.main.STATS = Stats()
+                endive.main.TABLE_TO_GROUP, endive.main.GROUP_TO_TABLES = endive.main.partition_tables_into_groups(
+                    endive.main.N_TABLES, endive.main.N_GROUPS,
+                    endive.main.GROUP_SIZE_DIST, endive.main.LONGTAIL_PARAMS
                 )
 
                 # Run simulation
                 env = simpy.Environment()
-                env.process(icecap.main.setup(env))
-                env.run(until=icecap.main.SIM_DURATION_MS)
+                env.process(endive.main.setup(env))
+                env.run(until=endive.main.SIM_DURATION_MS)
 
                 # Should complete with some transactions
-                df = pd.DataFrame(icecap.main.STATS.transactions)
+                df = pd.DataFrame(endive.main.STATS.transactions)
 
                 # With long runtimes, may have transactions that start but don't finish
                 if len(df) > 0:

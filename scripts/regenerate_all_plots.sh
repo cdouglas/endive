@@ -119,7 +119,7 @@ run_analysis() {
     mkdir -p "$output_dir"
 
     # Build command
-    local cmd="python -m icecap.saturation_analysis -i experiments -p \"$pattern\" -o \"$output_dir\""
+    local cmd="python -m endive.saturation_analysis -i experiments -p \"$pattern\" -o \"$output_dir\""
 
     # Add config file if using consolidated mode
     if [ "$USE_CONSOLIDATED" = true ]; then
@@ -168,7 +168,7 @@ run_analysis_with_filter() {
     mkdir -p "$output_dir"
 
     # Build command
-    local cmd="python -m icecap.saturation_analysis -i experiments -p \"$pattern\" -o \"$output_dir\""
+    local cmd="python -m endive.saturation_analysis -i experiments -p \"$pattern\" -o \"$output_dir\""
 
     # Add config file if using consolidated mode
     if [ "$USE_CONSOLIDATED" = true ]; then

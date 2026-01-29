@@ -8,7 +8,7 @@ import sys
 import tomllib
 import numpy as np
 from tqdm import tqdm
-from icecap.capstats import Stats, truncated_zipf_pmf, lognormal_params_from_mean_and_sigma
+from endive.capstats import Stats, truncated_zipf_pmf, lognormal_params_from_mean_and_sigma
 from collections import defaultdict
 from dataclasses import dataclass, field
 
@@ -149,7 +149,7 @@ def compute_experiment_hash(config: dict) -> str:
 
     The hash includes:
     1. All config parameters except 'seed' and 'experiment.label'
-    2. Hash of simulator code files (icecap/*.py)
+    2. Hash of simulator code files (endive/*.py)
 
     This ensures that:
     - Same config → same hash (reproducible)
@@ -182,10 +182,10 @@ def compute_experiment_hash(config: dict) -> str:
 
     # 2. Hash simulator code files
     code_hash = hashlib.sha256()
-    icecap_dir = Path(__file__).parent
+    endive_dir = Path(__file__).parent
 
-    # Include all .py files in icecap/ directory
-    for py_file in sorted(icecap_dir.glob("*.py")):
+    # Include all .py files in endive/ directory
+    for py_file in sorted(endive_dir.glob("*.py")):
         with open(py_file, 'rb') as f:
             code_hash.update(f.read())
 
@@ -573,7 +573,7 @@ def calculate_backoff_time(retry_number: int) -> float:
 def print_configuration():
     """Print configuration summary."""
     print("\n" + "="*70)
-    print("  ICECAP SIMULATOR CONFIGURATION")
+    print("  ENDIVE SIMULATOR CONFIGURATION")
     print("="*70)
 
     print("\n[Simulation]")
@@ -1076,7 +1076,7 @@ def prepare_experiment_output(config: dict, config_file: str, actual_seed: int) 
 
 
 def cli():
-    """CLI entry point for icecap simulator."""
+    """CLI entry point for endive simulator."""
     parser = argparse.ArgumentParser(
         description="Iceberg-style catalog simulator for exploring commit latency tradeoffs"
     )

@@ -189,7 +189,7 @@ grep "✗ Failed" -A 5 experiment_logs/baseline_experiments_*.log
 # Common causes:
 # - Disk space full (check: df -h)
 # - Permission issues (check: ls -l experiments/)
-# - Config syntax errors (validate: python -m icecap.main <config> --dry-run)
+# - Config syntax errors (validate: python -m endive.main <config> --dry-run)
 ```
 
 ### Kill Running Experiments
@@ -238,12 +238,12 @@ See `ANALYSIS_GUIDE.md` (to be created) or:
 
 ```bash
 # Generate plots for Experiment 2.1
-python -m icecap.analysis all \
+python -m endive.analysis all \
     -i experiments/exp2_1_* \
     -o plots/exp2_1
 
 # Generate plots for Experiment 2.2
-python -m icecap.analysis all \
+python -m endive.analysis all \
     -i experiments/exp2_2_* \
     -o plots/exp2_2
 ```

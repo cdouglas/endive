@@ -84,7 +84,7 @@ This ordering enables:
 
 ```python
 import pandas as pd
-from icecap import saturation_analysis
+from endive import saturation_analysis
 
 # Automatic: Uses consolidated file by default
 saturation_analysis.CONFIG = saturation_analysis.get_default_config()
@@ -118,10 +118,10 @@ Override via CLI:
 
 ```bash
 # Force using consolidated file
-python -m icecap.saturation_analysis --use-consolidated
+python -m endive.saturation_analysis --use-consolidated
 
 # Force using original files (fallback)
-python -m icecap.saturation_analysis --no-use-consolidated
+python -m endive.saturation_analysis --no-use-consolidated
 ```
 
 ## Migration and Compatibility
@@ -244,10 +244,10 @@ print(f"Serialized size: {meta.serialized_size}")  # ~1.39 GB
 
 ```bash
 # Reduce sample size in analysis
-python -m icecap.saturation_analysis --pattern "exp2_1*" --min-seeds 3
+python -m endive.saturation_analysis --pattern "exp2_1*" --min-seeds 3
 
 # Or use original files (slower but lower memory)
-python -m icecap.saturation_analysis --no-use-consolidated
+python -m endive.saturation_analysis --no-use-consolidated
 ```
 
 ### Corrupted Consolidated File
@@ -282,7 +282,7 @@ Potential improvements to consolidated format:
 ## References
 
 - **Implementation**: `scripts/consolidate_all_experiments_incremental.py`
-- **Analysis code**: `icecap/saturation_analysis.py:load_and_aggregate_results_consolidated()`
+- **Analysis code**: `endive/saturation_analysis.py:load_and_aggregate_results_consolidated()`
 - **Verification**: `scripts/verify_consolidation_efficient.py`
 - **Testing**: `scripts/test_consolidated_analysis.py`
 - **Parquet docs**: https://parquet.apache.org/docs/
