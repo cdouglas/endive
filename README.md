@@ -1,26 +1,27 @@
 # Endive: Iceberg Catalog Simulator
 
-A discrete-event simulator for Apache Iceberg's optimistic concurrency control (OCC) that characterizes commit throughput and latency under varying workloads.
+One-off, deterministic discrete-event simulator for Apache Iceberg workloads.
+Endive simulates workloads of spurious conflicts, measuring commit throughput
+and latency under varying conditions. Object store latency, etc. are drawn from
+distributions.
 
-## What This Simulates
+## What Endive Simulates
 
-Apache Iceberg uses optimistic concurrency control with compare-and-swap (CAS) operations. When multiple writers commit simultaneously:
+Iceberg installs new versions of tables using a compare-and-set (CAS) in its
+Catalog. If the CAS fails but the transaction commutes with the new state, it
+will merge its metadata with the concurrent transaction(s) before retrying.
 
-1. Failed CAS triggers conflict resolution
-2. **False conflicts** (version changed, no data overlap): read metadata only (~1ms)
-3. **Real conflicts** (overlapping changes): read and rewrite manifest files (~400ms+)
-4. Transaction retries with optional exponential backoff
+A lot of attention is paid to the root of each table (i.e., the
+[Catalog](https://iceberg.apache.org/rest-catalog-spec/)) and formats at the
+leaves (e.g., Apaches [ORC](https://orc.apache.org) and
+[Parquet](https://parquet.apache.org), [Vortex](https://vortex.dev/),
+[F3](https://dl.acm.org/doi/abs/10.1145/3749163))),
+[AnyBlox](https://dl.acm.org/doi/10.14778/3749646.3749672), but the metadata
+near the root of the table can also be a bottleneck even when there is no real
+conflict and the catalog is unreasonably fast.
 
-The simulator explores: When does throughput saturate? What causes latency to explode?
-
-## Installation
-
-```bash
-python3 -m venv .
-source bin/activate
-pip install -r requirements.txt
-pip install -e .
-```
+There are simpler ways to model these conflicts, but it was honestly fun to
+develop using Claude Code and parallelize simulation runs.
 
 ## Quick Start
 
@@ -31,21 +32,6 @@ pip install -e .
 python -m endive.main experiment_configs/exp2_1_single_table_false_conflicts.toml --yes
 
 # Results saved to: experiments/exp2_1_single_table_false-<hash>/
-```
-
-This simulates 1 hour of workload in ~3.6 seconds.
-
-### Command Line Options
-
-```bash
-# Run with specific seed
-python -m endive.main my_config.toml --seed 42 --yes
-
-# Run batch experiments (multiple seeds)
-./scripts/run_baseline_experiments.sh --seeds 3
-
-# Quick test mode (2 minutes simulation)
-./scripts/run_baseline_experiments.sh --quick --seeds 1
 ```
 
 ## Analysis
