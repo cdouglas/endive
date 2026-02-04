@@ -35,7 +35,19 @@ This document tracks shortcuts, deferred tasks, and technical debt incurred duri
 
 ## Phase 2: Manifest List Append
 
-*To be documented when implemented*
+### Shortcuts Taken
+
+1. **Simplified Retry Logic**: When manifest append fails due to version mismatch, we immediately read and retry. Real implementations might queue the retry or apply backoff.
+
+2. **No Manifest Content Modeling**: The manifest list append doesn't model actual manifest content - it only checks table versions. Real implementations would need to merge manifest entries.
+
+3. **Version Mismatch Handling**: On version mismatch, we update the dirty version and retry. This doesn't model the complexity of detecting whether the version change is compatible (e.g., non-overlapping data files).
+
+### Deferred Tasks
+
+1. **Manifest Content Merge**: When manifest append fails, real implementations may need to merge content from the new version. This is deferred as it requires more complex manifest modeling.
+
+2. **Per-Table Append Statistics**: Currently we track global manifest_append_success/retry counts. Per-table breakdowns could be useful for analysis.
 
 ---
 

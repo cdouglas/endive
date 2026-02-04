@@ -54,7 +54,7 @@ class Stats:
         self.manifest_files_read = 0
         self.manifest_files_written = 0
 
-        # Append mode statistics
+        # Append mode statistics (catalog)
         self.append_physical_success = 0   # Append landed at expected offset
         self.append_logical_success = 0    # + verification passed -> commit
         self.append_logical_conflict = 0   # Append landed but conflict detected
@@ -62,6 +62,10 @@ class Stats:
         self.append_compactions_triggered = 0  # Sealed transactions triggering compaction
         self.append_compactions_completed = 0  # Successful compaction CAS operations
         self.append_dedup_hits = 0         # Transaction already committed (deduplication)
+
+        # Manifest list append mode statistics
+        self.manifest_append_success = 0   # Manifest list append at correct version
+        self.manifest_append_retry = 0     # Manifest list append version mismatch
 
         # Collect detailed transaction data for export
         self.transactions = []
@@ -171,7 +175,7 @@ class Stats:
         # Print append mode statistics
         total_appends = self.append_physical_success + self.append_physical_failure
         if total_appends > 0:
-            print(f"\n  Append Mode Statistics:")
+            print(f"\n  Append Mode Statistics (Catalog):")
             print(f"    Total append attempts: {total_appends}")
             print(f"    Physical success: {self.append_physical_success} ({100*self.append_physical_success/total_appends:.1f}%)")
             print(f"    Physical failure: {self.append_physical_failure} ({100*self.append_physical_failure/total_appends:.1f}%)")
@@ -182,3 +186,11 @@ class Stats:
             print(f"    Compactions completed: {self.append_compactions_completed}")
             if self.append_dedup_hits > 0:
                 print(f"    Deduplication hits: {self.append_dedup_hits}")
+
+        # Print manifest list append statistics
+        total_ml_appends = self.manifest_append_success + self.manifest_append_retry
+        if total_ml_appends > 0:
+            print(f"\n  Manifest List Append Statistics:")
+            print(f"    Total operations: {total_ml_appends}")
+            print(f"    Success: {self.manifest_append_success} ({100*self.manifest_append_success/total_ml_appends:.1f}%)")
+            print(f"    Retry (version mismatch): {self.manifest_append_retry} ({100*self.manifest_append_retry/total_ml_appends:.1f}%)")

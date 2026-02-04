@@ -67,6 +67,8 @@ LOG_ENTRY_SIZE: int  # Average bytes per log entry (for threshold calculation)
 T_APPEND: dict  # {'mean': float, 'stddev': float} - Append operation latency
 T_LOG_ENTRY_READ: dict  # {'mean': float, 'stddev': float} - Per-entry log read latency
 T_COMPACTION: dict  # {'mean': float, 'stddev': float} - Compaction CAS latency (larger payload)
+# Manifest list append mode
+MANIFEST_LIST_MODE: str  # "rewrite" (default) or "append"
 
 STATS = Stats()
 
@@ -218,7 +220,7 @@ def configure_from_toml(config_file: str):
     global REAL_CONFLICT_PROBABILITY, CONFLICTING_MANIFESTS_DIST, CONFLICTING_MANIFESTS_PARAMS
     global RETRY_BACKOFF_ENABLED, RETRY_BACKOFF_BASE_MS, RETRY_BACKOFF_MULTIPLIER, RETRY_BACKOFF_MAX_MS, RETRY_BACKOFF_JITTER
     global EXPERIMENT_LABEL
-    global CATALOG_MODE, COMPACTION_THRESHOLD, LOG_ENTRY_SIZE
+    global CATALOG_MODE, COMPACTION_THRESHOLD, LOG_ENTRY_SIZE, MANIFEST_LIST_MODE
     global T_APPEND, T_LOG_ENTRY_READ, T_COMPACTION
 
     with open(config_file, "rb") as f:
@@ -313,6 +315,9 @@ def configure_from_toml(config_file: str):
     mean = config["transaction"]["runtime"]["mean"]
     sigma = config["transaction"]["runtime"]["sigma"]
     T_RUNTIME_MU, T_RUNTIME_SIGMA = lognormal_params_from_mean_and_sigma(mean, sigma)
+
+    # Load manifest list mode
+    MANIFEST_LIST_MODE = config.get("transaction", {}).get("manifest_list_mode", "rewrite")
 
     # Load inter-arrival distribution parameters
     INTER_ARRIVAL_DIST = config["transaction"]["inter_arrival"]["distribution"]
@@ -1026,6 +1031,55 @@ def txn_ml_w(sim, txn):
         yield sim.timeout(get_manifest_list_latency('write'))
     logger.debug(f"{sim.now} TXN {txn.id} ML_W")
 
+
+def txn_ml_append(sim, txn, catalog):
+    """Append to manifest lists instead of rewriting (append mode).
+
+    For each table being written, attempts a conditional append at the
+    expected table version. If the version has changed, the append fails
+    and must be retried after reading the new manifest state.
+
+    This function models per-table atomic append operations where:
+    - Success: table version matches, append succeeds
+    - Failure: table version changed, need to retry
+
+    Args:
+        sim: SimPy environment
+        txn: Transaction being committed
+        catalog: Catalog (either Catalog or AppendCatalog)
+
+    Yields:
+        SimPy timeout events for I/O operations
+    """
+    for tbl_id, expected_ver in txn.v_dirty.items():
+        if tbl_id not in txn.v_tblw:
+            continue  # Only append for tables we're writing
+
+        current_ver = catalog.tbl[tbl_id]
+
+        if current_ver == expected_ver:
+            # Version matches - append succeeds
+            yield sim.timeout(get_manifest_list_latency('write'))
+            STATS.manifest_append_success += 1
+            logger.debug(f"{sim.now} TXN {txn.id} ML_APPEND table {tbl_id} v{expected_ver} OK")
+        else:
+            # Version mismatch - need to read current state and potentially retry
+            STATS.manifest_append_retry += 1
+            logger.debug(f"{sim.now} TXN {txn.id} ML_APPEND table {tbl_id} "
+                        f"MISMATCH (expected v{expected_ver}, got v{current_ver})")
+
+            # Read current manifest list to get new state
+            yield sim.timeout(get_manifest_list_latency('read'))
+
+            # Update our view of the table version
+            txn.v_dirty[tbl_id] = current_ver
+
+            # Retry the append with updated version reference
+            yield sim.timeout(get_manifest_list_latency('write'))
+
+    logger.debug(f"{sim.now} TXN {txn.id} ML_APPEND complete")
+
+
 def txn_commit(sim, txn, catalog):
     """Attempt to commit transaction with conflict resolution.
 
@@ -1239,8 +1293,11 @@ def txn_gen(sim, txn_id, catalog):
 
     # run the transaction
     yield sim.timeout(txn.t_runtime)
-    # write the manifest list
-    yield sim.process(txn_ml_w(sim, txn))
+    # write the manifest list (use append mode if configured)
+    if MANIFEST_LIST_MODE == "append":
+        yield sim.process(txn_ml_append(sim, txn, catalog))
+    else:
+        yield sim.process(txn_ml_w(sim, txn))
     while txn.t_commit < 0 and txn.t_abort < 0:
         # attempt commit
         txn.n_retries += 1

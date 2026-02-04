@@ -500,5 +500,169 @@ T_MANIFEST_FILE.write.stddev = 6
                 os.unlink(append_config_path)
 
 
+class TestManifestListAppend:
+    """Test manifest list append functionality."""
+
+    def test_manifest_list_append_runs_successfully(self):
+        """Verify manifest list append mode runs without errors."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Create config with manifest_list_mode = "append"
+            config_content = f"""[simulation]
+duration_ms = 15000
+output_path = "results.parquet"
+seed = 42
+
+[catalog]
+num_tables = 10
+mode = "cas"
+
+[transaction]
+retry = 5
+runtime.min = 100
+runtime.mean = 200
+runtime.sigma = 1.5
+manifest_list_mode = "append"
+inter_arrival.distribution = "exponential"
+inter_arrival.scale = 300.0
+inter_arrival.min = 100.0
+inter_arrival.max = 1000.0
+inter_arrival.mean = 500.0
+inter_arrival.std_dev = 100.0
+inter_arrival.value = 500.0
+ntable.zipf = 2.0
+seltbl.zipf = 1.4
+seltblw.zipf = 1.2
+
+[storage]
+max_parallel = 4
+min_latency = 5
+T_CAS.mean = 100
+T_CAS.stddev = 10
+T_METADATA_ROOT.read.mean = 50
+T_METADATA_ROOT.read.stddev = 5
+T_METADATA_ROOT.write.mean = 60
+T_METADATA_ROOT.write.stddev = 6
+T_MANIFEST_LIST.read.mean = 50
+T_MANIFEST_LIST.read.stddev = 5
+T_MANIFEST_LIST.write.mean = 60
+T_MANIFEST_LIST.write.stddev = 6
+T_MANIFEST_FILE.read.mean = 50
+T_MANIFEST_FILE.read.stddev = 5
+T_MANIFEST_FILE.write.mean = 60
+T_MANIFEST_FILE.write.stddev = 6
+"""
+            config_path = os.path.join(tmpdir, "ml_append.toml")
+            with open(config_path, 'w') as f:
+                f.write(config_content)
+
+            try:
+                df = run_simulation_from_config(config_path)
+
+                # Should have some transactions
+                assert len(df) > 0
+
+                # Should have committed transactions
+                committed = df[df['status'] == 'committed']
+                assert len(committed) > 0
+
+                # Manifest append stats should be populated
+                stats = endive.main.STATS
+                total_ml = stats.manifest_append_success + stats.manifest_append_retry
+                assert total_ml > 0, "Manifest append operations should have occurred"
+
+                print(f"Manifest list append test passed:")
+                print(f"  Total txns: {len(df)}")
+                print(f"  Committed: {len(committed)}")
+                print(f"  ML append success: {stats.manifest_append_success}")
+                print(f"  ML append retry: {stats.manifest_append_retry}")
+
+            finally:
+                os.unlink(config_path)
+
+    def test_manifest_list_append_with_catalog_append(self):
+        """Test combined manifest list append and catalog append modes."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Create config with both append modes enabled
+            config_content = f"""[simulation]
+duration_ms = 15000
+output_path = "results.parquet"
+seed = 42
+
+[catalog]
+num_tables = 10
+mode = "append"
+compaction_threshold = 10000000
+log_entry_size = 100
+
+[transaction]
+retry = 5
+runtime.min = 100
+runtime.mean = 200
+runtime.sigma = 1.5
+manifest_list_mode = "append"
+inter_arrival.distribution = "exponential"
+inter_arrival.scale = 300.0
+inter_arrival.min = 100.0
+inter_arrival.max = 1000.0
+inter_arrival.mean = 500.0
+inter_arrival.std_dev = 100.0
+inter_arrival.value = 500.0
+ntable.zipf = 2.0
+seltbl.zipf = 1.4
+seltblw.zipf = 1.2
+
+[storage]
+max_parallel = 4
+min_latency = 5
+T_CAS.mean = 100
+T_CAS.stddev = 10
+T_METADATA_ROOT.read.mean = 50
+T_METADATA_ROOT.read.stddev = 5
+T_METADATA_ROOT.write.mean = 60
+T_METADATA_ROOT.write.stddev = 6
+T_MANIFEST_LIST.read.mean = 50
+T_MANIFEST_LIST.read.stddev = 5
+T_MANIFEST_LIST.write.mean = 60
+T_MANIFEST_LIST.write.stddev = 6
+T_MANIFEST_FILE.read.mean = 50
+T_MANIFEST_FILE.read.stddev = 5
+T_MANIFEST_FILE.write.mean = 60
+T_MANIFEST_FILE.write.stddev = 6
+T_APPEND.mean = 50
+T_APPEND.stddev = 5
+T_LOG_ENTRY_READ.mean = 5
+T_LOG_ENTRY_READ.stddev = 1
+T_COMPACTION.mean = 200
+T_COMPACTION.stddev = 20
+"""
+            config_path = os.path.join(tmpdir, "combined.toml")
+            with open(config_path, 'w') as f:
+                f.write(config_content)
+
+            try:
+                df = run_simulation_from_config(config_path)
+
+                # Should have some transactions
+                assert len(df) > 0
+
+                # Both catalog append and manifest append stats should be populated
+                stats = endive.main.STATS
+                total_catalog = stats.append_physical_success + stats.append_physical_failure
+                total_ml = stats.manifest_append_success + stats.manifest_append_retry
+
+                assert total_catalog > 0, "Catalog append operations should have occurred"
+                assert total_ml > 0, "Manifest append operations should have occurred"
+
+                print(f"Combined append modes test passed:")
+                print(f"  Total txns: {len(df)}")
+                print(f"  Catalog append success: {stats.append_physical_success}")
+                print(f"  Catalog append failure: {stats.append_physical_failure}")
+                print(f"  ML append success: {stats.manifest_append_success}")
+                print(f"  ML append retry: {stats.manifest_append_retry}")
+
+            finally:
+                os.unlink(config_path)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
