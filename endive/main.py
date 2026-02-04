@@ -1136,6 +1136,7 @@ def txn_commit_append(sim, txn, catalog: AppendCatalog):
 
     Key insight: Physical conflict rate is an upper bound on logical conflict rate.
     - Physical failure (offset moved): Just retry at new offset (returned by failed append)
+    - After physical success: Must re-read catalog to discover logical outcome
     - Logical failure (table conflict): Must repair - read manifest list, resolve conflicts
 
     The intention record contains inlined table metadata, so catalog merge yields
@@ -1171,6 +1172,11 @@ def txn_commit_append(sim, txn, catalog: AppendCatalog):
 
     STATS.append_physical_success += 1
 
+    # Physical success - but transaction doesn't know logical outcome yet
+    # Must re-read catalog to discover if intention record was applied
+    # The simulator computed logical_success, but we model the I/O cost
+    yield sim.timeout(get_cas_latency() / 2)  # Read catalog to discover outcome
+
     if logical_success:
         # Logical success - transaction committed
         STATS.append_logical_success += 1
@@ -1178,8 +1184,8 @@ def txn_commit_append(sim, txn, catalog: AppendCatalog):
         STATS.commit(txn)
         logger.debug(f"{sim.now} TXN {txn.id} APPEND_COMMIT")
     else:
-        # Logical failure - table version conflict
-        # Must repair: read table metadata (inlined in catalog), manifest list
+        # Logical failure - table version conflict discovered on re-read
+        # Must repair: read manifest list, resolve conflicts
         STATS.append_logical_conflict += 1
         logger.debug(f"{sim.now} TXN {txn.id} APPEND_LOGICAL_CONFLICT")
 
@@ -1188,7 +1194,7 @@ def txn_commit_append(sim, txn, catalog: AppendCatalog):
             STATS.abort(txn)
             return
 
-        # Table metadata is inlined in catalog - no separate read needed
+        # Table metadata is inlined in catalog - already read above
         # Update transaction state from catalog (merged state)
         txn.v_log_offset = catalog.log_offset
         v_catalog = {}

@@ -56,6 +56,11 @@ The key insight is that **physical conflict rate bounds logical conflict rate**.
 failures are cheap (just retry at new offset); logical failures require reading manifest
 lists to repair.
 
+**Important:** The transaction only knows whether the physical append succeeded. After
+physical success, it must re-read the catalog to discover the logical outcome. The
+**simulator** knows the outcome (computed at append time), but models the I/O cost
+of the transaction discovering it.
+
 ```
 Transaction starts:
   1. Capture catalog.log_offset as v_log_offset
@@ -64,21 +69,29 @@ Transaction starts:
 Transaction commits (txn_commit_append):
   1. If catalog.sealed → perform compaction CAS first
   2. Create intention record with tables_written, tables_read
-  3. Attempt append with validation:
+  3. Attempt physical append at expected offset:
 
      Physical Failure (offset moved):
        - New offset returned by failed append
        - Retry at new offset (no I/O needed)
 
-     Physical Success + Logical Success:
-       - Offset matched AND table versions matched
-       - Transaction committed, table state updated
+     Physical Success:
+       - Intention record appended to log
        - If log exceeds threshold → seal for compaction
 
-     Physical Success + Logical Failure:
-       - Offset matched BUT table versions conflict
+  4. Re-read catalog to discover logical outcome (I/O cost modeled)
+     - Simulator already computed outcome, but transaction must "discover" it
+
+  5. Based on logical outcome:
+
+     Logical Success:
+       - Intention record was applied (table versions matched)
+       - Transaction committed
+
+     Logical Failure:
+       - Table versions conflicted, intention record not applied
        - Must repair: read manifest list, resolve conflicts
-       - Table metadata is inlined, so catalog merge yields table state
+       - Table metadata is inlined, so catalog state already available
        - If tables commute (no overlapping data), no manifest re-append needed
 ```
 
