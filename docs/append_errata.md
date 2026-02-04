@@ -87,40 +87,38 @@ Phase 3 was largely completed during Phases 1 and 2 implementation:
 
 ---
 
-## Protocol Correction: Physical Append vs Verification
+## Protocol Simplification: Validation at Append Time
 
-### Issue Identified
+### Model Refinement
 
-The initial implementation incorrectly treated physical append success as transaction commit.
-This was incorrect - the real LogCatalogFormat protocol requires:
+The implementation was simplified based on the insight that the simulation does not need
+to store log entries. The catalog "knows" whether intention records will be applied because
+validation happens at append time (same as CAS, but at table-level).
 
-1. Physical append only appends entry to log
-2. After physical success, must re-read entire catalog (checkpoint + log)
-3. During re-read, each log entry is verified in order against evolving state
-4. Only transactions that pass verification are committed
-5. Transaction checks if its ID is in the committed set
+### Key Insights
 
-### Fix Applied
+1. **Physical conflict rate bounds logical conflict rate**: Physical failures (offset moved)
+   are cheap - just retry at new offset (returned by failed append). Logical failures
+   (table version mismatch) require reading manifest lists to repair.
 
-- `try_APPEND()` now returns `bool` (physical success only)
-- Added `read_and_verify()` to replay log and check committed status
-- Added `_verify_entry()` for per-entry verification against current state
-- Added checkpoint state (`checkpoint_tbl`, `checkpoint_committed`) for compaction
-- Rewrote `txn_commit_append()` with correct verification flow
+2. **No log storage needed**: The simulation tracks:
+   - `log_offset` for physical conflict detection
+   - `tbl` for table-level validation
+   - `committed_txn` for deduplication
 
-### Remaining Simplifications
+3. **Inlined table metadata**: The intention record contains table metadata, so catalog
+   merge yields table state directly without separate storage trip.
 
-1. **Verification Cost**: In the real implementation, verification is done once per read
-   (processing each entry as it's read). We model this as separate re-read I/O cost plus
-   CPU-free verification. The actual cost difference is negligible for simulation purposes.
+4. **Commuting transactions**: If tables commute (no overlapping data files), no need
+   to re-append to manifest list after logical failure.
 
-2. **Checkpoint Replay**: On each `read_and_verify()` call, we rebuild state from checkpoint
-   by replaying all log entries. Real implementations cache this state. This could be
-   optimized for very long simulations, but compaction keeps log size bounded.
+### Changes Made
 
-3. **Concurrent Verification**: Multiple transactions calling `read_and_verify()` at the
-   same time will all get consistent results (same committed set). This matches real
-   behavior where the log is immutable (append-only).
+- `try_APPEND()` now returns `(physical_success, logical_success)` tuple
+- Validation happens inside `try_APPEND()`, same as CAS but per-table
+- Removed `log_entries` list, `read_and_verify()`, `_verify_entry()` methods
+- Physical failure: Just retry at new offset (no I/O)
+- Logical failure: Read manifest list, resolve conflicts (same as CAS conflict resolution)
 
 ---
 
@@ -144,4 +142,4 @@ This was incorrect - the real LogCatalogFormat protocol requires:
 
 ---
 
-*Last updated: Protocol correction (physical append vs verification)*
+*Last updated: Protocol simplification (validation at append time)*

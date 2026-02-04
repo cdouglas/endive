@@ -29,26 +29,32 @@ In Iceberg's `LogCatalogFormat`:
 ┌─────────────────────────────────────────────────────────────┐
 │                      AppendCatalog                          │
 ├─────────────────────────────────────────────────────────────┤
-│  seq: int              # Compatibility with Txn class       │
-│  tbl: list[int]        # Per-table versions                 │
-│  log_offset: int       # Current log byte position          │
-│  log_entries: list     # In-memory log (simulation only)    │
-│  checkpoint_offset: int                                     │
-│  sealed: bool          # True if compaction needed          │
-│  committed_txn: set    # For deduplication                  │
+│  seq: int                    # Number of committed txns     │
+│  tbl: list[int]              # Per-table versions           │
+│  log_offset: int             # Current log byte position    │
+│  checkpoint_offset: int      # Offset at last compaction    │
+│  entries_since_checkpoint: int                              │
+│  sealed: bool                # True if compaction needed    │
+│  committed_txn: set          # Successful transaction IDs   │
 └─────────────────────────────────────────────────────────────┘
 ```
 
+**Key insight:** The simulation does NOT store log entries. The catalog "knows" whether
+intention records will be applied because validation happens at append time. We track:
+- `log_offset` for physical conflict detection
+- `tbl` for table-level validation (like CAS, but per-table)
+- `committed_txn` for deduplication
+
 **Key simplifications:**
 - Log entries are fixed-size (`LOG_ENTRY_SIZE`, default 100 bytes) rather than variable
-- Log is stored in-memory as a list rather than serialized bytes
 - Transaction IDs are integers rather than UUIDs
+- Table metadata is inlined in intention records (catalog merge yields table state)
 
 ### Commit Protocol
 
-The key insight is that **physical append success ≠ transaction success**. After a successful
-physical append, the transaction must re-read the entire catalog and verify its entry was
-accepted.
+The key insight is that **physical conflict rate bounds logical conflict rate**. Physical
+failures are cheap (just retry at new offset); logical failures require reading manifest
+lists to repair.
 
 ```
 Transaction starts:
@@ -57,59 +63,59 @@ Transaction starts:
 
 Transaction commits (txn_commit_append):
   1. If catalog.sealed → perform compaction CAS first
-  2. Create LogEntry with tables_written, tables_read
-  3. Attempt physical append at expected offset:
+  2. Create intention record with tables_written, tables_read
+  3. Attempt append with validation:
 
      Physical Failure (offset moved):
-       - Re-read log entries since our snapshot
-       - Update v_log_offset to current
-       - Retry physical append at new offset
+       - New offset returned by failed append
+       - Retry at new offset (no I/O needed)
 
-     Physical Success (offset matches):
-       - Entry appended to log
+     Physical Success + Logical Success:
+       - Offset matched AND table versions matched
+       - Transaction committed, table state updated
        - If log exceeds threshold → seal for compaction
-       - Proceed to verification (step 4)
 
-  4. Re-read entire catalog (checkpoint + log)
-  5. Verify all log entries in order:
-     - For each entry, check table versions match expected
-     - Verified entries update table state and join committed set
-     - Conflicting entries are rejected (not in committed set)
-
-  6. Check if our transaction ID is in committed set:
-
-     Logical Success (in committed set):
-       - Transaction committed successfully
-       - Table state already updated during verification
-
-     Logical Failure (not in committed set):
-       - Another entry conflicted with ours
-       - Must do full retry (re-read table metadata, update manifest)
+     Physical Success + Logical Failure:
+       - Offset matched BUT table versions conflict
+       - Must repair: read manifest list, resolve conflicts
+       - Table metadata is inlined, so catalog merge yields table state
+       - If tables commute (no overlapping data), no manifest re-append needed
 ```
 
-### Verification Logic
+### Validation at Append Time
 
-During verification, each log entry is checked against the evolving catalog state:
+Validation happens inside `try_APPEND`, same as CAS but at table-level:
 
 ```python
-def _verify_entry(entry, current_tbl):
-    # Check all written tables have expected versions
-    for tbl_id, new_ver in entry.tables_written.items():
-        expected_ver = new_ver - 1  # Writing v+1 expects current to be v
-        if current_tbl[tbl_id] != expected_ver:
-            return False  # Conflict!
+def try_APPEND(self, sim, txn, entry) -> tuple[bool, bool]:
+    # Physical check: Does offset match?
+    if self.log_offset != txn.v_log_offset:
+        return (False, None)  # Physical failure - retry at new offset
 
-    # Check all read tables haven't changed
+    # Logical check: Do table versions match? (like CAS, but per-table)
+    for tbl_id, new_ver in entry.tables_written.items():
+        expected_ver = new_ver - 1
+        if self.tbl[tbl_id] != expected_ver:
+            self.log_offset += LOG_ENTRY_SIZE  # Entry in log, not applied
+            return (True, False)  # Logical failure
+
+    # Check read-set for serializable isolation
     for tbl_id, read_ver in entry.tables_read.items():
         if tbl_id not in entry.tables_written:
-            if current_tbl[tbl_id] != read_ver:
-                return False  # Conflict!
+            if self.tbl[tbl_id] != read_ver:
+                self.log_offset += LOG_ENTRY_SIZE
+                return (True, False)
 
-    return True  # Entry verified - will be applied
+    # Success - update table state
+    for tbl_id, new_ver in entry.tables_written.items():
+        self.tbl[tbl_id] = new_ver
+    self.committed_txn.add(entry.txn_id)
+    self.log_offset += LOG_ENTRY_SIZE
+    return (True, True)  # Committed
 ```
 
-This allows concurrent transactions writing to **different tables** to both physically append
-and both pass verification, unlike CAS mode where any concurrent commit causes failure.
+This allows concurrent transactions writing to **different tables** to both succeed,
+unlike CAS mode where any concurrent commit causes failure.
 
 ### Compaction
 
@@ -118,11 +124,11 @@ Compaction is triggered when **either** condition is met (minimum of the two):
 2. **Entry count threshold**: `entries_since_checkpoint >= COMPACTION_MAX_ENTRIES` (if > 0)
 
 When triggered:
-1. The committing transaction is marked as `sealed`
+1. The committing transaction seals the catalog
 2. Next commit must perform CAS to compact:
    - Write new checkpoint containing current state
-   - Clear log entries
-   - Reset checkpoint_offset and entries_since_checkpoint
+   - Update checkpoint_offset to current log_offset
+   - Reset entries_since_checkpoint to 0
 
 ## Manifest List Append Model
 

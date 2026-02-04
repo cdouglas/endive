@@ -11,7 +11,6 @@ from endive.main import (
     configure_from_toml,
     AppendCatalog,
     LogEntry,
-    check_logical_conflict,
     Txn,
 )
 from endive.capstats import Stats
@@ -141,8 +140,8 @@ class TestAppendCatalog:
         assert len(catalog.tbl) == endive.main.N_TABLES
         assert all(v == 0 for v in catalog.tbl)
         assert catalog.log_offset == 0
-        assert len(catalog.log_entries) == 0
         assert catalog.checkpoint_offset == 0
+        assert catalog.entries_since_checkpoint == 0
         assert catalog.sealed == False
         assert len(catalog.committed_txn) == 0
 
@@ -169,16 +168,12 @@ class TestAppendCatalog:
             tables_read={0: 0}
         )
 
-        # Attempt physical append
-        physical_success = catalog.try_APPEND(env, txn, entry)
+        # Attempt append - validation happens at append time
+        physical_success, logical_success = catalog.try_APPEND(env, txn, entry)
 
         assert physical_success == True
-        assert catalog.log_offset == endive.main.LOG_ENTRY_SIZE
-        assert len(catalog.log_entries) == 1
-
-        # Now verify - this updates tbl and committed_txn
-        logical_success = catalog.read_and_verify(txn.id)
         assert logical_success == True
+        assert catalog.log_offset == endive.main.LOG_ENTRY_SIZE
         assert catalog.tbl[0] == 1
         assert 1 in catalog.committed_txn
 
@@ -187,106 +182,141 @@ class TestAppendCatalog:
         env = simpy.Environment()
         catalog = AppendCatalog(env)
 
-        # First transaction appends
+        # First transaction appends successfully
         txn1 = Txn(id=1, t_submit=0, t_runtime=100, v_catalog_seq=0,
                    v_tblr={0: 0}, v_tblw={0: 1})
         txn1.v_log_offset = 0
         entry1 = LogEntry(txn_id=1, tables_written={0: 1}, tables_read={0: 0})
-        success1 = catalog.try_APPEND(env, txn1, entry1)
-        assert success1 == True
+        phys1, log1 = catalog.try_APPEND(env, txn1, entry1)
+        assert phys1 == True
+        assert log1 == True
 
         # Second transaction at old offset should fail (physical failure)
         txn2 = Txn(id=2, t_submit=50, t_runtime=100, v_catalog_seq=0,
                    v_tblr={1: 0}, v_tblw={1: 1})
         txn2.v_log_offset = 0  # Still at old offset
         entry2 = LogEntry(txn_id=2, tables_written={1: 1}, tables_read={1: 0})
-        success2 = catalog.try_APPEND(env, txn2, entry2)
+        phys2, log2 = catalog.try_APPEND(env, txn2, entry2)
 
-        assert success2 == False
-        # Can use get_log_entries_since to see what we missed
-        new_entries = catalog.get_log_entries_since(txn2.v_log_offset)
-        assert len(new_entries) == 1
-        assert new_entries[0].txn_id == 1
+        assert phys2 == False
+        assert log2 is None
+        # New offset is available in catalog.log_offset for retry
+        assert catalog.log_offset == endive.main.LOG_ENTRY_SIZE
 
-    def test_get_log_entries_since(self):
-        """Test retrieving log entries since a given offset."""
+    def test_concurrent_appends_different_tables(self):
+        """Verify concurrent appends to different tables both succeed."""
         env = simpy.Environment()
         catalog = AppendCatalog(env)
 
-        # Add multiple entries
-        for i in range(3):
+        # First transaction writes table 0
+        txn1 = Txn(id=1, t_submit=0, t_runtime=100, v_catalog_seq=0,
+                   v_tblr={0: 0}, v_tblw={0: 1})
+        txn1.v_log_offset = 0
+        entry1 = LogEntry(txn_id=1, tables_written={0: 1}, tables_read={0: 0})
+        phys1, log1 = catalog.try_APPEND(env, txn1, entry1)
+        assert phys1 == True and log1 == True
+
+        # Second transaction writes table 1 - retry at new offset
+        txn2 = Txn(id=2, t_submit=50, t_runtime=100, v_catalog_seq=0,
+                   v_tblr={1: 0}, v_tblw={1: 1})
+        txn2.v_log_offset = catalog.log_offset  # Updated offset
+        entry2 = LogEntry(txn_id=2, tables_written={1: 1}, tables_read={1: 0})
+        phys2, log2 = catalog.try_APPEND(env, txn2, entry2)
+
+        # Both should succeed (different tables)
+        assert phys2 == True and log2 == True
+        assert catalog.tbl[0] == 1
+        assert catalog.tbl[1] == 1
+        assert 1 in catalog.committed_txn
+        assert 2 in catalog.committed_txn
+
+
+class TestLogicalConflictDetection:
+    """Test the logical conflict detection at append time."""
+
+    def test_no_logical_conflict_different_tables(self):
+        """Verify no conflict when different tables modified."""
+        env = simpy.Environment()
+        catalog = AppendCatalog(env)
+
+        # First txn writes table 0
+        txn1 = Txn(id=1, t_submit=0, t_runtime=100, v_catalog_seq=0,
+                   v_tblr={0: 0}, v_tblw={0: 1})
+        txn1.v_log_offset = 0
+        entry1 = LogEntry(txn_id=1, tables_written={0: 1}, tables_read={0: 0})
+        phys1, log1 = catalog.try_APPEND(env, txn1, entry1)
+        assert phys1 and log1
+
+        # Second txn writes table 1 (different table) - should succeed
+        txn2 = Txn(id=2, t_submit=0, t_runtime=100, v_catalog_seq=0,
+                   v_tblr={1: 0}, v_tblw={1: 1})
+        txn2.v_log_offset = catalog.log_offset
+        entry2 = LogEntry(txn_id=2, tables_written={1: 1}, tables_read={1: 0})
+        phys2, log2 = catalog.try_APPEND(env, txn2, entry2)
+        assert phys2 and log2
+
+    def test_logical_conflict_write_write(self):
+        """Verify conflict detected when same table written."""
+        env = simpy.Environment()
+        catalog = AppendCatalog(env)
+
+        # First txn writes table 0
+        txn1 = Txn(id=1, t_submit=0, t_runtime=100, v_catalog_seq=0,
+                   v_tblr={0: 0}, v_tblw={0: 1})
+        txn1.v_log_offset = 0
+        entry1 = LogEntry(txn_id=1, tables_written={0: 1}, tables_read={0: 0})
+        phys1, log1 = catalog.try_APPEND(env, txn1, entry1)
+        assert phys1 and log1
+
+        # Second txn also writes table 0 (expects v0, but now v1) - should fail
+        txn2 = Txn(id=2, t_submit=0, t_runtime=100, v_catalog_seq=0,
+                   v_tblr={0: 0}, v_tblw={0: 1})  # Also expects table 0 at v0
+        txn2.v_log_offset = catalog.log_offset
+        entry2 = LogEntry(txn_id=2, tables_written={0: 1}, tables_read={0: 0})
+        phys2, log2 = catalog.try_APPEND(env, txn2, entry2)
+        assert phys2 == True  # Physical success
+        assert log2 == False  # Logical conflict
+
+    def test_logical_conflict_read_write(self):
+        """Verify conflict detected when read table was written."""
+        env = simpy.Environment()
+        catalog = AppendCatalog(env)
+
+        # First txn writes table 0
+        txn1 = Txn(id=1, t_submit=0, t_runtime=100, v_catalog_seq=0,
+                   v_tblr={0: 0}, v_tblw={0: 1})
+        txn1.v_log_offset = 0
+        entry1 = LogEntry(txn_id=1, tables_written={0: 1}, tables_read={0: 0})
+        phys1, log1 = catalog.try_APPEND(env, txn1, entry1)
+        assert phys1 and log1
+
+        # Second txn read table 0 at v0, writes table 1 - should fail (read conflict)
+        txn2 = Txn(id=2, t_submit=0, t_runtime=100, v_catalog_seq=0,
+                   v_tblr={0: 0, 1: 0}, v_tblw={1: 1})
+        txn2.v_log_offset = catalog.log_offset
+        entry2 = LogEntry(txn_id=2, tables_written={1: 1}, tables_read={0: 0})  # Read table 0 at v0
+        phys2, log2 = catalog.try_APPEND(env, txn2, entry2)
+        assert phys2 == True  # Physical success
+        assert log2 == False  # Logical conflict (read table changed)
+
+    def test_no_conflict_multiple_entries_different_tables(self):
+        """Verify no conflict with multiple entries on different tables."""
+        env = simpy.Environment()
+        catalog = AppendCatalog(env)
+
+        # Multiple txns writing to different tables should all succeed
+        for i in range(4):
             txn = Txn(id=i+1, t_submit=i*10, t_runtime=100, v_catalog_seq=0,
                       v_tblr={i: 0}, v_tblw={i: 1})
             txn.v_log_offset = catalog.log_offset
             entry = LogEntry(txn_id=i+1, tables_written={i: 1}, tables_read={i: 0})
-            catalog.try_APPEND(env, txn, entry)
+            phys, log = catalog.try_APPEND(env, txn, entry)
+            assert phys and log, f"Transaction {i+1} should succeed"
 
-        # Get entries since offset 0
-        entries = catalog.get_log_entries_since(0)
-        assert len(entries) == 3
-
-        # Get entries since offset after first entry
-        entries = catalog.get_log_entries_since(endive.main.LOG_ENTRY_SIZE)
-        assert len(entries) == 2
-
-        # Get entries from current offset (none)
-        entries = catalog.get_log_entries_since(catalog.log_offset)
-        assert len(entries) == 0
-
-
-class TestLogicalConflictDetection:
-    """Test the logical conflict detection logic."""
-
-    def test_no_logical_conflict_different_tables(self):
-        """Verify no conflict when different tables modified."""
-        # Transaction writing to table 0
-        txn = Txn(id=1, t_submit=0, t_runtime=100, v_catalog_seq=0,
-                  v_tblr={0: 0}, v_tblw={0: 1})
-
-        # Other entry wrote to table 1 (different table)
-        other_entry = LogEntry(txn_id=2, tables_written={1: 1}, tables_read={1: 0})
-
-        has_conflict = check_logical_conflict(txn, [other_entry])
-        assert has_conflict == False
-
-    def test_logical_conflict_write_write(self):
-        """Verify conflict detected when same table written."""
-        # Transaction writing to table 0
-        txn = Txn(id=1, t_submit=0, t_runtime=100, v_catalog_seq=0,
-                  v_tblr={0: 0}, v_tblw={0: 1})
-
-        # Other entry also wrote to table 0
-        other_entry = LogEntry(txn_id=2, tables_written={0: 2}, tables_read={0: 0})
-
-        has_conflict = check_logical_conflict(txn, [other_entry])
-        assert has_conflict == True
-
-    def test_logical_conflict_read_write(self):
-        """Verify conflict detected when read table was written."""
-        # Transaction reads table 0, writes table 1
-        txn = Txn(id=1, t_submit=0, t_runtime=100, v_catalog_seq=0,
-                  v_tblr={0: 0, 1: 0}, v_tblw={1: 1})
-
-        # Other entry wrote to table 0 (which we read)
-        other_entry = LogEntry(txn_id=2, tables_written={0: 1}, tables_read={0: 0})
-
-        has_conflict = check_logical_conflict(txn, [other_entry])
-        assert has_conflict == True
-
-    def test_no_conflict_multiple_entries_different_tables(self):
-        """Verify no conflict with multiple entries on different tables."""
-        # Transaction writing to table 0
-        txn = Txn(id=1, t_submit=0, t_runtime=100, v_catalog_seq=0,
-                  v_tblr={0: 0}, v_tblw={0: 1})
-
-        # Other entries on tables 1, 2, 3
-        entries = [
-            LogEntry(txn_id=i+2, tables_written={i+1: 1}, tables_read={i+1: 0})
-            for i in range(3)
-        ]
-
-        has_conflict = check_logical_conflict(txn, entries)
-        assert has_conflict == False
+        # All should be committed
+        for i in range(4):
+            assert catalog.tbl[i] == 1
+            assert (i+1) in catalog.committed_txn
 
 
 class TestCompaction:
@@ -328,7 +358,7 @@ class TestCompaction:
         assert endive.main.STATS.append_compactions_triggered > 0
 
     def test_compaction_clears_log(self):
-        """Verify compaction clears log entries and resets state."""
+        """Verify compaction resets state properly."""
         env = simpy.Environment()
         catalog = AppendCatalog(env)
 
@@ -348,8 +378,8 @@ class TestCompaction:
         result = catalog.try_CAS_compact(env, txn)
 
         assert result == True
-        assert len(catalog.log_entries) == 0
         assert catalog.checkpoint_offset == old_offset
+        assert catalog.entries_since_checkpoint == 0
         assert catalog.sealed == False
 
     def test_compaction_triggered_by_entry_count(self):
