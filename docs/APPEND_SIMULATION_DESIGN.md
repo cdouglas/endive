@@ -111,8 +111,6 @@ def _verify_entry(entry, current_tbl):
 This allows concurrent transactions writing to **different tables** to both physically append
 and both pass verification, unlike CAS mode where any concurrent commit causes failure.
 
-This allows concurrent transactions writing to **different tables** to both succeed, unlike CAS mode where any concurrent commit causes failure.
-
 ### Compaction
 
 Compaction is triggered when **either** condition is met (minimum of the two):
