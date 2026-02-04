@@ -25,6 +25,7 @@ def create_append_test_config(
     inter_arrival_scale: float = 500.0,
     num_tables: int = 5,
     compaction_threshold: int = 1000000,  # 1MB for testing
+    compaction_max_entries: int = 0,  # 0 = disabled
     log_entry_size: int = 100,
 ) -> str:
     """Create a test configuration file for append mode."""
@@ -37,6 +38,7 @@ output_path = "{output_path}"
 num_tables = {num_tables}
 mode = "append"
 compaction_threshold = {compaction_threshold}
+compaction_max_entries = {compaction_max_entries}
 log_entry_size = {log_entry_size}
 
 [transaction]
@@ -344,6 +346,45 @@ class TestCompaction:
         assert len(catalog.log_entries) == 0
         assert catalog.checkpoint_offset == old_offset
         assert catalog.sealed == False
+
+    def test_compaction_triggered_by_entry_count(self):
+        """Verify compaction triggers when entry count exceeds max_entries."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Configure with very large size threshold but small entry count
+            config_path = create_append_test_config(
+                output_path=os.path.join(tmpdir, "test.parquet"),
+                seed=42,
+                num_tables=5,
+                compaction_threshold=100000000,  # 100MB - won't trigger
+                compaction_max_entries=3,  # Should trigger after 3 entries
+                log_entry_size=100
+            )
+            try:
+                configure_from_toml(config_path)
+            finally:
+                os.unlink(config_path)
+
+        env = simpy.Environment()
+        catalog = AppendCatalog(env)
+
+        # Reset stats
+        endive.main.STATS = Stats()
+
+        # Add 3 entries - should trigger at entry 3
+        for i in range(3):
+            txn = Txn(id=i+1, t_submit=i*10, t_runtime=100, v_catalog_seq=0,
+                      v_tblr={i: 0}, v_tblw={i: 1})
+            txn.v_log_offset = catalog.log_offset
+            entry = LogEntry(txn_id=i+1, tables_written={i: 1}, tables_read={i: 0})
+            catalog.try_APPEND(env, txn, entry)
+
+        # Should be sealed after 3 entries (entry count threshold)
+        assert catalog.sealed == True
+        assert catalog.entries_since_checkpoint == 3
+        assert endive.main.STATS.append_compactions_triggered == 1
+
+        # Verify it was entry count, not size (log is only 300 bytes)
+        assert catalog.log_offset == 300  # 3 * 100
 
 
 class TestAppendModeSimulation:

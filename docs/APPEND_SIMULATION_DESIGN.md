@@ -97,12 +97,16 @@ This allows concurrent transactions writing to **different tables** to both succ
 
 ### Compaction
 
-When `log_offset - checkpoint_offset > COMPACTION_THRESHOLD`:
+Compaction is triggered when **either** condition is met (minimum of the two):
+1. **Size threshold**: `log_offset - checkpoint_offset > COMPACTION_THRESHOLD`
+2. **Entry count threshold**: `entries_since_checkpoint >= COMPACTION_MAX_ENTRIES` (if > 0)
+
+When triggered:
 1. The committing transaction is marked as `sealed`
 2. Next commit must perform CAS to compact:
    - Write new checkpoint containing current state
    - Clear log entries
-   - Reset checkpoint_offset
+   - Reset checkpoint_offset and entries_since_checkpoint
 
 ## Manifest List Append Model
 
@@ -148,7 +152,8 @@ def txn_ml_append(sim, txn, catalog):
 ```toml
 [catalog]
 mode = "append"           # "cas" (default) or "append"
-compaction_threshold = 16000000  # 16MB
+compaction_threshold = 16000000  # 16MB (size-based)
+compaction_max_entries = 0       # 0 = disabled; >0 = compact after N entries
 log_entry_size = 100
 
 [transaction]

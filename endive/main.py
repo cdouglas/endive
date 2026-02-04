@@ -63,6 +63,7 @@ RETRY_BACKOFF_JITTER: float  # Jitter factor (0.0 to 1.0) for randomization
 # Append mode parameters (catalog mode = "append")
 CATALOG_MODE: str  # "cas" (default) or "append"
 COMPACTION_THRESHOLD: int  # Bytes before triggering compaction (default 16MB)
+COMPACTION_MAX_ENTRIES: int  # Max entries before compaction (0 = disabled, use size only)
 LOG_ENTRY_SIZE: int  # Average bytes per log entry (for threshold calculation)
 T_APPEND: dict  # {'mean': float, 'stddev': float} - Append operation latency
 T_LOG_ENTRY_READ: dict  # {'mean': float, 'stddev': float} - Per-entry log read latency
@@ -220,7 +221,7 @@ def configure_from_toml(config_file: str):
     global REAL_CONFLICT_PROBABILITY, CONFLICTING_MANIFESTS_DIST, CONFLICTING_MANIFESTS_PARAMS
     global RETRY_BACKOFF_ENABLED, RETRY_BACKOFF_BASE_MS, RETRY_BACKOFF_MULTIPLIER, RETRY_BACKOFF_MAX_MS, RETRY_BACKOFF_JITTER
     global EXPERIMENT_LABEL
-    global CATALOG_MODE, COMPACTION_THRESHOLD, LOG_ENTRY_SIZE, MANIFEST_LIST_MODE
+    global CATALOG_MODE, COMPACTION_THRESHOLD, COMPACTION_MAX_ENTRIES, LOG_ENTRY_SIZE, MANIFEST_LIST_MODE
     global T_APPEND, T_LOG_ENTRY_READ, T_COMPACTION
 
     with open(config_file, "rb") as f:
@@ -251,6 +252,7 @@ def configure_from_toml(config_file: str):
     # Load append mode parameters
     CATALOG_MODE = config["catalog"].get("mode", "cas")
     COMPACTION_THRESHOLD = config["catalog"].get("compaction_threshold", 16 * 1024 * 1024)  # 16MB default
+    COMPACTION_MAX_ENTRIES = config["catalog"].get("compaction_max_entries", 0)  # 0 = disabled (size only)
     LOG_ENTRY_SIZE = config["catalog"].get("log_entry_size", 100)  # 100 bytes default
 
     # Load storage latencies (normal distributions)
@@ -909,6 +911,7 @@ class AppendCatalog:
         self.log_offset = 0  # Current log byte offset
         self.log_entries: list[LogEntry] = []  # In-memory log (for simulation)
         self.checkpoint_offset = 0  # Offset of last checkpoint
+        self.entries_since_checkpoint = 0  # Number of entries since last compaction
         self.sealed = False  # If True, next commit must CAS (compaction needed)
         self.committed_txn: set[int] = set()  # Transaction IDs for deduplication
 
@@ -955,16 +958,21 @@ class AppendCatalog:
         self.log_offset += LOG_ENTRY_SIZE
         self.committed_txn.add(txn.id)
         self.seq += 1  # Increment sequence for compatibility
+        self.entries_since_checkpoint += 1
 
         # Update table versions
         for tbl_id, new_ver in entry.tables_written.items():
             self.tbl[tbl_id] = new_ver
 
-        # Check if we need to seal for compaction
-        if self.log_offset - self.checkpoint_offset > COMPACTION_THRESHOLD:
+        # Check if we need to seal for compaction (minimum of size and entry count)
+        size_exceeded = (self.log_offset - self.checkpoint_offset) > COMPACTION_THRESHOLD
+        entries_exceeded = COMPACTION_MAX_ENTRIES > 0 and self.entries_since_checkpoint >= COMPACTION_MAX_ENTRIES
+
+        if size_exceeded or entries_exceeded:
             entry.sealed = True
             self.sealed = True
-            logger.debug(f"{sim.now} TXN {txn.id} SEALED - compaction needed")
+            reason = "size" if size_exceeded else "entry count"
+            logger.debug(f"{sim.now} TXN {txn.id} SEALED - compaction needed ({reason})")
             STATS.append_compactions_triggered += 1
 
         logger.debug(f"{sim.now} TXN {txn.id} APPEND_OK - offset now {self.log_offset}")
@@ -984,6 +992,7 @@ class AppendCatalog:
         # Clear log and reset offsets
         self.log_entries = []
         self.checkpoint_offset = self.log_offset
+        self.entries_since_checkpoint = 0
         self.sealed = False
 
         STATS.append_compactions_completed += 1
