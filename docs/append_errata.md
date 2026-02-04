@@ -53,13 +53,37 @@ This document tracks shortcuts, deferred tasks, and technical debt incurred duri
 
 ## Phase 3: Combined Model
 
-*To be documented when implemented*
+Phase 3 was largely completed during Phases 1 and 2 implementation:
+- Catalog append and manifest list append modes work together
+- Transaction flow handles both modes via configuration
+- Tested in `test_manifest_list_append_with_catalog_append`
+
+### Notes
+
+- The combined model enables maximum benefit: both catalog-level and table-level append operations
+- Statistics are tracked separately for catalog append vs manifest list append
+- No new conflict categories were added (tracked via existing stats)
 
 ---
 
 ## Phase 4: Statistics and Analysis
 
-*To be documented when implemented*
+### Experiment Configurations Created
+
+- `exp6_1_append_vs_cas_baseline.toml`: Compare append vs CAS modes
+- `exp6_2_multi_table_append.toml`: Multi-table scaling with append mode
+- `exp6_3_compaction_threshold.toml`: Compaction threshold sensitivity
+- `exp6_4_manifest_list_append.toml`: Manifest list append impact
+
+### Deferred Tasks
+
+1. **Analysis Pipeline Updates**: The saturation_analysis.py may need updates to extract append-specific parameters (mode, compaction_threshold, manifest_list_mode) for grouping and filtering.
+
+2. **Composite Plots for Append Experiments**: Similar to existing exp3.x composite plots, new groupings may be needed for:
+   - `--group-by catalog_mode` for append vs CAS comparison
+   - `--group-by compaction_threshold` for threshold sensitivity
+
+3. **Append Statistics Export**: The append-specific statistics (append_physical_success, etc.) are not currently exported to parquet files. This would require extending the transaction record or adding a separate stats export.
 
 ---
 

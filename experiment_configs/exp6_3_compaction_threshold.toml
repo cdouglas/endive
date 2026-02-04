@@ -1,0 +1,80 @@
+# Experiment 6.3: Compaction Threshold Sensitivity
+#
+# Research Question: What is the optimal compaction threshold?
+#
+# Setup:
+# - Single table with append mode
+# - Varying compaction thresholds: [1MB, 4MB, 16MB, 64MB]
+# - High load to trigger frequent compactions
+#
+# Expected Results:
+# - Low threshold: More compactions, higher overhead, lower latency variance
+# - High threshold: Fewer compactions, lower overhead, but longer log reads
+# - Optimal threshold balances compaction cost vs log read cost
+#
+# How to Run:
+# Sweep compaction_threshold: [1000000, 4000000, 16000000, 64000000]
+
+[simulation]
+duration_ms = 3600000  # 1 hour
+output_path = "results.parquet"
+
+[experiment]
+label = "exp6_3_compaction_threshold"
+
+[catalog]
+num_tables = 1
+num_groups = 1
+mode = "append"
+compaction_threshold = 16000000  # **SWEEP THIS**: [1MB, 4MB, 16MB, 64MB]
+log_entry_size = 100
+
+[transaction]
+retry = 10
+
+runtime.min = 30000
+runtime.mean = 180000
+runtime.sigma = 1.5
+
+inter_arrival.distribution = "exponential"
+inter_arrival.scale = 100.0  # High load to trigger compactions
+
+ntable.zipf = 10.0  # Single table
+seltbl.zipf = 1.4
+seltblw.zipf = 1.2
+
+real_conflict_probability = 0.0
+
+conflicting_manifests.distribution = "exponential"
+conflicting_manifests.mean = 3.0
+conflicting_manifests.min = 1
+conflicting_manifests.max = 10
+
+[storage]
+max_parallel = 4
+min_latency = 1
+
+T_CAS.mean = 1
+T_CAS.stddev = 0.1
+
+T_METADATA_ROOT.read.mean = 1
+T_METADATA_ROOT.read.stddev = 0.1
+T_METADATA_ROOT.write.mean = 1
+T_METADATA_ROOT.write.stddev = 0.1
+
+T_MANIFEST_LIST.read.mean = 50
+T_MANIFEST_LIST.read.stddev = 5
+T_MANIFEST_LIST.write.mean = 60
+T_MANIFEST_LIST.write.stddev = 6
+
+T_MANIFEST_FILE.read.mean = 50
+T_MANIFEST_FILE.read.stddev = 5
+T_MANIFEST_FILE.write.mean = 60
+T_MANIFEST_FILE.write.stddev = 6
+
+T_APPEND.mean = 50
+T_APPEND.stddev = 5
+T_LOG_ENTRY_READ.mean = 5
+T_LOG_ENTRY_READ.stddev = 1
+T_COMPACTION.mean = 200
+T_COMPACTION.stddev = 20
