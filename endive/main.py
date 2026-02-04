@@ -913,7 +913,11 @@ class AppendCatalog:
         self.checkpoint_offset = 0  # Offset of last checkpoint
         self.entries_since_checkpoint = 0  # Number of entries since last compaction
         self.sealed = False  # If True, next commit must CAS (compaction needed)
-        self.committed_txn: set[int] = set()  # Transaction IDs for deduplication
+        self.committed_txn: set[int] = set()  # Transaction IDs that passed verification
+
+        # Checkpoint state (saved during compaction)
+        self.checkpoint_tbl = [0] * N_TABLES  # Table versions at last checkpoint
+        self.checkpoint_committed: set[int] = set()  # Committed txns at last checkpoint
 
     def get_log_entries_since(self, offset: int) -> list[LogEntry]:
         """Get log entries added since the given offset.
@@ -930,8 +934,11 @@ class AppendCatalog:
         entries_at_offset = offset // LOG_ENTRY_SIZE
         return self.log_entries[entries_at_offset:]
 
-    def try_APPEND(self, sim, txn, entry: LogEntry) -> tuple[bool, list[LogEntry]]:
-        """Attempt conditional append to catalog log.
+    def try_APPEND(self, sim, txn, entry: LogEntry) -> bool:
+        """Attempt conditional append to catalog log (physical operation only).
+
+        This models only the physical append. After physical success, the caller
+        must call read_and_verify() to determine logical success.
 
         Args:
             sim: SimPy environment
@@ -939,9 +946,7 @@ class AppendCatalog:
             entry: Log entry to append
 
         Returns:
-            (physical_success, new_entries):
-                - (True, []) if append succeeded at expected offset
-                - (False, entries) if offset moved, with new entries since txn's snapshot
+            True if physical append succeeded, False if offset moved
         """
         logger.debug(f"{sim.now} TXN {txn.id} APPEND at offset {self.log_offset} "
                     f"(txn expected {txn.v_log_offset})")
@@ -949,20 +954,13 @@ class AppendCatalog:
         # Check if append would land at expected offset
         if self.log_offset != txn.v_log_offset:
             # Physical failure - offset moved
-            new_entries = self.get_log_entries_since(txn.v_log_offset)
-            logger.debug(f"{sim.now} TXN {txn.id} APPEND_FAIL - {len(new_entries)} new entries")
-            return (False, new_entries)
+            logger.debug(f"{sim.now} TXN {txn.id} APPEND_FAIL - offset moved")
+            return False
 
-        # Physical success - append the entry
+        # Physical success - append the entry (but don't verify yet)
         self.log_entries.append(entry)
         self.log_offset += LOG_ENTRY_SIZE
-        self.committed_txn.add(txn.id)
-        self.seq += 1  # Increment sequence for compatibility
         self.entries_since_checkpoint += 1
-
-        # Update table versions
-        for tbl_id, new_ver in entry.tables_written.items():
-            self.tbl[tbl_id] = new_ver
 
         # Check if we need to seal for compaction (minimum of size and entry count)
         size_exceeded = (self.log_offset - self.checkpoint_offset) > COMPACTION_THRESHOLD
@@ -975,13 +973,81 @@ class AppendCatalog:
             logger.debug(f"{sim.now} TXN {txn.id} SEALED - compaction needed ({reason})")
             STATS.append_compactions_triggered += 1
 
-        logger.debug(f"{sim.now} TXN {txn.id} APPEND_OK - offset now {self.log_offset}")
-        return (True, [])
+        logger.debug(f"{sim.now} TXN {txn.id} APPEND_OK (physical) - offset now {self.log_offset}")
+        return True
+
+    def read_and_verify(self, txn_id: int) -> bool:
+        """Re-read catalog and verify if transaction committed.
+
+        This models the read-back after physical append. All log entries are
+        verified in order against the evolving catalog state. Only transactions
+        that pass verification are considered committed.
+
+        In the real implementation, this happens in readInternal() which processes
+        each log entry and calls verify() before apply().
+
+        Args:
+            txn_id: Transaction ID to check for
+
+        Returns:
+            True if transaction passed verification (is committed), False otherwise
+        """
+        # Rebuild state from checkpoint by verifying all log entries in order
+        # This models the readInternal() call after successful append
+        verified_tbl = self.checkpoint_tbl.copy() if hasattr(self, 'checkpoint_tbl') else [0] * N_TABLES
+        new_committed = set(self.checkpoint_committed.copy() if hasattr(self, 'checkpoint_committed') else set())
+
+        for entry in self.log_entries:
+            # Verify entry against current state
+            if self._verify_entry(entry, verified_tbl):
+                # Verification passed - apply the entry
+                for tbl_id, new_ver in entry.tables_written.items():
+                    verified_tbl[tbl_id] = new_ver
+                new_committed.add(entry.txn_id)
+                logger.debug(f"TXN {entry.txn_id} VERIFIED - tables updated")
+            else:
+                logger.debug(f"TXN {entry.txn_id} VERIFY_FAILED - conflict detected")
+
+        # Update catalog state to verified state
+        self.tbl = verified_tbl
+        self.committed_txn = new_committed
+        self.seq = len(new_committed)
+
+        # Check if our transaction is in the committed set
+        return txn_id in new_committed
+
+    def _verify_entry(self, entry: LogEntry, current_tbl: list[int]) -> bool:
+        """Verify a log entry against current table state.
+
+        Models Transaction.verify() in LogCatalogFormat which checks that
+        all table versions in the entry match the current catalog state.
+
+        Args:
+            entry: Log entry to verify
+            current_tbl: Current table versions
+
+        Returns:
+            True if entry passes verification, False if conflict
+        """
+        # Check that all tables we wrote have expected versions
+        for tbl_id, new_ver in entry.tables_written.items():
+            expected_ver = new_ver - 1  # We're writing new_ver, so we expect current to be new_ver - 1
+            if current_tbl[tbl_id] != expected_ver:
+                return False
+
+        # Check that all tables we read have expected versions
+        for tbl_id, read_ver in entry.tables_read.items():
+            if tbl_id not in entry.tables_written:  # Don't double-check written tables
+                if current_tbl[tbl_id] != read_ver:
+                    return False
+
+        return True
 
     def try_CAS_compact(self, sim, txn) -> bool:
         """Perform compaction via CAS.
 
         Replaces the entire log with a new checkpoint containing current state.
+        The checkpoint captures verified table versions and committed transaction set.
 
         Returns:
             True if compaction succeeded, False otherwise
@@ -989,6 +1055,10 @@ class AppendCatalog:
         logger.debug(f"{sim.now} TXN {txn.id} CAS_COMPACT")
 
         # In simulation, compaction always succeeds (we model contention via latency)
+        # Save current verified state as checkpoint
+        self.checkpoint_tbl = self.tbl.copy()
+        self.checkpoint_committed = self.committed_txn.copy()
+
         # Clear log and reset offsets
         self.log_entries = []
         self.checkpoint_offset = self.log_offset
@@ -1141,11 +1211,13 @@ def txn_commit(sim, txn, catalog):
 def txn_commit_append(sim, txn, catalog: AppendCatalog):
     """Attempt to commit transaction using append-based protocol.
 
-    This function orchestrates the append commit process:
+    This models the LogCatalogFormat commit flow:
     1. If catalog is sealed, perform compaction via CAS
-    2. Create log entry and attempt append
-    3. On physical success, check logical conflicts
-    4. On physical failure, read new entries and check for conflicts
+    2. Attempt physical append at expected offset
+    3. If physical failure, re-read and retry append at new offset
+    4. After physical success, re-read entire catalog to verify
+    5. Verification replays log entries in order - only non-conflicting commits succeed
+    6. Check if our transaction is in the committed set (passed verification)
     """
     # If catalog is sealed, must perform compaction first
     if catalog.sealed:
@@ -1166,86 +1238,63 @@ def txn_commit_append(sim, txn, catalog: AppendCatalog):
         sealed=False
     )
 
-    # Attempt append
+    # Attempt physical append
     yield sim.timeout(get_append_latency())
-    physical_success, new_entries = catalog.try_APPEND(sim, txn, entry)
+    physical_success = catalog.try_APPEND(sim, txn, entry)
 
-    if physical_success:
-        STATS.append_physical_success += 1
-        # Physical success - check for logical conflicts by verifying
-        # Note: In real impl, we'd re-read and check if our txn is in the log.
-        # Here we check conflicts against any concurrent entries.
-        # Since we successfully appended, check if there were concurrent commits
-        # that conflict with our reads (serialization check)
-        # For simplicity, if we appended successfully, we commit (table-level isolation)
+    # If physical failure, retry append at new offset
+    while not physical_success:
+        STATS.append_physical_failure += 1
+
+        # Re-read catalog to get new offset
+        # Model I/O cost: read new log entries since our snapshot
+        n_new_entries = (catalog.log_offset - txn.v_log_offset) // LOG_ENTRY_SIZE
+        for _ in range(n_new_entries):
+            yield sim.timeout(get_log_entry_read_latency())
+
+        # Update our offset to current
+        txn.v_log_offset = catalog.log_offset
+
+        # Retry append at new offset
+        yield sim.timeout(get_append_latency())
+        physical_success = catalog.try_APPEND(sim, txn, entry)
+
+    STATS.append_physical_success += 1
+    logger.debug(f"{sim.now} TXN {txn.id} APPEND_PHYSICAL_SUCCESS")
+
+    # Physical append succeeded - now re-read catalog to verify
+    # In real impl: readInternal() processes all entries, verifying each
+    # Model I/O cost: read entire catalog (checkpoint + all log entries)
+    yield sim.timeout(get_cas_latency() / 2)  # Read checkpoint
+    for _ in range(len(catalog.log_entries)):
+        yield sim.timeout(get_log_entry_read_latency())
+
+    # Verify: replay log entries and check if our txn is committed
+    logical_success = catalog.read_and_verify(txn.id)
+
+    if logical_success:
         STATS.append_logical_success += 1
         txn.t_commit = sim.now
         STATS.commit(txn)
-        logger.debug(f"{sim.now} TXN {txn.id} APPEND_COMMIT")
+        logger.debug(f"{sim.now} TXN {txn.id} APPEND_COMMIT (verified)")
     else:
-        STATS.append_physical_failure += 1
-        # Physical failure - offset moved
-        # Check for logical conflicts in the new entries
-        if check_logical_conflict(txn, new_entries):
-            # Logical conflict - need full retry
-            STATS.append_logical_conflict += 1
-            logger.debug(f"{sim.now} TXN {txn.id} APPEND_CONFLICT - logical conflict")
+        # Logical failure: our transaction conflicted with an earlier entry
+        # Must do full retry: re-read table metadata, rewrite manifests
+        STATS.append_logical_conflict += 1
+        logger.debug(f"{sim.now} TXN {txn.id} APPEND_LOGICAL_FAIL - conflict during verification")
 
-            if txn.n_retries >= N_TXN_RETRY:
-                txn.t_abort = sim.now
-                STATS.abort(txn)
-                return
+        if txn.n_retries >= N_TXN_RETRY:
+            txn.t_abort = sim.now
+            STATS.abort(txn)
+            return
 
-            # Read log entries to get current state
-            n_entries = len(new_entries)
-            for _ in range(n_entries):
-                yield sim.timeout(get_log_entry_read_latency())
-
-            # Update transaction state for retry
-            txn.v_log_offset = catalog.log_offset
-            for t in txn.v_dirty.keys():
-                txn.v_dirty[t] = catalog.tbl[t]
-            for t in txn.v_tblw.keys():
-                txn.v_tblw[t] = catalog.tbl[t] + 1
-        else:
-            # No logical conflict - can retry append at new offset
-            logger.debug(f"{sim.now} TXN {txn.id} APPEND_RETRY - no logical conflict")
-
-            # Read log entries
-            n_entries = len(new_entries)
-            for _ in range(n_entries):
-                yield sim.timeout(get_log_entry_read_latency())
-
-            # Update offset and retry (will happen in next loop iteration)
-            txn.v_log_offset = catalog.log_offset
-
-            # Immediately retry the append
-            yield sim.timeout(get_append_latency())
-            physical_success_2, new_entries_2 = catalog.try_APPEND(sim, txn, entry)
-
-            if physical_success_2:
-                STATS.append_physical_success += 1
-                STATS.append_logical_success += 1
-                txn.t_commit = sim.now
-                STATS.commit(txn)
-                logger.debug(f"{sim.now} TXN {txn.id} APPEND_COMMIT (retry)")
-            else:
-                # Failed again - let outer loop handle
-                STATS.append_physical_failure += 1
-                # Check again for conflicts
-                all_new_entries = new_entries + new_entries_2
-                if check_logical_conflict(txn, all_new_entries):
-                    STATS.append_logical_conflict += 1
-                    if txn.n_retries >= N_TXN_RETRY:
-                        txn.t_abort = sim.now
-                        STATS.abort(txn)
-                        return
-                    # Update for next retry
-                    txn.v_log_offset = catalog.log_offset
-                    for t in txn.v_dirty.keys():
-                        txn.v_dirty[t] = catalog.tbl[t]
-                    for t in txn.v_tblw.keys():
-                        txn.v_tblw[t] = catalog.tbl[t] + 1
+        # Update transaction state for retry
+        # Must re-read table versions from verified catalog state
+        txn.v_log_offset = catalog.log_offset
+        for t in txn.v_dirty.keys():
+            txn.v_dirty[t] = catalog.tbl[t]
+        for t in txn.v_tblw.keys():
+            txn.v_tblw[t] = catalog.tbl[t] + 1
 
 
 def rand_tbl(catalog):

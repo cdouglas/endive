@@ -169,37 +169,42 @@ class TestAppendCatalog:
             tables_read={0: 0}
         )
 
-        # Attempt append
-        success, new_entries = catalog.try_APPEND(env, txn, entry)
+        # Attempt physical append
+        physical_success = catalog.try_APPEND(env, txn, entry)
 
-        assert success == True
-        assert new_entries == []
+        assert physical_success == True
         assert catalog.log_offset == endive.main.LOG_ENTRY_SIZE
         assert len(catalog.log_entries) == 1
+
+        # Now verify - this updates tbl and committed_txn
+        logical_success = catalog.read_and_verify(txn.id)
+        assert logical_success == True
         assert catalog.tbl[0] == 1
         assert 1 in catalog.committed_txn
 
     def test_append_fails_when_offset_moved(self):
-        """Verify append fails when concurrent append occurred."""
+        """Verify physical append fails when concurrent append occurred."""
         env = simpy.Environment()
         catalog = AppendCatalog(env)
 
-        # First transaction succeeds
+        # First transaction appends
         txn1 = Txn(id=1, t_submit=0, t_runtime=100, v_catalog_seq=0,
                    v_tblr={0: 0}, v_tblw={0: 1})
         txn1.v_log_offset = 0
         entry1 = LogEntry(txn_id=1, tables_written={0: 1}, tables_read={0: 0})
-        success1, _ = catalog.try_APPEND(env, txn1, entry1)
+        success1 = catalog.try_APPEND(env, txn1, entry1)
         assert success1 == True
 
-        # Second transaction at old offset should fail
+        # Second transaction at old offset should fail (physical failure)
         txn2 = Txn(id=2, t_submit=50, t_runtime=100, v_catalog_seq=0,
                    v_tblr={1: 0}, v_tblw={1: 1})
         txn2.v_log_offset = 0  # Still at old offset
         entry2 = LogEntry(txn_id=2, tables_written={1: 1}, tables_read={1: 0})
-        success2, new_entries = catalog.try_APPEND(env, txn2, entry2)
+        success2 = catalog.try_APPEND(env, txn2, entry2)
 
         assert success2 == False
+        # Can use get_log_entries_since to see what we missed
+        new_entries = catalog.get_log_entries_since(txn2.v_log_offset)
         assert len(new_entries) == 1
         assert new_entries[0].txn_id == 1
 

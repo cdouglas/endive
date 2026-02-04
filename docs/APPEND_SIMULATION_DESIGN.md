@@ -46,6 +46,10 @@ In Iceberg's `LogCatalogFormat`:
 
 ### Commit Protocol
 
+The key insight is that **physical append success ≠ transaction success**. After a successful
+physical append, the transaction must re-read the entire catalog and verify its entry was
+accepted.
+
 ```
 Transaction starts:
   1. Capture catalog.log_offset as v_log_offset
@@ -54,44 +58,58 @@ Transaction starts:
 Transaction commits (txn_commit_append):
   1. If catalog.sealed → perform compaction CAS first
   2. Create LogEntry with tables_written, tables_read
-  3. Attempt append at expected offset:
+  3. Attempt physical append at expected offset:
+
+     Physical Failure (offset moved):
+       - Re-read log entries since our snapshot
+       - Update v_log_offset to current
+       - Retry physical append at new offset
 
      Physical Success (offset matches):
        - Entry appended to log
-       - Table versions updated
-       - Transaction commits
        - If log exceeds threshold → seal for compaction
+       - Proceed to verification (step 4)
 
-     Physical Failure (offset moved):
-       - Read new log entries since our snapshot
-       - Check for logical conflicts:
-         - Write-write: another txn wrote a table we're writing
-         - Read-write: another txn wrote a table we read
+  4. Re-read entire catalog (checkpoint + log)
+  5. Verify all log entries in order:
+     - For each entry, check table versions match expected
+     - Verified entries update table state and join committed set
+     - Conflicting entries are rejected (not in committed set)
 
-       No logical conflict → retry append at new offset
-       Logical conflict → full retry (re-execute transaction)
+  6. Check if our transaction ID is in committed set:
+
+     Logical Success (in committed set):
+       - Transaction committed successfully
+       - Table state already updated during verification
+
+     Logical Failure (not in committed set):
+       - Another entry conflicted with ours
+       - Must do full retry (re-read table metadata, update manifest)
 ```
 
-### Conflict Detection
+### Verification Logic
 
-The key insight is that append mode detects conflicts at the **table level**:
+During verification, each log entry is checked against the evolving catalog state:
 
 ```python
-def check_logical_conflict(txn, new_entries):
-    for entry in new_entries:
-        # Write-write conflict
-        for tbl_id in txn.v_tblw:
-            if tbl_id in entry.tables_written:
-                return True  # Conflict!
+def _verify_entry(entry, current_tbl):
+    # Check all written tables have expected versions
+    for tbl_id, new_ver in entry.tables_written.items():
+        expected_ver = new_ver - 1  # Writing v+1 expects current to be v
+        if current_tbl[tbl_id] != expected_ver:
+            return False  # Conflict!
 
-        # Read-write conflict
-        for tbl_id, ver_read in txn.v_tblr.items():
-            if tbl_id in entry.tables_written:
-                if entry.tables_written[tbl_id] != ver_read:
-                    return True  # Conflict!
+    # Check all read tables haven't changed
+    for tbl_id, read_ver in entry.tables_read.items():
+        if tbl_id not in entry.tables_written:
+            if current_tbl[tbl_id] != read_ver:
+                return False  # Conflict!
 
-    return False  # No conflict - can retry append
+    return True  # Entry verified - will be applied
 ```
+
+This allows concurrent transactions writing to **different tables** to both physically append
+and both pass verification, unlike CAS mode where any concurrent commit causes failure.
 
 This allows concurrent transactions writing to **different tables** to both succeed, unlike CAS mode where any concurrent commit causes failure.
 
