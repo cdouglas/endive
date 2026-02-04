@@ -87,6 +87,43 @@ Phase 3 was largely completed during Phases 1 and 2 implementation:
 
 ---
 
+## Protocol Correction: Physical Append vs Verification
+
+### Issue Identified
+
+The initial implementation incorrectly treated physical append success as transaction commit.
+This was incorrect - the real LogCatalogFormat protocol requires:
+
+1. Physical append only appends entry to log
+2. After physical success, must re-read entire catalog (checkpoint + log)
+3. During re-read, each log entry is verified in order against evolving state
+4. Only transactions that pass verification are committed
+5. Transaction checks if its ID is in the committed set
+
+### Fix Applied
+
+- `try_APPEND()` now returns `bool` (physical success only)
+- Added `read_and_verify()` to replay log and check committed status
+- Added `_verify_entry()` for per-entry verification against current state
+- Added checkpoint state (`checkpoint_tbl`, `checkpoint_committed`) for compaction
+- Rewrote `txn_commit_append()` with correct verification flow
+
+### Remaining Simplifications
+
+1. **Verification Cost**: In the real implementation, verification is done once per read
+   (processing each entry as it's read). We model this as separate re-read I/O cost plus
+   CPU-free verification. The actual cost difference is negligible for simulation purposes.
+
+2. **Checkpoint Replay**: On each `read_and_verify()` call, we rebuild state from checkpoint
+   by replaying all log entries. Real implementations cache this state. This could be
+   optimized for very long simulations, but compaction keeps log size bounded.
+
+3. **Concurrent Verification**: Multiple transactions calling `read_and_verify()` at the
+   same time will all get consistent results (same committed set). This matches real
+   behavior where the log is immutable (append-only).
+
+---
+
 ## General Notes
 
 ### Code Quality Trade-offs
@@ -107,4 +144,4 @@ Phase 3 was largely completed during Phases 1 and 2 implementation:
 
 ---
 
-*Last updated: Phase 1 implementation*
+*Last updated: Protocol correction (physical append vs verification)*
