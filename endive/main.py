@@ -60,6 +60,14 @@ RETRY_BACKOFF_MULTIPLIER: float  # Multiplier for each retry
 RETRY_BACKOFF_MAX_MS: float  # Maximum backoff time in milliseconds
 RETRY_BACKOFF_JITTER: float  # Jitter factor (0.0 to 1.0) for randomization
 
+# Append mode parameters (catalog mode = "append")
+CATALOG_MODE: str  # "cas" (default) or "append"
+COMPACTION_THRESHOLD: int  # Bytes before triggering compaction (default 16MB)
+LOG_ENTRY_SIZE: int  # Average bytes per log entry (for threshold calculation)
+T_APPEND: dict  # {'mean': float, 'stddev': float} - Append operation latency
+T_LOG_ENTRY_READ: dict  # {'mean': float, 'stddev': float} - Per-entry log read latency
+T_COMPACTION: dict  # {'mean': float, 'stddev': float} - Compaction CAS latency (larger payload)
+
 STATS = Stats()
 
 def partition_tables_into_groups(n_tables: int, n_groups: int, distribution: str, longtail_params: dict) -> tuple[dict, dict]:
@@ -210,6 +218,8 @@ def configure_from_toml(config_file: str):
     global REAL_CONFLICT_PROBABILITY, CONFLICTING_MANIFESTS_DIST, CONFLICTING_MANIFESTS_PARAMS
     global RETRY_BACKOFF_ENABLED, RETRY_BACKOFF_BASE_MS, RETRY_BACKOFF_MULTIPLIER, RETRY_BACKOFF_MAX_MS, RETRY_BACKOFF_JITTER
     global EXPERIMENT_LABEL
+    global CATALOG_MODE, COMPACTION_THRESHOLD, LOG_ENTRY_SIZE
+    global T_APPEND, T_LOG_ENTRY_READ, T_COMPACTION
 
     with open(config_file, "rb") as f:
         config = tomllib.load(f)
@@ -235,6 +245,11 @@ def configure_from_toml(config_file: str):
             "medium_groups_count": config["catalog"]["longtail"].get("medium_groups_count", 3),
             "medium_group_fraction": config["catalog"]["longtail"].get("medium_group_fraction", 0.3)
         }
+
+    # Load append mode parameters
+    CATALOG_MODE = config["catalog"].get("mode", "cas")
+    COMPACTION_THRESHOLD = config["catalog"].get("compaction_threshold", 16 * 1024 * 1024)  # 16MB default
+    LOG_ENTRY_SIZE = config["catalog"].get("log_entry_size", 100)  # 100 bytes default
 
     # Load storage latencies (normal distributions)
     MAX_PARALLEL = config["storage"]["max_parallel"]
@@ -276,6 +291,20 @@ def configure_from_toml(config_file: str):
             'mean': config["storage"]["T_MANIFEST_FILE"]["write"]["mean"],
             'stddev': config["storage"]["T_MANIFEST_FILE"]["write"]["stddev"]
         }
+    }
+
+    # Load append mode storage latencies (with defaults if not specified)
+    T_APPEND = {
+        'mean': config.get("storage", {}).get("T_APPEND", {}).get("mean", 50.0),
+        'stddev': config.get("storage", {}).get("T_APPEND", {}).get("stddev", 5.0)
+    }
+    T_LOG_ENTRY_READ = {
+        'mean': config.get("storage", {}).get("T_LOG_ENTRY_READ", {}).get("mean", 5.0),
+        'stddev': config.get("storage", {}).get("T_LOG_ENTRY_READ", {}).get("stddev", 1.0)
+    }
+    T_COMPACTION = {
+        'mean': config.get("storage", {}).get("T_COMPACTION", {}).get("mean", 200.0),
+        'stddev': config.get("storage", {}).get("T_COMPACTION", {}).get("stddev", 20.0)
     }
 
     # Load runtime-related configuration
@@ -521,6 +550,21 @@ def get_manifest_file_latency(operation: str) -> float:
     """Get manifest file latency for read or write operation."""
     params = T_MANIFEST_FILE[operation]
     return generate_latency(params['mean'], params['stddev'])
+
+
+def get_append_latency() -> float:
+    """Get append operation latency (for catalog log append)."""
+    return generate_latency(T_APPEND['mean'], T_APPEND['stddev'])
+
+
+def get_log_entry_read_latency() -> float:
+    """Get per-entry log read latency."""
+    return generate_latency(T_LOG_ENTRY_READ['mean'], T_LOG_ENTRY_READ['stddev'])
+
+
+def get_compaction_latency() -> float:
+    """Get compaction CAS latency (larger payload than normal CAS)."""
+    return generate_latency(T_COMPACTION['mean'], T_COMPACTION['stddev'])
 
 
 def sample_conflicting_manifests() -> int:
@@ -824,6 +868,156 @@ class Txn:
     t_commit: int = field(default=-1)
     t_abort: int = field(default=-1)
     v_dirty: dict[int, int] = field(default_factory=lambda: defaultdict(dict)) # versions validated (init union(v_tblr, v_tblw))
+    # Append mode fields
+    v_log_offset: int = 0  # Log offset when snapshot was taken (for append mode)
+
+
+@dataclass
+class LogEntry:
+    """Log entry for append-based catalog operations.
+
+    Each entry represents a committed transaction's effect on the catalog.
+    Used for conflict detection and compaction in append mode.
+    """
+    txn_id: int  # Transaction ID (used for deduplication)
+    tables_written: dict[int, int]  # table_id -> new_version after this txn
+    tables_read: dict[int, int]  # table_id -> version_read by this txn
+    sealed: bool = False  # True if this entry triggers compaction
+
+
+class AppendCatalog:
+    """Catalog implementation using append-based commit protocol.
+
+    Instead of CAS for every commit, transactions append log entries
+    to the catalog. Compaction is triggered when log size exceeds threshold.
+
+    Key differences from CAS-based Catalog:
+    - Conflict detection is table-level, not catalog-level
+    - Concurrent non-conflicting transactions can both succeed
+    - Compaction required periodically to prevent unbounded log growth
+    """
+
+    def __init__(self, sim):
+        self.sim = sim
+        self.seq = 0  # For compatibility with Txn class (tracks number of commits)
+        self.tbl = [0] * N_TABLES  # Per-table versions (derived from log)
+        self.log_offset = 0  # Current log byte offset
+        self.log_entries: list[LogEntry] = []  # In-memory log (for simulation)
+        self.checkpoint_offset = 0  # Offset of last checkpoint
+        self.sealed = False  # If True, next commit must CAS (compaction needed)
+        self.committed_txn: set[int] = set()  # Transaction IDs for deduplication
+
+    def get_log_entries_since(self, offset: int) -> list[LogEntry]:
+        """Get log entries added since the given offset.
+
+        Args:
+            offset: Log offset from when snapshot was taken
+
+        Returns:
+            List of log entries added after the offset
+        """
+        if offset >= self.log_offset:
+            return []
+        # Calculate entry index from byte offset
+        entries_at_offset = offset // LOG_ENTRY_SIZE
+        return self.log_entries[entries_at_offset:]
+
+    def try_APPEND(self, sim, txn, entry: LogEntry) -> tuple[bool, list[LogEntry]]:
+        """Attempt conditional append to catalog log.
+
+        Args:
+            sim: SimPy environment
+            txn: Transaction attempting to commit
+            entry: Log entry to append
+
+        Returns:
+            (physical_success, new_entries):
+                - (True, []) if append succeeded at expected offset
+                - (False, entries) if offset moved, with new entries since txn's snapshot
+        """
+        logger.debug(f"{sim.now} TXN {txn.id} APPEND at offset {self.log_offset} "
+                    f"(txn expected {txn.v_log_offset})")
+
+        # Check if append would land at expected offset
+        if self.log_offset != txn.v_log_offset:
+            # Physical failure - offset moved
+            new_entries = self.get_log_entries_since(txn.v_log_offset)
+            logger.debug(f"{sim.now} TXN {txn.id} APPEND_FAIL - {len(new_entries)} new entries")
+            return (False, new_entries)
+
+        # Physical success - append the entry
+        self.log_entries.append(entry)
+        self.log_offset += LOG_ENTRY_SIZE
+        self.committed_txn.add(txn.id)
+        self.seq += 1  # Increment sequence for compatibility
+
+        # Update table versions
+        for tbl_id, new_ver in entry.tables_written.items():
+            self.tbl[tbl_id] = new_ver
+
+        # Check if we need to seal for compaction
+        if self.log_offset - self.checkpoint_offset > COMPACTION_THRESHOLD:
+            entry.sealed = True
+            self.sealed = True
+            logger.debug(f"{sim.now} TXN {txn.id} SEALED - compaction needed")
+            STATS.append_compactions_triggered += 1
+
+        logger.debug(f"{sim.now} TXN {txn.id} APPEND_OK - offset now {self.log_offset}")
+        return (True, [])
+
+    def try_CAS_compact(self, sim, txn) -> bool:
+        """Perform compaction via CAS.
+
+        Replaces the entire log with a new checkpoint containing current state.
+
+        Returns:
+            True if compaction succeeded, False otherwise
+        """
+        logger.debug(f"{sim.now} TXN {txn.id} CAS_COMPACT")
+
+        # In simulation, compaction always succeeds (we model contention via latency)
+        # Clear log and reset offsets
+        self.log_entries = []
+        self.checkpoint_offset = self.log_offset
+        self.sealed = False
+
+        STATS.append_compactions_completed += 1
+        logger.debug(f"{sim.now} TXN {txn.id} COMPACTED - offset {self.log_offset}")
+        return True
+
+
+def check_logical_conflict(txn, new_entries: list[LogEntry]) -> bool:
+    """Check if transaction conflicts with newly discovered log entries.
+
+    A logical conflict occurs when:
+    - A table we wrote was also written by another transaction
+    - A table we read was written by another transaction (read-write conflict)
+
+    Args:
+        txn: Transaction to check
+        new_entries: Log entries that appeared after txn's snapshot
+
+    Returns:
+        True if there is a conflict, False if safe to commit
+    """
+    for entry in new_entries:
+        # Check write-write conflicts
+        for tbl_id in txn.v_tblw.keys():
+            if tbl_id in entry.tables_written:
+                logger.debug(f"TXN {txn.id} CONFLICT: table {tbl_id} written by txn {entry.txn_id}")
+                return True
+
+        # Check read-write conflicts
+        for tbl_id, ver_read in txn.v_tblr.items():
+            if tbl_id in entry.tables_written:
+                # Another transaction wrote to a table we read
+                if entry.tables_written[tbl_id] != ver_read:
+                    logger.debug(f"TXN {txn.id} CONFLICT: table {tbl_id} read@{ver_read}, "
+                               f"written by txn {entry.txn_id} to {entry.tables_written[tbl_id]}")
+                    return True
+
+    return False
+
 
 def txn_ml_w(sim, txn):
     """Write manifest lists for all tables written in transaction."""
@@ -881,6 +1075,116 @@ def txn_commit(sim, txn, catalog):
         resolver.update_write_set(txn, v_catalog)
 
 
+def txn_commit_append(sim, txn, catalog: AppendCatalog):
+    """Attempt to commit transaction using append-based protocol.
+
+    This function orchestrates the append commit process:
+    1. If catalog is sealed, perform compaction via CAS
+    2. Create log entry and attempt append
+    3. On physical success, check logical conflicts
+    4. On physical failure, read new entries and check for conflicts
+    """
+    # If catalog is sealed, must perform compaction first
+    if catalog.sealed:
+        yield sim.timeout(get_compaction_latency())
+        if catalog.try_CAS_compact(sim, txn):
+            # Compaction succeeded, now try append
+            pass
+        else:
+            # Compaction failed (concurrent compaction) - will retry
+            STATS.append_physical_failure += 1
+            return
+
+    # Create log entry for this transaction
+    entry = LogEntry(
+        txn_id=txn.id,
+        tables_written=dict(txn.v_tblw),
+        tables_read=dict(txn.v_tblr),
+        sealed=False
+    )
+
+    # Attempt append
+    yield sim.timeout(get_append_latency())
+    physical_success, new_entries = catalog.try_APPEND(sim, txn, entry)
+
+    if physical_success:
+        STATS.append_physical_success += 1
+        # Physical success - check for logical conflicts by verifying
+        # Note: In real impl, we'd re-read and check if our txn is in the log.
+        # Here we check conflicts against any concurrent entries.
+        # Since we successfully appended, check if there were concurrent commits
+        # that conflict with our reads (serialization check)
+        # For simplicity, if we appended successfully, we commit (table-level isolation)
+        STATS.append_logical_success += 1
+        txn.t_commit = sim.now
+        STATS.commit(txn)
+        logger.debug(f"{sim.now} TXN {txn.id} APPEND_COMMIT")
+    else:
+        STATS.append_physical_failure += 1
+        # Physical failure - offset moved
+        # Check for logical conflicts in the new entries
+        if check_logical_conflict(txn, new_entries):
+            # Logical conflict - need full retry
+            STATS.append_logical_conflict += 1
+            logger.debug(f"{sim.now} TXN {txn.id} APPEND_CONFLICT - logical conflict")
+
+            if txn.n_retries >= N_TXN_RETRY:
+                txn.t_abort = sim.now
+                STATS.abort(txn)
+                return
+
+            # Read log entries to get current state
+            n_entries = len(new_entries)
+            for _ in range(n_entries):
+                yield sim.timeout(get_log_entry_read_latency())
+
+            # Update transaction state for retry
+            txn.v_log_offset = catalog.log_offset
+            for t in txn.v_dirty.keys():
+                txn.v_dirty[t] = catalog.tbl[t]
+            for t in txn.v_tblw.keys():
+                txn.v_tblw[t] = catalog.tbl[t] + 1
+        else:
+            # No logical conflict - can retry append at new offset
+            logger.debug(f"{sim.now} TXN {txn.id} APPEND_RETRY - no logical conflict")
+
+            # Read log entries
+            n_entries = len(new_entries)
+            for _ in range(n_entries):
+                yield sim.timeout(get_log_entry_read_latency())
+
+            # Update offset and retry (will happen in next loop iteration)
+            txn.v_log_offset = catalog.log_offset
+
+            # Immediately retry the append
+            yield sim.timeout(get_append_latency())
+            physical_success_2, new_entries_2 = catalog.try_APPEND(sim, txn, entry)
+
+            if physical_success_2:
+                STATS.append_physical_success += 1
+                STATS.append_logical_success += 1
+                txn.t_commit = sim.now
+                STATS.commit(txn)
+                logger.debug(f"{sim.now} TXN {txn.id} APPEND_COMMIT (retry)")
+            else:
+                # Failed again - let outer loop handle
+                STATS.append_physical_failure += 1
+                # Check again for conflicts
+                all_new_entries = new_entries + new_entries_2
+                if check_logical_conflict(txn, all_new_entries):
+                    STATS.append_logical_conflict += 1
+                    if txn.n_retries >= N_TXN_RETRY:
+                        txn.t_abort = sim.now
+                        STATS.abort(txn)
+                        return
+                    # Update for next retry
+                    txn.v_log_offset = catalog.log_offset
+                    for t in txn.v_dirty.keys():
+                        txn.v_dirty[t] = catalog.tbl[t]
+                    for t in txn.v_tblw.keys():
+                        txn.v_tblw[t] = catalog.tbl[t] + 1
+
+
 def rand_tbl(catalog):
     """Select tables for transaction, respecting group boundaries."""
     # If no grouping (N_GROUPS == 1), use all tables
@@ -928,6 +1232,11 @@ def txn_gen(sim, txn_id, catalog):
     txn = Txn(txn_id, sim.now, int(t_runtime), catalog.seq, tblr, tblw)
     txn.v_dirty = txn.v_tblr.copy()
     txn.v_dirty.update(txn.v_tblw)
+
+    # For append mode, also capture log offset
+    if CATALOG_MODE == "append":
+        txn.v_log_offset = catalog.log_offset
+
     # run the transaction
     yield sim.timeout(txn.t_runtime)
     # write the manifest list
@@ -943,10 +1252,20 @@ def txn_gen(sim, txn_id, catalog):
                 logger.debug(f"{sim.now} TXN {txn_id} backing off for {backoff_time:.1f}ms (retry {txn.n_retries})")
                 yield sim.timeout(backoff_time)
 
-        yield sim.process(txn_commit(sim, txn, catalog))
+        # Use appropriate commit function based on catalog mode
+        if CATALOG_MODE == "append":
+            yield sim.process(txn_commit_append(sim, txn, catalog))
+        else:
+            yield sim.process(txn_commit(sim, txn, catalog))
+
 
 def setup(sim):
-    catalog = Catalog(sim)
+    # Create appropriate catalog based on mode
+    if CATALOG_MODE == "append":
+        catalog = AppendCatalog(sim)
+    else:
+        catalog = Catalog(sim)
+
     txn_ids = itertools.count(1)
     sim.process(txn_gen(sim, next(txn_ids), catalog))
     while True:

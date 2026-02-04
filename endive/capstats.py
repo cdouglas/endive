@@ -48,11 +48,20 @@ class Stats:
         self.txn_committed = 0
         self.txn_aborted = 0
 
-        # Conflict resolution statistics
+        # Conflict resolution statistics (CAS mode)
         self.false_conflicts = 0  # Version changed, no data overlap
         self.real_conflicts = 0   # Overlapping data changes requiring manifest file operations
         self.manifest_files_read = 0
         self.manifest_files_written = 0
+
+        # Append mode statistics
+        self.append_physical_success = 0   # Append landed at expected offset
+        self.append_logical_success = 0    # + verification passed -> commit
+        self.append_logical_conflict = 0   # Append landed but conflict detected
+        self.append_physical_failure = 0   # Offset moved, append failed
+        self.append_compactions_triggered = 0  # Sealed transactions triggering compaction
+        self.append_compactions_completed = 0  # Successful compaction CAS operations
+        self.append_dedup_hits = 0         # Transaction already committed (deduplication)
 
         # Collect detailed transaction data for export
         self.transactions = []
@@ -148,13 +157,28 @@ class Stats:
             print(f"    Mean: {committed_df['n_retries'].mean():.2f}")
             print(f"    Max: {committed_df['n_retries'].max()}")
 
-        # Print conflict resolution statistics
+        # Print conflict resolution statistics (CAS mode)
         total_conflicts = self.false_conflicts + self.real_conflicts
         if total_conflicts > 0:
-            print(f"\n  Conflict Resolution:")
+            print(f"\n  Conflict Resolution (CAS mode):")
             print(f"    Total conflicts: {total_conflicts}")
             print(f"    False conflicts: {self.false_conflicts} ({100*self.false_conflicts/total_conflicts:.1f}%)")
             print(f"    Real conflicts: {self.real_conflicts} ({100*self.real_conflicts/total_conflicts:.1f}%)")
             if self.real_conflicts > 0:
                 print(f"    Manifest files read: {self.manifest_files_read} (avg {self.manifest_files_read/self.real_conflicts:.1f} per real conflict)")
                 print(f"    Manifest files written: {self.manifest_files_written} (avg {self.manifest_files_written/self.real_conflicts:.1f} per real conflict)")
+
+        # Print append mode statistics
+        total_appends = self.append_physical_success + self.append_physical_failure
+        if total_appends > 0:
+            print(f"\n  Append Mode Statistics:")
+            print(f"    Total append attempts: {total_appends}")
+            print(f"    Physical success: {self.append_physical_success} ({100*self.append_physical_success/total_appends:.1f}%)")
+            print(f"    Physical failure: {self.append_physical_failure} ({100*self.append_physical_failure/total_appends:.1f}%)")
+            if self.append_physical_success > 0:
+                print(f"    Logical success: {self.append_logical_success} ({100*self.append_logical_success/self.append_physical_success:.1f}% of physical success)")
+            print(f"    Logical conflicts: {self.append_logical_conflict}")
+            print(f"    Compactions triggered: {self.append_compactions_triggered}")
+            print(f"    Compactions completed: {self.append_compactions_completed}")
+            if self.append_dedup_hits > 0:
+                print(f"    Deduplication hits: {self.append_dedup_hits}")
