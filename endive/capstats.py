@@ -63,7 +63,13 @@ class Stats:
         self.append_compactions_completed = 0  # Successful compaction CAS operations
         self.append_dedup_hits = 0         # Transaction already committed (deduplication)
 
-        # Manifest list append mode statistics
+        # Manifest list append mode statistics (physical/logical protocol)
+        self.manifest_append_physical_success = 0  # Append landed at expected offset
+        self.manifest_append_logical_success = 0   # + table version matched -> commit
+        self.manifest_append_logical_conflict = 0  # Append landed but conflict
+        self.manifest_append_physical_failure = 0  # Offset moved, retry at new offset
+        self.manifest_append_sealed_rewrite = 0    # Manifest list sealed, must rewrite
+        # Legacy counters (kept for backward compatibility)
         self.manifest_append_success = 0   # Manifest list append at correct version
         self.manifest_append_retry = 0     # Manifest list append version mismatch
 

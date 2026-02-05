@@ -153,32 +153,57 @@ In traditional Iceberg:
 - Concurrent commits to the same table conflict
 
 With manifest list append:
-- New manifest entries are appended at an expected table version
-- If version matches, append succeeds
-- If version changed, must read new state and potentially merge
+- New manifest entries are appended at an expected offset
+- Uses same physical/logical protocol as catalog append
+- When threshold exceeded, manifest list is sealed and must be rewritten
 
 ### Simulation Model
 
-```python
-def txn_ml_append(sim, txn, catalog):
-    for tbl_id in txn.v_tblw:
-        expected_ver = txn.v_dirty[tbl_id]
-        current_ver = catalog.tbl[tbl_id]
+Manifest list append uses the **same protocol as catalog append**:
 
-        if current_ver == expected_ver:
-            # Version matches - append succeeds
-            yield sim.timeout(manifest_list_write_latency)
-        else:
-            # Version mismatch - read and retry
-            yield sim.timeout(manifest_list_read_latency)
-            txn.v_dirty[tbl_id] = current_ver
-            yield sim.timeout(manifest_list_write_latency)
+```
+Per-table manifest list state:
+  - ml_offset[tbl_id]: Current byte offset
+  - ml_sealed[tbl_id]: Whether sealed (needs rewrite)
+
+Manifest list append for each table:
+  1. Check if sealed → must rewrite entire manifest list
+
+  2. Attempt physical append at expected offset:
+     Physical Failure (offset moved OR sealed):
+       - Retry at new offset (or rewrite if sealed)
+
+     Physical Success:
+       - Re-read to discover logical outcome
+
+  3. Check logical outcome:
+     Logical Success (table version matched):
+       - Entry applied
+
+     Logical Failure (table version conflict):
+       - Entry in log but not applied
+       - Must read manifest list and retry
+
+  4. If offset exceeds MANIFEST_LIST_SEAL_THRESHOLD:
+     - Seal manifest list
+     - Next writer must rewrite (creates new object)
 ```
 
-**Simplifications:**
-- No actual manifest content is modeled
-- Version check is instantaneous (no I/O for version lookup)
-- Retry always succeeds after reading new state
+**Key differences from catalog append:**
+- Per-table (no cross-table conflicts in manifest lists)
+- When sealed: Rewrite to new object (not CAS compaction)
+- Writers who append to sealed list know entry wasn't included
+
+## Table Metadata Inlining
+
+Configurable via `TABLE_METADATA_INLINED`:
+- **True (default)**: Table metadata is part of catalog/intention record
+  - No separate read/write needed for table metadata
+  - Catalog merge yields table state directly
+- **False**: Table metadata stored separately
+  - Must read table metadata before transaction (I/O cost)
+  - Must write table metadata before commit (I/O cost)
+  - Affects both CAS and append modes
 
 ## Integration with Existing Simulation
 
@@ -186,21 +211,28 @@ def txn_ml_append(sim, txn, catalog):
 
 ```toml
 [catalog]
-mode = "append"           # "cas" (default) or "append"
-compaction_threshold = 16000000  # 16MB (size-based)
-compaction_max_entries = 0       # 0 = disabled; >0 = compact after N entries
+mode = "append"                    # "cas" (default) or "append"
+compaction_threshold = 16000000    # 16MB (size-based)
+compaction_max_entries = 0         # 0 = disabled; >0 = compact after N entries
 log_entry_size = 100
+table_metadata_inlined = true      # Whether table metadata is in catalog/intention record
 
 [transaction]
-manifest_list_mode = "append"  # "rewrite" (default) or "append"
+manifest_list_mode = "append"      # "rewrite" (default) or "append"
+manifest_list_seal_threshold = 0   # 0 = disabled; >0 = seal after N bytes
+manifest_list_entry_size = 50      # Bytes per manifest list entry
 
 [storage]
-T_APPEND.mean = 50        # Append operation latency
+T_APPEND.mean = 50                 # Append operation latency
 T_APPEND.stddev = 5
-T_LOG_ENTRY_READ.mean = 5 # Per-entry log read
+T_LOG_ENTRY_READ.mean = 5          # Per-entry log read
 T_LOG_ENTRY_READ.stddev = 1
-T_COMPACTION.mean = 200   # Compaction CAS (larger payload)
+T_COMPACTION.mean = 200            # Compaction CAS (larger payload)
 T_COMPACTION.stddev = 20
+T_TABLE_METADATA.read.mean = 20    # Table metadata read (if not inlined)
+T_TABLE_METADATA.read.stddev = 5
+T_TABLE_METADATA.write.mean = 30   # Table metadata write (if not inlined)
+T_TABLE_METADATA.write.stddev = 5
 ```
 
 ### Transaction Flow

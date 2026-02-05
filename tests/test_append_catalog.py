@@ -641,16 +641,20 @@ T_MANIFEST_FILE.write.stddev = 6
                 committed = df[df['status'] == 'committed']
                 assert len(committed) > 0
 
-                # Manifest append stats should be populated
+                # Manifest append stats should be populated (new physical/logical protocol)
                 stats = endive.main.STATS
-                total_ml = stats.manifest_append_success + stats.manifest_append_retry
+                total_ml = (stats.manifest_append_physical_success +
+                           stats.manifest_append_physical_failure +
+                           stats.manifest_append_sealed_rewrite)
                 assert total_ml > 0, "Manifest append operations should have occurred"
 
                 print(f"Manifest list append test passed:")
                 print(f"  Total txns: {len(df)}")
                 print(f"  Committed: {len(committed)}")
-                print(f"  ML append success: {stats.manifest_append_success}")
-                print(f"  ML append retry: {stats.manifest_append_retry}")
+                print(f"  ML physical success: {stats.manifest_append_physical_success}")
+                print(f"  ML logical success: {stats.manifest_append_logical_success}")
+                print(f"  ML logical conflict: {stats.manifest_append_logical_conflict}")
+                print(f"  ML physical failure: {stats.manifest_append_physical_failure}")
 
             finally:
                 os.unlink(config_path)
@@ -724,7 +728,9 @@ T_COMPACTION.stddev = 20
                 # Both catalog append and manifest append stats should be populated
                 stats = endive.main.STATS
                 total_catalog = stats.append_physical_success + stats.append_physical_failure
-                total_ml = stats.manifest_append_success + stats.manifest_append_retry
+                total_ml = (stats.manifest_append_physical_success +
+                           stats.manifest_append_physical_failure +
+                           stats.manifest_append_sealed_rewrite)
 
                 assert total_catalog > 0, "Catalog append operations should have occurred"
                 assert total_ml > 0, "Manifest append operations should have occurred"
@@ -733,8 +739,9 @@ T_COMPACTION.stddev = 20
                 print(f"  Total txns: {len(df)}")
                 print(f"  Catalog append success: {stats.append_physical_success}")
                 print(f"  Catalog append failure: {stats.append_physical_failure}")
-                print(f"  ML append success: {stats.manifest_append_success}")
-                print(f"  ML append retry: {stats.manifest_append_retry}")
+                print(f"  ML physical success: {stats.manifest_append_physical_success}")
+                print(f"  ML logical success: {stats.manifest_append_logical_success}")
+                print(f"  ML logical conflict: {stats.manifest_append_logical_conflict}")
 
             finally:
                 os.unlink(config_path)

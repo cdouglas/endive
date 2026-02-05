@@ -68,8 +68,14 @@ LOG_ENTRY_SIZE: int  # Average bytes per log entry (for threshold calculation)
 T_APPEND: dict  # {'mean': float, 'stddev': float} - Append operation latency
 T_LOG_ENTRY_READ: dict  # {'mean': float, 'stddev': float} - Per-entry log read latency
 T_COMPACTION: dict  # {'mean': float, 'stddev': float} - Compaction CAS latency (larger payload)
+# Table metadata configuration
+TABLE_METADATA_INLINED: bool  # Whether table metadata is inlined in catalog/intention record
+T_TABLE_METADATA_R: dict  # {'mean': float, 'stddev': float} - Table metadata read latency
+T_TABLE_METADATA_W: dict  # {'mean': float, 'stddev': float} - Table metadata write latency
 # Manifest list append mode
 MANIFEST_LIST_MODE: str  # "rewrite" (default) or "append"
+MANIFEST_LIST_SEAL_THRESHOLD: int  # Bytes before manifest list is sealed/rewritten (0 = disabled)
+MANIFEST_LIST_ENTRY_SIZE: int  # Average bytes per manifest list entry
 
 STATS = Stats()
 
@@ -221,7 +227,9 @@ def configure_from_toml(config_file: str):
     global REAL_CONFLICT_PROBABILITY, CONFLICTING_MANIFESTS_DIST, CONFLICTING_MANIFESTS_PARAMS
     global RETRY_BACKOFF_ENABLED, RETRY_BACKOFF_BASE_MS, RETRY_BACKOFF_MULTIPLIER, RETRY_BACKOFF_MAX_MS, RETRY_BACKOFF_JITTER
     global EXPERIMENT_LABEL
-    global CATALOG_MODE, COMPACTION_THRESHOLD, COMPACTION_MAX_ENTRIES, LOG_ENTRY_SIZE, MANIFEST_LIST_MODE
+    global CATALOG_MODE, COMPACTION_THRESHOLD, COMPACTION_MAX_ENTRIES, LOG_ENTRY_SIZE
+    global TABLE_METADATA_INLINED, T_TABLE_METADATA_R, T_TABLE_METADATA_W
+    global MANIFEST_LIST_MODE, MANIFEST_LIST_SEAL_THRESHOLD, MANIFEST_LIST_ENTRY_SIZE
     global T_APPEND, T_LOG_ENTRY_READ, T_COMPACTION
 
     with open(config_file, "rb") as f:
@@ -310,6 +318,21 @@ def configure_from_toml(config_file: str):
         'mean': config.get("storage", {}).get("T_COMPACTION", {}).get("mean", 200.0),
         'stddev': config.get("storage", {}).get("T_COMPACTION", {}).get("stddev", 20.0)
     }
+
+    # Table metadata inlining configuration
+    TABLE_METADATA_INLINED = config.get("catalog", {}).get("table_metadata_inlined", True)
+    T_TABLE_METADATA_R = {
+        'mean': config.get("storage", {}).get("T_TABLE_METADATA", {}).get("read", {}).get("mean", 20.0),
+        'stddev': config.get("storage", {}).get("T_TABLE_METADATA", {}).get("read", {}).get("stddev", 5.0)
+    }
+    T_TABLE_METADATA_W = {
+        'mean': config.get("storage", {}).get("T_TABLE_METADATA", {}).get("write", {}).get("mean", 30.0),
+        'stddev': config.get("storage", {}).get("T_TABLE_METADATA", {}).get("write", {}).get("stddev", 5.0)
+    }
+
+    # Manifest list append configuration
+    MANIFEST_LIST_SEAL_THRESHOLD = config.get("transaction", {}).get("manifest_list_seal_threshold", 0)  # 0 = disabled
+    MANIFEST_LIST_ENTRY_SIZE = config.get("transaction", {}).get("manifest_list_entry_size", 50)  # 50 bytes default
 
     # Load runtime-related configuration
     N_TXN_RETRY = config["transaction"]["retry"]
@@ -574,6 +597,14 @@ def get_compaction_latency() -> float:
     return generate_latency(T_COMPACTION['mean'], T_COMPACTION['stddev'])
 
 
+def get_table_metadata_latency(operation: str) -> float:
+    """Get table metadata latency for read or write operation."""
+    if operation == 'read':
+        return generate_latency(T_TABLE_METADATA_R['mean'], T_TABLE_METADATA_R['stddev'])
+    else:
+        return generate_latency(T_TABLE_METADATA_W['mean'], T_TABLE_METADATA_W['stddev'])
+
+
 def sample_conflicting_manifests() -> int:
     """Sample number of conflicting manifest files from configured distribution.
 
@@ -826,6 +857,9 @@ class Catalog:
         self.tbl = [0] * N_TABLES
         # Track last committed transaction per group (for table-level conflicts when N_GROUPS == N_TABLES)
         self.group_seq = [0] * N_GROUPS if N_GROUPS > 1 else None
+        # Per-table manifest list state for append mode
+        self.ml_offset = [0] * N_TABLES  # Manifest list byte offset per table
+        self.ml_sealed = [False] * N_TABLES  # Whether manifest list is sealed (needs rewrite)
 
     def try_CAS(self, sim, txn):
         """Attempt compare-and-swap for transaction commit.
@@ -863,6 +897,69 @@ class Catalog:
                 return True
             return False
 
+    def try_ML_APPEND(self, sim, tbl_id: int, expected_offset: int, expected_ver: int) -> tuple[bool, bool]:
+        """Attempt conditional append to a table's manifest list.
+
+        Uses same physical/logical protocol as catalog append:
+        1. Physical check: Does offset match? If not, retry at new offset.
+        2. Logical check: Does table version match? If not, conflict.
+
+        Unlike catalog, when threshold exceeded, manifest list is sealed and
+        must be rewritten (new object) rather than CAS'd.
+
+        Args:
+            sim: SimPy environment
+            tbl_id: Table ID
+            expected_offset: Expected manifest list offset
+            expected_ver: Expected table version
+
+        Returns:
+            (physical_success, logical_success):
+            - (False, None): Offset moved OR manifest list sealed
+            - (True, False): Offset matched but table version conflict
+            - (True, True): Append succeeded
+        """
+        # Check if manifest list is sealed (needs rewrite)
+        if self.ml_sealed[tbl_id]:
+            logger.debug(f"{sim.now} ML_APPEND table {tbl_id} SEALED - needs rewrite")
+            return (False, None)
+
+        # Physical check: Does offset match?
+        if self.ml_offset[tbl_id] != expected_offset:
+            logger.debug(f"{sim.now} ML_APPEND table {tbl_id} PHYSICAL_FAIL - "
+                        f"offset {self.ml_offset[tbl_id]} != expected {expected_offset}")
+            return (False, None)
+
+        # Physical success - now do logical validation
+        if self.tbl[tbl_id] != expected_ver:
+            # Logical conflict - table was modified
+            logger.debug(f"{sim.now} ML_APPEND table {tbl_id} LOGICAL_FAIL - "
+                        f"version {self.tbl[tbl_id]} != expected {expected_ver}")
+            # Entry in manifest list log, but not applied
+            self.ml_offset[tbl_id] += MANIFEST_LIST_ENTRY_SIZE
+            self._check_ml_seal_threshold(tbl_id)
+            return (True, False)
+
+        # Logical success - update offset
+        self.ml_offset[tbl_id] += MANIFEST_LIST_ENTRY_SIZE
+        self._check_ml_seal_threshold(tbl_id)
+        logger.debug(f"{sim.now} ML_APPEND table {tbl_id} OK - offset now {self.ml_offset[tbl_id]}")
+        return (True, True)
+
+    def _check_ml_seal_threshold(self, tbl_id: int):
+        """Check if manifest list threshold reached and seal if needed."""
+        if MANIFEST_LIST_SEAL_THRESHOLD > 0 and self.ml_offset[tbl_id] >= MANIFEST_LIST_SEAL_THRESHOLD:
+            self.ml_sealed[tbl_id] = True
+            logger.debug(f"ML table {tbl_id} SEALED - threshold reached")
+
+    def rewrite_manifest_list(self, tbl_id: int):
+        """Rewrite manifest list (unseals it)."""
+        self.ml_sealed[tbl_id] = False
+        # Offset resets to entry size (one entry in new object)
+        self.ml_offset[tbl_id] = MANIFEST_LIST_ENTRY_SIZE
+        logger.debug(f"ML table {tbl_id} REWRITTEN - offset reset")
+
+
 @dataclass
 class Txn:
     id: int
@@ -877,6 +974,7 @@ class Txn:
     v_dirty: dict[int, int] = field(default_factory=lambda: defaultdict(dict)) # versions validated (init union(v_tblr, v_tblw))
     # Append mode fields
     v_log_offset: int = 0  # Log offset when snapshot was taken (for append mode)
+    v_ml_offset: dict[int, int] = field(default_factory=dict)  # Per-table manifest list offsets
 
 
 @dataclass
@@ -920,6 +1018,9 @@ class AppendCatalog:
         self.entries_since_checkpoint = 0  # Number of entries since last compaction
         self.sealed = False  # If True, next commit must CAS (compaction needed)
         self.committed_txn: set[int] = set()  # Successful transaction IDs
+        # Per-table manifest list state for append mode
+        self.ml_offset = [0] * N_TABLES  # Manifest list byte offset per table
+        self.ml_sealed = [False] * N_TABLES  # Whether manifest list is sealed (needs rewrite)
 
     def try_APPEND(self, sim, txn, entry: LogEntry) -> tuple[bool, bool]:
         """Attempt conditional append with table-level validation.
@@ -1025,6 +1126,49 @@ class AppendCatalog:
         logger.debug(f"{sim.now} TXN {txn.id} COMPACTED - offset {self.log_offset}")
         return True
 
+    def try_ML_APPEND(self, sim, tbl_id: int, expected_offset: int, expected_ver: int) -> tuple[bool, bool]:
+        """Attempt conditional append to a table's manifest list.
+
+        Uses same physical/logical protocol as catalog append.
+        See Catalog.try_ML_APPEND for full documentation.
+        """
+        # Check if manifest list is sealed (needs rewrite)
+        if self.ml_sealed[tbl_id]:
+            logger.debug(f"{sim.now} ML_APPEND table {tbl_id} SEALED - needs rewrite")
+            return (False, None)
+
+        # Physical check: Does offset match?
+        if self.ml_offset[tbl_id] != expected_offset:
+            logger.debug(f"{sim.now} ML_APPEND table {tbl_id} PHYSICAL_FAIL - "
+                        f"offset {self.ml_offset[tbl_id]} != expected {expected_offset}")
+            return (False, None)
+
+        # Physical success - now do logical validation
+        if self.tbl[tbl_id] != expected_ver:
+            logger.debug(f"{sim.now} ML_APPEND table {tbl_id} LOGICAL_FAIL - "
+                        f"version {self.tbl[tbl_id]} != expected {expected_ver}")
+            self.ml_offset[tbl_id] += MANIFEST_LIST_ENTRY_SIZE
+            self._check_ml_seal_threshold(tbl_id)
+            return (True, False)
+
+        # Logical success
+        self.ml_offset[tbl_id] += MANIFEST_LIST_ENTRY_SIZE
+        self._check_ml_seal_threshold(tbl_id)
+        logger.debug(f"{sim.now} ML_APPEND table {tbl_id} OK - offset now {self.ml_offset[tbl_id]}")
+        return (True, True)
+
+    def _check_ml_seal_threshold(self, tbl_id: int):
+        """Check if manifest list threshold reached and seal if needed."""
+        if MANIFEST_LIST_SEAL_THRESHOLD > 0 and self.ml_offset[tbl_id] >= MANIFEST_LIST_SEAL_THRESHOLD:
+            self.ml_sealed[tbl_id] = True
+            logger.debug(f"ML table {tbl_id} SEALED - threshold reached")
+
+    def rewrite_manifest_list(self, tbl_id: int):
+        """Rewrite manifest list (unseals it)."""
+        self.ml_sealed[tbl_id] = False
+        self.ml_offset[tbl_id] = MANIFEST_LIST_ENTRY_SIZE
+        logger.debug(f"ML table {tbl_id} REWRITTEN - offset reset")
+
 
 def txn_ml_w(sim, txn):
     """Write manifest lists for all tables written in transaction."""
@@ -1035,15 +1179,15 @@ def txn_ml_w(sim, txn):
 
 
 def txn_ml_append(sim, txn, catalog):
-    """Append to manifest lists instead of rewriting (append mode).
+    """Append to manifest lists using physical/logical protocol.
 
-    For each table being written, attempts a conditional append at the
-    expected table version. If the version has changed, the append fails
-    and must be retried after reading the new manifest state.
+    Uses same protocol as catalog append:
+    1. Physical check: Does offset match?
+    2. After physical success, re-read to discover logical outcome
+    3. Logical check: Did table version match?
 
-    This function models per-table atomic append operations where:
-    - Success: table version matches, append succeeds
-    - Failure: table version changed, need to retry
+    Unlike catalog, when threshold exceeded, manifest list is sealed and must
+    be rewritten (new object) rather than CAS'd.
 
     Args:
         sim: SimPy environment
@@ -1053,30 +1197,73 @@ def txn_ml_append(sim, txn, catalog):
     Yields:
         SimPy timeout events for I/O operations
     """
-    for tbl_id, expected_ver in txn.v_dirty.items():
-        if tbl_id not in txn.v_tblw:
-            continue  # Only append for tables we're writing
+    for tbl_id in txn.v_tblw.keys():
+        expected_ver = txn.v_dirty.get(tbl_id, 0)
+        expected_offset = txn.v_ml_offset.get(tbl_id, 0)
 
-        current_ver = catalog.tbl[tbl_id]
+        # Check if manifest list is sealed - must rewrite
+        if catalog.ml_sealed[tbl_id]:
+            STATS.manifest_append_sealed_rewrite += 1
+            logger.debug(f"{sim.now} TXN {txn.id} ML table {tbl_id} SEALED - rewriting")
 
-        if current_ver == expected_ver:
-            # Version matches - append succeeds
-            yield sim.timeout(get_manifest_list_latency('write'))
-            STATS.manifest_append_success += 1
-            logger.debug(f"{sim.now} TXN {txn.id} ML_APPEND table {tbl_id} v{expected_ver} OK")
-        else:
-            # Version mismatch - need to read current state and potentially retry
-            STATS.manifest_append_retry += 1
-            logger.debug(f"{sim.now} TXN {txn.id} ML_APPEND table {tbl_id} "
-                        f"MISMATCH (expected v{expected_ver}, got v{current_ver})")
-
-            # Read current manifest list to get new state
+            # Read current manifest list, rewrite it
             yield sim.timeout(get_manifest_list_latency('read'))
+            yield sim.timeout(get_manifest_list_latency('write'))
+            catalog.rewrite_manifest_list(tbl_id)
 
-            # Update our view of the table version
-            txn.v_dirty[tbl_id] = current_ver
+            # Update our offset
+            txn.v_ml_offset[tbl_id] = catalog.ml_offset[tbl_id]
+            continue
 
-            # Retry the append with updated version reference
+        # Attempt physical append
+        yield sim.timeout(get_append_latency())
+        physical_success, logical_success = catalog.try_ML_APPEND(
+            sim, tbl_id, expected_offset, expected_ver
+        )
+
+        # Physical failure: offset moved or sealed, retry at new offset
+        while not physical_success:
+            STATS.manifest_append_physical_failure += 1
+
+            # Check if sealed during our attempt
+            if catalog.ml_sealed[tbl_id]:
+                STATS.manifest_append_sealed_rewrite += 1
+                logger.debug(f"{sim.now} TXN {txn.id} ML table {tbl_id} SEALED during append - rewriting")
+                yield sim.timeout(get_manifest_list_latency('read'))
+                yield sim.timeout(get_manifest_list_latency('write'))
+                catalog.rewrite_manifest_list(tbl_id)
+                txn.v_ml_offset[tbl_id] = catalog.ml_offset[tbl_id]
+                break
+
+            # Update offset and retry
+            txn.v_ml_offset[tbl_id] = catalog.ml_offset[tbl_id]
+            yield sim.timeout(get_append_latency())
+            physical_success, logical_success = catalog.try_ML_APPEND(
+                sim, tbl_id, txn.v_ml_offset[tbl_id], expected_ver
+            )
+
+        if not physical_success:
+            continue  # Handled by rewrite above
+
+        STATS.manifest_append_physical_success += 1
+
+        # Physical success - re-read to discover logical outcome
+        yield sim.timeout(get_manifest_list_latency('read') / 2)
+
+        if logical_success:
+            STATS.manifest_append_logical_success += 1
+            logger.debug(f"{sim.now} TXN {txn.id} ML_APPEND table {tbl_id} COMMIT")
+        else:
+            # Logical failure - table version conflict
+            STATS.manifest_append_logical_conflict += 1
+            logger.debug(f"{sim.now} TXN {txn.id} ML_APPEND table {tbl_id} CONFLICT")
+
+            # Read current manifest list to repair
+            yield sim.timeout(get_manifest_list_latency('read'))
+            txn.v_dirty[tbl_id] = catalog.tbl[tbl_id]
+            txn.v_ml_offset[tbl_id] = catalog.ml_offset[tbl_id]
+
+            # Retry with updated state
             yield sim.timeout(get_manifest_list_latency('write'))
 
     logger.debug(f"{sim.now} TXN {txn.id} ML_APPEND complete")
@@ -1267,8 +1454,24 @@ def txn_gen(sim, txn_id, catalog):
     if CATALOG_MODE == "append":
         txn.v_log_offset = catalog.log_offset
 
+    # Capture manifest list offsets for append mode
+    if MANIFEST_LIST_MODE == "append":
+        for tbl_id in list(tblr.keys()) + list(tblw.keys()):
+            txn.v_ml_offset[tbl_id] = catalog.ml_offset[tbl_id]
+
+    # If table metadata is NOT inlined, read it separately
+    if not TABLE_METADATA_INLINED:
+        for tbl_id in list(tblr.keys()) + list(tblw.keys()):
+            yield sim.timeout(get_table_metadata_latency('read'))
+
     # run the transaction
     yield sim.timeout(txn.t_runtime)
+
+    # If table metadata is NOT inlined, write it before manifest list
+    if not TABLE_METADATA_INLINED:
+        for tbl_id in tblw.keys():
+            yield sim.timeout(get_table_metadata_latency('write'))
+
     # write the manifest list (use append mode if configured)
     if MANIFEST_LIST_MODE == "append":
         yield sim.process(txn_ml_append(sim, txn, catalog))
