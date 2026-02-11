@@ -18,7 +18,7 @@ label = "exp8_1_metadata_inlining_s3x"
 
 [catalog]
 num_tables = 10
-num_groups = 10
+num_groups = 1
 # KEY PARAMETER: Toggle this between runs
 table_metadata_inlined = false
 

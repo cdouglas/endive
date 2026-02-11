@@ -22,7 +22,7 @@ label = "exp8_2_metadata_inlining_azurex"
 
 [catalog]
 num_tables = 10
-num_groups = 10
+num_groups = 1
 # KEY PARAMETER: Toggle this between runs
 table_metadata_inlined = false
 

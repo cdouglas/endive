@@ -21,7 +21,7 @@ label = "exp8_3_ml_append_s3x"
 
 [catalog]
 num_tables = 10
-num_groups = 10
+num_groups = 1
 table_metadata_inlined = true  # Keep metadata inlined for baseline comparison
 
 [transaction]

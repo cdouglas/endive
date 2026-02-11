@@ -22,7 +22,7 @@ label = "exp8_5_combined_s3x"
 
 [catalog]
 num_tables = 10
-num_groups = 10
+num_groups = 1
 # COMBINED OPTIMIZATIONS:
 table_metadata_inlined = false  # Separate table metadata files
 # Note: This adds read/write overhead per table

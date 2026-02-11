@@ -21,7 +21,7 @@ label = "exp8_6_combined_azurex"
 
 [catalog]
 num_tables = 10
-num_groups = 10
+num_groups = 1
 table_metadata_inlined = false
 
 [transaction]

@@ -15,7 +15,7 @@ label = "exp8_8_ml_append_azure"
 
 [catalog]
 num_tables = 10
-num_groups = 10
+num_groups = 1
 table_metadata_inlined = true
 
 [transaction]
