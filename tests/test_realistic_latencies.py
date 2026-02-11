@@ -563,6 +563,135 @@ T_CAS.sigma = 0.6
         assert main.T_CAS['sigma'] == 0.6
 
 
+class TestConfigPrecedence:
+    """Test configuration precedence rules (Phase 3)."""
+
+    def test_no_provider_uses_explicit_config(self, tmp_path):
+        """Without provider, explicit config is used directly."""
+        config_content = """
+[simulation]
+duration_ms = 10000
+output_path = "results.parquet"
+seed = 42
+
+[catalog]
+num_tables = 1
+
+[transaction]
+retry = 3
+runtime.min = 1000
+runtime.mean = 5000
+runtime.sigma = 0.5
+inter_arrival.distribution = "exponential"
+inter_arrival.scale = 500
+
+[storage]
+max_parallel = 4
+min_latency = 1
+T_CAS.median = 75.0
+T_CAS.sigma = 0.5
+T_MANIFEST_LIST.read.median = 100.0
+T_MANIFEST_LIST.read.sigma = 0.4
+T_MANIFEST_LIST.write.median = 120.0
+T_MANIFEST_LIST.write.sigma = 0.4
+T_MANIFEST_FILE.read.median = 100.0
+T_MANIFEST_FILE.read.sigma = 0.4
+T_MANIFEST_FILE.write.median = 120.0
+T_MANIFEST_FILE.write.sigma = 0.4
+"""
+        config_file = tmp_path / "test_config.toml"
+        config_file.write_text(config_content)
+
+        main.configure_from_toml(str(config_file))
+
+        # All values should come from explicit config
+        assert main.STORAGE_PROVIDER is None
+        assert abs(np.exp(main.T_CAS['mu']) - 75) < 0.1
+        assert abs(np.exp(main.T_MANIFEST_LIST['read']['mu']) - 100) < 0.1
+
+    def test_provider_plus_partial_override(self, tmp_path):
+        """Provider sets defaults, explicit config overrides specific values."""
+        config_content = """
+[simulation]
+duration_ms = 10000
+output_path = "results.parquet"
+seed = 42
+
+[catalog]
+num_tables = 1
+
+[transaction]
+retry = 3
+runtime.min = 1000
+runtime.mean = 5000
+runtime.sigma = 0.5
+inter_arrival.distribution = "exponential"
+inter_arrival.scale = 500
+
+[storage]
+provider = "aws"
+max_parallel = 4
+min_latency = 1
+# Override just CAS, keep AWS defaults for manifests
+T_CAS.median = 100.0
+T_CAS.sigma = 0.6
+"""
+        config_file = tmp_path / "test_config.toml"
+        config_file.write_text(config_content)
+
+        main.configure_from_toml(str(config_file))
+
+        # CAS should use explicit config
+        assert abs(np.exp(main.T_CAS['mu']) - 100) < 0.1
+        assert main.T_CAS['sigma'] == 0.6
+
+        # Manifests should use AWS profile defaults (median=50)
+        assert abs(np.exp(main.T_MANIFEST_LIST['read']['mu']) - 50) < 1
+
+    def test_service_provider_overrides_storage_provider(self, tmp_path):
+        """catalog.service.provider should override storage.provider for catalog ops."""
+        config_content = """
+[simulation]
+duration_ms = 10000
+output_path = "results.parquet"
+seed = 42
+
+[catalog]
+num_tables = 1
+backend = "service"
+
+[catalog.service]
+provider = "azure"
+
+[transaction]
+retry = 3
+runtime.min = 1000
+runtime.mean = 5000
+runtime.sigma = 0.5
+inter_arrival.distribution = "exponential"
+inter_arrival.scale = 500
+
+[storage]
+provider = "aws"
+max_parallel = 4
+min_latency = 1
+"""
+        config_file = tmp_path / "test_config.toml"
+        config_file.write_text(config_content)
+
+        main.configure_from_toml(str(config_file))
+
+        # Storage uses AWS
+        assert main.STORAGE_PROVIDER == "aws"
+        # AWS manifest: median=50
+        assert abs(np.exp(main.T_MANIFEST_LIST['read']['mu']) - 50) < 1
+
+        # Catalog service uses Azure
+        # Azure CAS: median=75, sigma=0.80
+        assert abs(np.exp(main.T_CAS['mu']) - 75) < 1
+        assert abs(main.T_CAS['sigma'] - 0.80) < 0.01
+
+
 class TestLatencyPercentiles:
     """Test that generated latencies match expected percentiles."""
 
