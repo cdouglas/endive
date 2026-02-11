@@ -1,10 +1,8 @@
 .idea/
 __pycache__/
-bin/
-lib/
-share/
-lib64
-pyvenv.cfg
+.venv/
+*.swp
+*.egg-info/
 experiments/
 experiment_logs/
 plots/

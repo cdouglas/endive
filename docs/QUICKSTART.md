@@ -6,9 +6,9 @@ Get started with the Iceberg Catalog Simulator in minutes.
 
 ```bash
 # Create and activate virtual environment
-python3 -m venv .
-source bin/activate  # Linux/Mac
-# or: .\Scripts\activate  # Windows
+python3 -m venv .venv
+source .venv/bin/activate  # Linux/Mac
+# or: .venv\Scripts\activate  # Windows
 
 # Install dependencies and package
 pip install -r requirements.txt

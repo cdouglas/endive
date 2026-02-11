@@ -171,7 +171,7 @@ tail -50 experiment_logs/baseline_experiments_*.log
 
 # Common issues:
 # 1. Virtual environment not activated
-source bin/activate
+source .venv/bin/activate
 
 # 2. Module not installed
 pip install -e .
