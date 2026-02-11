@@ -1602,8 +1602,10 @@ class ConflictResolver:
         """Resolve false conflict (version changed, no data overlap).
 
         Manifest lists were already read in read_manifest_lists().
-        Only need to read metadata to understand the new snapshot state.
-        No manifest file operations required.
+        Must read table metadata (JSON) to understand the new snapshot state,
+        merge our changes, and write updated table metadata.
+
+        No manifest file operations required (data doesn't overlap).
 
         Args:
             sim: SimPy environment
@@ -1616,7 +1618,16 @@ class ConflictResolver:
         # Read metadata root to understand new snapshot
         yield sim.timeout(get_metadata_root_latency('read'))
 
-        # Update validation version (no file operations needed)
+        # Read table metadata (JSON blob) to get current state
+        # This is required even for false conflicts to merge snapshot metadata
+        if not TABLE_METADATA_INLINED:
+            yield sim.timeout(get_table_metadata_latency('read'))
+
+        # Write merged table metadata with our snapshot included
+        if not TABLE_METADATA_INLINED:
+            yield sim.timeout(get_table_metadata_latency('write'))
+
+        # Update validation version
         txn.v_dirty[table_id] = v_catalog[table_id]
 
     @staticmethod
@@ -1644,6 +1655,10 @@ class ConflictResolver:
 
         # Read metadata root
         yield sim.timeout(get_metadata_root_latency('read'))
+
+        # Read table metadata (JSON blob) to get current snapshot state
+        if not TABLE_METADATA_INLINED:
+            yield sim.timeout(get_table_metadata_latency('read'))
 
         # Read manifest list (to get pointers to manifest files)
         # Use size-based latency if catalog and T_PUT available
@@ -1709,6 +1724,10 @@ class ConflictResolver:
                 yield sim.timeout(get_manifest_list_write_latency(ml_size))
             else:
                 yield sim.timeout(get_manifest_list_latency('write'))
+
+        # Write merged table metadata (JSON blob) with updated manifest list pointer
+        if not TABLE_METADATA_INLINED:
+            yield sim.timeout(get_table_metadata_latency('write'))
 
         # Update validation version
         txn.v_dirty[table_id] = v_catalog[table_id]

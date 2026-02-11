@@ -337,4 +337,30 @@ critical for understanding conflict resolution with ML+.
 
 ---
 
+## Conflict Resolution Table Metadata (Phase 6b)
+
+### Bug Fixed
+
+Previously, conflict resolution (`resolve_false_conflict` and `resolve_real_conflict`) did NOT model table metadata reads/writes. This under-estimated the cost of conflict resolution.
+
+The blog post correctly states that a trivial conflict requires:
+> "read and write new table metadata (JSON blob ~1MiB), read all the interstitial manifest lists, and write the merged manifest list"
+
+### Changes Made
+
+1. **`resolve_false_conflict`**: Now reads table metadata (JSON) to understand new snapshot state, then writes merged table metadata (when `TABLE_METADATA_INLINED = false`)
+
+2. **`resolve_real_conflict`**: Now reads table metadata at start, writes merged table metadata after manifest list update (when `TABLE_METADATA_INLINED = false`)
+
+### Impact
+
+With `TABLE_METADATA_INLINED = false`, conflict resolution now correctly models:
+- ~10-30ms to read table metadata (size-based)
+- ~10-30ms to write table metadata (size-based)
+- Per-conflict overhead increased by ~20-60ms for S3
+
+This makes the simulation more accurate and likely shows **lower** sustainable throughput than previous results.
+
+---
+
 *Last updated: Phase 6 - Size-based PUT latency*
