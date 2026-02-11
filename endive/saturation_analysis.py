@@ -332,11 +332,25 @@ def extract_key_parameters(config: Dict) -> Dict:
 
     # Extract storage/catalog latency parameters
     if 'storage' in config:
+        # Extract storage provider (s3, s3x, azure, azurex, gcp, instant)
+        params['storage_provider'] = config['storage'].get('provider', None)
+
         # Extract T_CAS (catalog CAS operation latency)
         if 'T_CAS' in config['storage']:
             t_cas = config['storage']['T_CAS']
             if isinstance(t_cas, dict):
                 params['t_cas_mean'] = t_cas.get('mean', None)
+                params['t_cas_median'] = t_cas.get('median', None)
+
+    # Extract catalog mode and backend
+    if 'catalog' in config:
+        params['catalog_mode'] = config['catalog'].get('mode', 'cas')
+        params['catalog_backend'] = config['catalog'].get('backend', 'storage')
+        params['table_metadata_inlined'] = config['catalog'].get('table_metadata_inlined', True)
+
+    # Extract manifest list mode
+    if 'transaction' in config:
+        params['manifest_list_mode'] = config['transaction'].get('manifest_list_mode', 'rewrite')
 
     return params
 
