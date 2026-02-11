@@ -29,11 +29,15 @@ LONGTAIL_PARAMS: dict  # Parameters for longtail distribution
 TABLE_TO_GROUP: dict  # Mapping from table ID to group ID
 GROUP_TO_TABLES: dict  # Mapping from group ID to list of table IDs
 N_TXN_RETRY: int
-# Storage operation latencies (normal distributions with mean and stddev)
-T_CAS: dict  # {'mean': float, 'stddev': float}
-T_METADATA_ROOT: dict  # {'read': {'mean': float, 'stddev': float}, 'write': {...}}
+# Storage operation latencies
+# New format: {'mu': float, 'sigma': float, 'distribution': 'lognormal'}
+# Legacy format: {'mean': float, 'stddev': float, 'distribution': 'normal'}
+T_CAS: dict
+T_METADATA_ROOT: dict  # {'read': {...}, 'write': {...}}
 T_MANIFEST_LIST: dict
 T_MANIFEST_FILE: dict
+# Latency distribution type: "lognormal" (recommended) or "normal" (legacy)
+LATENCY_DISTRIBUTION: str
 MAX_PARALLEL: int  # Maximum parallel manifest operations during conflict resolution
 MIN_LATENCY: float  # Minimum latency for any storage operation (prevents unrealistic zeros)
 # lognormal distribution of transaction runtimes
@@ -78,6 +82,154 @@ MANIFEST_LIST_SEAL_THRESHOLD: int  # Bytes before manifest list is sealed/rewrit
 MANIFEST_LIST_ENTRY_SIZE: int  # Average bytes per manifest list entry
 
 STATS = Stats()
+
+# =============================================================================
+# Provider Profiles - Based on June 2025 YCSB benchmark measurements
+# =============================================================================
+
+PROVIDER_PROFILES = {
+    "aws": {
+        # Storage operations (S3)
+        "manifest_list": {
+            "read": {"median": 50, "sigma": 0.3},
+            "write": {"median": 60, "sigma": 0.3}
+        },
+        "manifest_file": {
+            "read": {"median": 50, "sigma": 0.3},
+            "write": {"median": 60, "sigma": 0.3}
+        },
+        # Catalog operations (when backend = "storage")
+        # AWS CAS: mu=10.16, sigma=0.45, median=23ms
+        "cas": {"median": 23, "sigma": 0.45, "failure_multiplier": 1.17},
+        # AWS Append: mu=9.90, sigma=0.25, median=20ms
+        "append": {"median": 20, "sigma": 0.25, "failure_multiplier": 1.09},
+        "contention_scaling": {"cas": 1.4, "append": 1.8},
+    },
+    "azure": {
+        "manifest_list": {
+            "read": {"median": 75, "sigma": 0.3},
+            "write": {"median": 85, "sigma": 0.3}
+        },
+        "manifest_file": {
+            "read": {"median": 75, "sigma": 0.3},
+            "write": {"median": 85, "sigma": 0.3}
+        },
+        # Azure CAS: mu=11.44, sigma=0.80, median=75ms (heavy tails!)
+        "cas": {"median": 75, "sigma": 0.80, "failure_multiplier": 1.02},
+        # Azure Append: mu=11.25, sigma=0.28, median=77ms
+        # Note: Azure append failures are 34x slower than successes!
+        "append": {"median": 77, "sigma": 0.28, "failure_multiplier": 34.3},
+        "contention_scaling": {"cas": 5.8, "append": 1.1},
+    },
+    "gcp": {
+        "manifest_list": {
+            "read": {"median": 100, "sigma": 0.5},
+            "write": {"median": 120, "sigma": 0.5}
+        },
+        "manifest_file": {
+            "read": {"median": 100, "sigma": 0.5},
+            "write": {"median": 120, "sigma": 0.5}
+        },
+        # GCP CAS: mu=12.44, sigma=0.91, median=170ms (very heavy tails)
+        "cas": {"median": 170, "sigma": 0.91, "failure_multiplier": 13.4},
+        "append": None,  # No append data available for GCP
+        "contention_scaling": {"cas": 0.7, "append": None},
+    },
+    "instant": {
+        # Hypothetical infinitely fast system for "what if" experiments
+        "manifest_list": {
+            "read": {"median": 1, "sigma": 0.1},
+            "write": {"median": 1, "sigma": 0.1}
+        },
+        "manifest_file": {
+            "read": {"median": 1, "sigma": 0.1},
+            "write": {"median": 1, "sigma": 0.1}
+        },
+        "cas": {"median": 1, "sigma": 0.1, "failure_multiplier": 1.0},
+        "append": {"median": 1, "sigma": 0.1, "failure_multiplier": 1.0},
+        "contention_scaling": {"cas": 1.0, "append": 1.0},
+    },
+}
+
+
+def lognormal_mu_from_median(median_ms: float) -> float:
+    """Convert median to lognormal mu parameter.
+
+    For lognormal distribution, median = exp(mu), so mu = ln(median).
+    """
+    return np.log(median_ms)
+
+
+def convert_mean_stddev_to_lognormal(mean: float, stddev: float) -> tuple[float, float]:
+    """Convert mean/stddev (normal) to approximate lognormal parameters.
+
+    This provides backward compatibility for legacy configs.
+    Uses the approximation: mu = ln(mean) - sigma²/2
+    where sigma is estimated from CV (coefficient of variation).
+    """
+    if mean <= 0:
+        return (0.0, 0.1)  # Fallback for invalid input
+
+    # Estimate sigma from coefficient of variation
+    cv = stddev / mean if mean > 0 else 0.1
+    # For lognormal, CV = sqrt(exp(sigma²) - 1)
+    # Solving: sigma = sqrt(ln(CV² + 1))
+    sigma = np.sqrt(np.log(cv ** 2 + 1)) if cv > 0 else 0.1
+    sigma = max(0.1, min(sigma, 1.5))  # Clamp to reasonable range
+
+    # mu = ln(median) and for lognormal, median = mean / exp(sigma²/2)
+    mu = np.log(mean) - (sigma ** 2 / 2)
+
+    return mu, sigma
+
+
+def parse_latency_config(config_section: dict, defaults: dict = None) -> dict:
+    """Parse latency configuration supporting both legacy and new formats.
+
+    Legacy format (normal distribution):
+        {'mean': 50.0, 'stddev': 5.0}
+
+    New format (lognormal distribution):
+        {'median': 50.0, 'sigma': 0.3}
+        {'median': 50.0, 'sigma': 0.3, 'failure_multiplier': 1.2}
+
+    Returns dict with 'mu', 'sigma', 'distribution', and optionally 'failure_multiplier'.
+    """
+    result = {}
+
+    # Check for new lognormal format
+    if 'median' in config_section:
+        median = config_section['median']
+        sigma = config_section.get('sigma', 0.3)
+        result['mu'] = lognormal_mu_from_median(median)
+        result['sigma'] = sigma
+        result['distribution'] = 'lognormal'
+        if 'failure_multiplier' in config_section:
+            result['failure_multiplier'] = config_section['failure_multiplier']
+    # Legacy normal format
+    elif 'mean' in config_section:
+        mean = config_section['mean']
+        stddev = config_section.get('stddev', mean * 0.1)
+        # Check if we should convert to lognormal
+        if config_section.get('distribution', 'normal') == 'lognormal':
+            mu, sigma = convert_mean_stddev_to_lognormal(mean, stddev)
+            result['mu'] = mu
+            result['sigma'] = sigma
+            result['distribution'] = 'lognormal'
+        else:
+            # Keep as normal distribution (legacy behavior)
+            result['mean'] = mean
+            result['stddev'] = stddev
+            result['distribution'] = 'normal'
+    # Use defaults if provided
+    elif defaults:
+        result = defaults.copy()
+    else:
+        # Fallback defaults
+        result = {'mu': np.log(50), 'sigma': 0.3, 'distribution': 'lognormal'}
+
+    return result
+
 
 def partition_tables_into_groups(n_tables: int, n_groups: int, distribution: str, longtail_params: dict) -> tuple[dict, dict]:
     """Partition tables into groups.
@@ -231,6 +383,7 @@ def configure_from_toml(config_file: str):
     global TABLE_METADATA_INLINED, T_TABLE_METADATA_R, T_TABLE_METADATA_W
     global MANIFEST_LIST_MODE, MANIFEST_LIST_SEAL_THRESHOLD, MANIFEST_LIST_ENTRY_SIZE
     global T_APPEND, T_LOG_ENTRY_READ, T_COMPACTION
+    global LATENCY_DISTRIBUTION
 
     with open(config_file, "rb") as f:
         config = tomllib.load(f)
@@ -263,72 +416,90 @@ def configure_from_toml(config_file: str):
     COMPACTION_MAX_ENTRIES = config["catalog"].get("compaction_max_entries", 0)  # 0 = disabled (size only)
     LOG_ENTRY_SIZE = config["catalog"].get("log_entry_size", 100)  # 100 bytes default
 
-    # Load storage latencies (normal distributions)
+    # Load storage latencies - supports both legacy (mean/stddev) and new (median/sigma) formats
     MAX_PARALLEL = config["storage"]["max_parallel"]
     MIN_LATENCY = config["storage"]["min_latency"]
 
-    T_CAS = {
-        'mean': config["storage"]["T_CAS"]["mean"],
-        'stddev': config["storage"]["T_CAS"]["stddev"]
-    }
+    # Global latency distribution setting (can be overridden per-operation)
+    LATENCY_DISTRIBUTION = config.get("storage", {}).get("latency_distribution", "normal")
 
-    T_METADATA_ROOT = {
-        'read': {
-            'mean': config["storage"]["T_METADATA_ROOT"]["read"]["mean"],
-            'stddev': config["storage"]["T_METADATA_ROOT"]["read"]["stddev"]
-        },
-        'write': {
-            'mean': config["storage"]["T_METADATA_ROOT"]["write"]["mean"],
-            'stddev': config["storage"]["T_METADATA_ROOT"]["write"]["stddev"]
+    # Helper to get storage config with defaults
+    storage_cfg = config.get("storage", {})
+
+    # Parse T_CAS - check for both formats
+    if "T_CAS" in storage_cfg:
+        T_CAS = parse_latency_config(storage_cfg["T_CAS"])
+    else:
+        # Default: normal distribution for backward compatibility
+        T_CAS = {'mean': 100.0, 'stddev': 10.0, 'distribution': 'normal'}
+
+    # Parse T_METADATA_ROOT
+    if "T_METADATA_ROOT" in storage_cfg:
+        T_METADATA_ROOT = {
+            'read': parse_latency_config(storage_cfg["T_METADATA_ROOT"].get("read", {}),
+                                         {'mean': 1.0, 'stddev': 0.1, 'distribution': 'normal'}),
+            'write': parse_latency_config(storage_cfg["T_METADATA_ROOT"].get("write", {}),
+                                          {'mean': 1.0, 'stddev': 0.1, 'distribution': 'normal'})
         }
-    }
-
-    T_MANIFEST_LIST = {
-        'read': {
-            'mean': config["storage"]["T_MANIFEST_LIST"]["read"]["mean"],
-            'stddev': config["storage"]["T_MANIFEST_LIST"]["read"]["stddev"]
-        },
-        'write': {
-            'mean': config["storage"]["T_MANIFEST_LIST"]["write"]["mean"],
-            'stddev': config["storage"]["T_MANIFEST_LIST"]["write"]["stddev"]
+    else:
+        T_METADATA_ROOT = {
+            'read': {'mean': 1.0, 'stddev': 0.1, 'distribution': 'normal'},
+            'write': {'mean': 1.0, 'stddev': 0.1, 'distribution': 'normal'}
         }
-    }
 
-    T_MANIFEST_FILE = {
-        'read': {
-            'mean': config["storage"]["T_MANIFEST_FILE"]["read"]["mean"],
-            'stddev': config["storage"]["T_MANIFEST_FILE"]["read"]["stddev"]
-        },
-        'write': {
-            'mean': config["storage"]["T_MANIFEST_FILE"]["write"]["mean"],
-            'stddev': config["storage"]["T_MANIFEST_FILE"]["write"]["stddev"]
+    # Parse T_MANIFEST_LIST
+    if "T_MANIFEST_LIST" in storage_cfg:
+        T_MANIFEST_LIST = {
+            'read': parse_latency_config(storage_cfg["T_MANIFEST_LIST"].get("read", {}),
+                                         {'mean': 50.0, 'stddev': 5.0, 'distribution': 'normal'}),
+            'write': parse_latency_config(storage_cfg["T_MANIFEST_LIST"].get("write", {}),
+                                          {'mean': 60.0, 'stddev': 6.0, 'distribution': 'normal'})
         }
-    }
+    else:
+        T_MANIFEST_LIST = {
+            'read': {'mean': 50.0, 'stddev': 5.0, 'distribution': 'normal'},
+            'write': {'mean': 60.0, 'stddev': 6.0, 'distribution': 'normal'}
+        }
 
-    # Load append mode storage latencies (with defaults if not specified)
-    T_APPEND = {
-        'mean': config.get("storage", {}).get("T_APPEND", {}).get("mean", 50.0),
-        'stddev': config.get("storage", {}).get("T_APPEND", {}).get("stddev", 5.0)
-    }
-    T_LOG_ENTRY_READ = {
-        'mean': config.get("storage", {}).get("T_LOG_ENTRY_READ", {}).get("mean", 5.0),
-        'stddev': config.get("storage", {}).get("T_LOG_ENTRY_READ", {}).get("stddev", 1.0)
-    }
-    T_COMPACTION = {
-        'mean': config.get("storage", {}).get("T_COMPACTION", {}).get("mean", 200.0),
-        'stddev': config.get("storage", {}).get("T_COMPACTION", {}).get("stddev", 20.0)
-    }
+    # Parse T_MANIFEST_FILE
+    if "T_MANIFEST_FILE" in storage_cfg:
+        T_MANIFEST_FILE = {
+            'read': parse_latency_config(storage_cfg["T_MANIFEST_FILE"].get("read", {}),
+                                         {'mean': 50.0, 'stddev': 5.0, 'distribution': 'normal'}),
+            'write': parse_latency_config(storage_cfg["T_MANIFEST_FILE"].get("write", {}),
+                                          {'mean': 60.0, 'stddev': 6.0, 'distribution': 'normal'})
+        }
+    else:
+        T_MANIFEST_FILE = {
+            'read': {'mean': 50.0, 'stddev': 5.0, 'distribution': 'normal'},
+            'write': {'mean': 60.0, 'stddev': 6.0, 'distribution': 'normal'}
+        }
+
+    # Parse append mode storage latencies
+    T_APPEND = parse_latency_config(
+        storage_cfg.get("T_APPEND", {}),
+        {'mean': 50.0, 'stddev': 5.0, 'distribution': 'normal'}
+    )
+    T_LOG_ENTRY_READ = parse_latency_config(
+        storage_cfg.get("T_LOG_ENTRY_READ", {}),
+        {'mean': 5.0, 'stddev': 1.0, 'distribution': 'normal'}
+    )
+    T_COMPACTION = parse_latency_config(
+        storage_cfg.get("T_COMPACTION", {}),
+        {'mean': 200.0, 'stddev': 20.0, 'distribution': 'normal'}
+    )
 
     # Table metadata inlining configuration
     TABLE_METADATA_INLINED = config.get("catalog", {}).get("table_metadata_inlined", True)
-    T_TABLE_METADATA_R = {
-        'mean': config.get("storage", {}).get("T_TABLE_METADATA", {}).get("read", {}).get("mean", 20.0),
-        'stddev': config.get("storage", {}).get("T_TABLE_METADATA", {}).get("read", {}).get("stddev", 5.0)
-    }
-    T_TABLE_METADATA_W = {
-        'mean': config.get("storage", {}).get("T_TABLE_METADATA", {}).get("write", {}).get("mean", 30.0),
-        'stddev': config.get("storage", {}).get("T_TABLE_METADATA", {}).get("write", {}).get("stddev", 5.0)
-    }
+    table_metadata_cfg = storage_cfg.get("T_TABLE_METADATA", {})
+    T_TABLE_METADATA_R = parse_latency_config(
+        table_metadata_cfg.get("read", {}),
+        {'mean': 20.0, 'stddev': 5.0, 'distribution': 'normal'}
+    )
+    T_TABLE_METADATA_W = parse_latency_config(
+        table_metadata_cfg.get("write", {}),
+        {'mean': 30.0, 'stddev': 5.0, 'distribution': 'normal'}
+    )
 
     # Manifest list append configuration
     MANIFEST_LIST_SEAL_THRESHOLD = config.get("transaction", {}).get("manifest_list_seal_threshold", 0)  # 0 = disabled
@@ -552,57 +723,90 @@ def generate_inter_arrival_time():
 
 
 def generate_latency(mean: float, stddev: float) -> float:
-    """Generate storage operation latency from normal distribution.
+    """Generate storage operation latency from normal distribution (legacy).
 
     Enforces minimum latency to prevent unrealistic zero or near-zero values.
     """
     return max(MIN_LATENCY, np.random.normal(loc=mean, scale=stddev))
 
 
+def generate_latency_lognormal(mu: float, sigma: float) -> float:
+    """Generate storage operation latency from lognormal distribution.
+
+    Args:
+        mu: Mean of underlying normal distribution (log-scale).
+            For lognormal, median = exp(mu).
+        sigma: Std dev of underlying normal distribution (log-scale).
+            Higher sigma = heavier tail.
+
+    Returns:
+        Latency in milliseconds.
+    """
+    return max(MIN_LATENCY, np.random.lognormal(mean=mu, sigma=sigma))
+
+
+def generate_latency_from_config(params: dict) -> float:
+    """Generate latency based on configuration (supports both distributions).
+
+    Args:
+        params: Dict with either:
+            - {'mu': float, 'sigma': float, 'distribution': 'lognormal'}
+            - {'mean': float, 'stddev': float, 'distribution': 'normal'}
+
+    Returns:
+        Latency in milliseconds.
+    """
+    dist = params.get('distribution', 'normal')
+    if dist == 'lognormal':
+        return generate_latency_lognormal(params['mu'], params['sigma'])
+    else:
+        return generate_latency(params['mean'], params['stddev'])
+
+
 def get_cas_latency() -> float:
     """Get CAS operation latency."""
-    return generate_latency(T_CAS['mean'], T_CAS['stddev'])
+    return generate_latency_from_config(T_CAS)
 
 
 def get_metadata_root_latency(operation: str) -> float:
     """Get metadata root latency for read or write operation."""
     params = T_METADATA_ROOT[operation]
-    return generate_latency(params['mean'], params['stddev'])
+    return generate_latency_from_config(params)
 
 
 def get_manifest_list_latency(operation: str) -> float:
     """Get manifest list latency for read or write operation."""
     params = T_MANIFEST_LIST[operation]
-    return generate_latency(params['mean'], params['stddev'])
+    return generate_latency_from_config(params)
 
 
 def get_manifest_file_latency(operation: str) -> float:
     """Get manifest file latency for read or write operation."""
     params = T_MANIFEST_FILE[operation]
-    return generate_latency(params['mean'], params['stddev'])
+    return generate_latency_from_config(params)
 
 
 def get_append_latency() -> float:
     """Get append operation latency (for catalog log append)."""
-    return generate_latency(T_APPEND['mean'], T_APPEND['stddev'])
+    return generate_latency_from_config(T_APPEND)
 
 
 def get_log_entry_read_latency() -> float:
     """Get per-entry log read latency."""
-    return generate_latency(T_LOG_ENTRY_READ['mean'], T_LOG_ENTRY_READ['stddev'])
+    return generate_latency_from_config(T_LOG_ENTRY_READ)
 
 
 def get_compaction_latency() -> float:
     """Get compaction CAS latency (larger payload than normal CAS)."""
-    return generate_latency(T_COMPACTION['mean'], T_COMPACTION['stddev'])
+    return generate_latency_from_config(T_COMPACTION)
 
 
 def get_table_metadata_latency(operation: str) -> float:
     """Get table metadata latency for read or write operation."""
     if operation == 'read':
-        return generate_latency(T_TABLE_METADATA_R['mean'], T_TABLE_METADATA_R['stddev'])
+        return generate_latency_from_config(T_TABLE_METADATA_R)
     else:
-        return generate_latency(T_TABLE_METADATA_W['mean'], T_TABLE_METADATA_W['stddev'])
+        return generate_latency_from_config(T_TABLE_METADATA_W)
 
 
 def sample_conflicting_manifests() -> int:
@@ -746,12 +950,22 @@ class ConflictResolver:
             logger.debug(f"{sim.now} TXN {txn_id} Read batch of {batch_size} manifest lists")
 
     @staticmethod
-    def merge_table_conflicts(sim, txn: 'Txn', v_catalog: dict):
+    def merge_table_conflicts(sim, txn: 'Txn', v_catalog: dict, catalog=None):
         """Merge conflicts for tables that have changed.
 
         For each dirty table that has a different version in the catalog,
         determines if this is a false conflict (version changed but no data overlap)
         or a real conflict (overlapping data changes), and resolves accordingly.
+
+        In ML+ mode:
+        - False conflict: ML entry still valid (different partition), no ML update needed
+        - Real conflict: ML entry needs update, re-append with merged data
+
+        Args:
+            sim: SimPy environment
+            txn: Transaction object
+            v_catalog: Current catalog state
+            catalog: Catalog reference (needed for ML+ mode)
 
         Yields timeout events for each I/O operation.
         """
@@ -761,9 +975,11 @@ class ConflictResolver:
                 is_real_conflict = np.random.random() < REAL_CONFLICT_PROBABILITY
 
                 if is_real_conflict:
-                    yield from ConflictResolver.resolve_real_conflict(sim, txn, t, v_catalog)
+                    yield from ConflictResolver.resolve_real_conflict(sim, txn, t, v_catalog, catalog)
                     STATS.real_conflicts += 1
                 else:
+                    # False conflict: In ML+ mode, the tentative ML entry is still valid
+                    # (different partition, no data overlap). No ML update needed.
                     yield from ConflictResolver.resolve_false_conflict(sim, txn, t, v_catalog)
                     STATS.false_conflicts += 1
 
@@ -790,17 +1006,21 @@ class ConflictResolver:
         txn.v_dirty[table_id] = v_catalog[table_id]
 
     @staticmethod
-    def resolve_real_conflict(sim, txn, table_id: int, v_catalog: dict):
+    def resolve_real_conflict(sim, txn, table_id: int, v_catalog: dict, catalog=None):
         """Resolve real conflict (overlapping data changes).
 
         Must read and rewrite manifest files to merge conflicting changes.
         The number of conflicting manifests is sampled from configuration.
+
+        In ML+ mode, the original tentative ML entry is filtered by readers
+        (txn not committed). After merging, we append a NEW entry with merged data.
 
         Args:
             sim: SimPy environment
             txn: Transaction object
             table_id: Table with conflict
             v_catalog: Current catalog state
+            catalog: Catalog reference (needed for ML+ mode)
         """
         # Determine number of conflicting manifest files
         n_conflicting = sample_conflicting_manifests()
@@ -834,8 +1054,33 @@ class ConflictResolver:
         # Track manifest file operations
         STATS.manifest_files_written += n_conflicting
 
-        # Write updated manifest list
-        yield sim.timeout(get_manifest_list_latency('write'))
+        # Update manifest list: append (ML+ mode) or rewrite (traditional mode)
+        if MANIFEST_LIST_MODE == "append" and catalog is not None:
+            # ML+ mode: Append new entry with merged data
+            # The original tentative entry is filtered (txn not committed yet)
+            expected_offset = txn.v_ml_offset.get(table_id, 0)
+            yield sim.timeout(get_append_latency())
+            physical_success = catalog.try_ML_APPEND(sim, table_id, expected_offset, txn.id)
+
+            # Physical retry if offset moved
+            while not physical_success:
+                STATS.manifest_append_physical_failure += 1
+                if catalog.ml_sealed[table_id]:
+                    # Sealed - rewrite
+                    STATS.manifest_append_sealed_rewrite += 1
+                    yield sim.timeout(get_manifest_list_latency('write'))
+                    catalog.rewrite_manifest_list(table_id)
+                    txn.v_ml_offset[table_id] = catalog.ml_offset[table_id]
+                    break
+                txn.v_ml_offset[table_id] = catalog.ml_offset[table_id]
+                yield sim.timeout(get_append_latency())
+                physical_success = catalog.try_ML_APPEND(sim, table_id, txn.v_ml_offset[table_id], txn.id)
+
+            STATS.manifest_append_physical_success += 1
+            logger.debug(f"{sim.now} TXN {txn.id} ML_APPEND table {table_id} after real conflict")
+        else:
+            # Traditional mode: Write updated manifest list
+            yield sim.timeout(get_manifest_list_latency('write'))
 
         # Update validation version
         txn.v_dirty[table_id] = v_catalog[table_id]
@@ -897,54 +1142,40 @@ class Catalog:
                 return True
             return False
 
-    def try_ML_APPEND(self, sim, tbl_id: int, expected_offset: int, expected_ver: int) -> tuple[bool, bool]:
-        """Attempt conditional append to a table's manifest list.
+    def try_ML_APPEND(self, sim, tbl_id: int, expected_offset: int, txn_id: int) -> bool:
+        """Attempt physical append to a table's manifest list.
 
-        Uses same physical/logical protocol as catalog append:
-        1. Physical check: Does offset match? If not, retry at new offset.
-        2. Logical check: Does table version match? If not, conflict.
-
-        Unlike catalog, when threshold exceeded, manifest list is sealed and
-        must be rewritten (new object) rather than CAS'd.
+        In ML+ mode, entries are written tentatively (tagged with txn_id).
+        Readers filter entries based on whether the associated transaction
+        committed. Validity of the entry is determined by catalog commit outcome,
+        not by table version at append time.
 
         Args:
             sim: SimPy environment
             tbl_id: Table ID
             expected_offset: Expected manifest list offset
-            expected_ver: Expected table version
+            txn_id: Transaction ID (for tagging the entry)
 
         Returns:
-            (physical_success, logical_success):
-            - (False, None): Offset moved OR manifest list sealed
-            - (True, False): Offset matched but table version conflict
-            - (True, True): Append succeeded
+            bool: True if physical append succeeded, False if offset moved or sealed
         """
         # Check if manifest list is sealed (needs rewrite)
         if self.ml_sealed[tbl_id]:
             logger.debug(f"{sim.now} ML_APPEND table {tbl_id} SEALED - needs rewrite")
-            return (False, None)
+            return False
 
         # Physical check: Does offset match?
         if self.ml_offset[tbl_id] != expected_offset:
             logger.debug(f"{sim.now} ML_APPEND table {tbl_id} PHYSICAL_FAIL - "
                         f"offset {self.ml_offset[tbl_id]} != expected {expected_offset}")
-            return (False, None)
+            return False
 
-        # Physical success - now do logical validation
-        if self.tbl[tbl_id] != expected_ver:
-            # Logical conflict - table was modified
-            logger.debug(f"{sim.now} ML_APPEND table {tbl_id} LOGICAL_FAIL - "
-                        f"version {self.tbl[tbl_id]} != expected {expected_ver}")
-            # Entry in manifest list log, but not applied
-            self.ml_offset[tbl_id] += MANIFEST_LIST_ENTRY_SIZE
-            self._check_ml_seal_threshold(tbl_id)
-            return (True, False)
-
-        # Logical success - update offset
+        # Physical success - entry written (tentative, tagged with txn_id)
+        # Entry validity determined by catalog commit outcome, not table version
         self.ml_offset[tbl_id] += MANIFEST_LIST_ENTRY_SIZE
         self._check_ml_seal_threshold(tbl_id)
-        logger.debug(f"{sim.now} ML_APPEND table {tbl_id} OK - offset now {self.ml_offset[tbl_id]}")
-        return (True, True)
+        logger.debug(f"{sim.now} ML_APPEND table {tbl_id} txn {txn_id} OK - offset now {self.ml_offset[tbl_id]}")
+        return True
 
     def _check_ml_seal_threshold(self, tbl_id: int):
         """Check if manifest list threshold reached and seal if needed."""
@@ -1126,36 +1357,27 @@ class AppendCatalog:
         logger.debug(f"{sim.now} TXN {txn.id} COMPACTED - offset {self.log_offset}")
         return True
 
-    def try_ML_APPEND(self, sim, tbl_id: int, expected_offset: int, expected_ver: int) -> tuple[bool, bool]:
-        """Attempt conditional append to a table's manifest list.
+    def try_ML_APPEND(self, sim, tbl_id: int, expected_offset: int, txn_id: int) -> bool:
+        """Attempt physical append to a table's manifest list.
 
-        Uses same physical/logical protocol as catalog append.
         See Catalog.try_ML_APPEND for full documentation.
         """
         # Check if manifest list is sealed (needs rewrite)
         if self.ml_sealed[tbl_id]:
             logger.debug(f"{sim.now} ML_APPEND table {tbl_id} SEALED - needs rewrite")
-            return (False, None)
+            return False
 
         # Physical check: Does offset match?
         if self.ml_offset[tbl_id] != expected_offset:
             logger.debug(f"{sim.now} ML_APPEND table {tbl_id} PHYSICAL_FAIL - "
                         f"offset {self.ml_offset[tbl_id]} != expected {expected_offset}")
-            return (False, None)
+            return False
 
-        # Physical success - now do logical validation
-        if self.tbl[tbl_id] != expected_ver:
-            logger.debug(f"{sim.now} ML_APPEND table {tbl_id} LOGICAL_FAIL - "
-                        f"version {self.tbl[tbl_id]} != expected {expected_ver}")
-            self.ml_offset[tbl_id] += MANIFEST_LIST_ENTRY_SIZE
-            self._check_ml_seal_threshold(tbl_id)
-            return (True, False)
-
-        # Logical success
+        # Physical success - entry written (tentative, tagged with txn_id)
         self.ml_offset[tbl_id] += MANIFEST_LIST_ENTRY_SIZE
         self._check_ml_seal_threshold(tbl_id)
-        logger.debug(f"{sim.now} ML_APPEND table {tbl_id} OK - offset now {self.ml_offset[tbl_id]}")
-        return (True, True)
+        logger.debug(f"{sim.now} ML_APPEND table {tbl_id} txn {txn_id} OK - offset now {self.ml_offset[tbl_id]}")
+        return True
 
     def _check_ml_seal_threshold(self, tbl_id: int):
         """Check if manifest list threshold reached and seal if needed."""
@@ -1179,15 +1401,16 @@ def txn_ml_w(sim, txn):
 
 
 def txn_ml_append(sim, txn, catalog):
-    """Append to manifest lists using physical/logical protocol.
+    """Append tentative entries to manifest lists (ML+ mode).
 
-    Uses same protocol as catalog append:
-    1. Physical check: Does offset match?
-    2. After physical success, re-read to discover logical outcome
-    3. Logical check: Did table version match?
+    In ML+ mode:
+    1. Entries are written tentatively, tagged with txn_id
+    2. Readers filter entries based on whether transaction committed
+    3. Entry validity determined by CATALOG commit outcome, not ML append
 
-    Unlike catalog, when threshold exceeded, manifest list is sealed and must
-    be rewritten (new object) rather than CAS'd.
+    Physical append only - no logical validation at ML level. On catalog
+    conflict, the conflict resolution logic determines whether ML entries
+    need to be updated (real conflict) or are still valid (false conflict).
 
     Args:
         sim: SimPy environment
@@ -1198,7 +1421,6 @@ def txn_ml_append(sim, txn, catalog):
         SimPy timeout events for I/O operations
     """
     for tbl_id in txn.v_tblw.keys():
-        expected_ver = txn.v_dirty.get(tbl_id, 0)
         expected_offset = txn.v_ml_offset.get(tbl_id, 0)
 
         # Check if manifest list is sealed - must rewrite
@@ -1211,15 +1433,14 @@ def txn_ml_append(sim, txn, catalog):
             yield sim.timeout(get_manifest_list_latency('write'))
             catalog.rewrite_manifest_list(tbl_id)
 
-            # Update our offset
+            # Update our offset (entry is in the new object)
             txn.v_ml_offset[tbl_id] = catalog.ml_offset[tbl_id]
+            STATS.manifest_append_physical_success += 1
             continue
 
-        # Attempt physical append
+        # Attempt physical append (tentative entry tagged with txn.id)
         yield sim.timeout(get_append_latency())
-        physical_success, logical_success = catalog.try_ML_APPEND(
-            sim, tbl_id, expected_offset, expected_ver
-        )
+        physical_success = catalog.try_ML_APPEND(sim, tbl_id, expected_offset, txn.id)
 
         # Physical failure: offset moved or sealed, retry at new offset
         while not physical_success:
@@ -1235,38 +1456,15 @@ def txn_ml_append(sim, txn, catalog):
                 txn.v_ml_offset[tbl_id] = catalog.ml_offset[tbl_id]
                 break
 
-            # Update offset and retry
+            # Update offset and retry at new position
             txn.v_ml_offset[tbl_id] = catalog.ml_offset[tbl_id]
             yield sim.timeout(get_append_latency())
-            physical_success, logical_success = catalog.try_ML_APPEND(
-                sim, tbl_id, txn.v_ml_offset[tbl_id], expected_ver
-            )
-
-        if not physical_success:
-            continue  # Handled by rewrite above
+            physical_success = catalog.try_ML_APPEND(sim, tbl_id, txn.v_ml_offset[tbl_id], txn.id)
 
         STATS.manifest_append_physical_success += 1
+        logger.debug(f"{sim.now} TXN {txn.id} ML_APPEND table {tbl_id} TENTATIVE")
 
-        # Physical success - re-read to discover logical outcome
-        yield sim.timeout(get_manifest_list_latency('read') / 2)
-
-        if logical_success:
-            STATS.manifest_append_logical_success += 1
-            logger.debug(f"{sim.now} TXN {txn.id} ML_APPEND table {tbl_id} COMMIT")
-        else:
-            # Logical failure - table version conflict
-            STATS.manifest_append_logical_conflict += 1
-            logger.debug(f"{sim.now} TXN {txn.id} ML_APPEND table {tbl_id} CONFLICT")
-
-            # Read current manifest list to repair
-            yield sim.timeout(get_manifest_list_latency('read'))
-            txn.v_dirty[tbl_id] = catalog.tbl[tbl_id]
-            txn.v_ml_offset[tbl_id] = catalog.ml_offset[tbl_id]
-
-            # Retry with updated state
-            yield sim.timeout(get_manifest_list_latency('write'))
-
-    logger.debug(f"{sim.now} TXN {txn.id} ML_APPEND complete")
+    logger.debug(f"{sim.now} TXN {txn.id} ML_APPEND complete (entries tentative until catalog commit)")
 
 
 def txn_commit(sim, txn, catalog):
@@ -1312,7 +1510,8 @@ def txn_commit(sim, txn, catalog):
         yield from resolver.read_manifest_lists(sim, n_snapshots_behind, txn.id)
 
         # Merge conflicts for affected tables
-        yield from resolver.merge_table_conflicts(sim, txn, v_catalog)
+        # In ML+ mode, catalog is needed to re-append on real conflicts
+        yield from resolver.merge_table_conflicts(sim, txn, v_catalog, catalog)
 
         # Update write set to the next available version per table
         resolver.update_write_set(txn, v_catalog)
@@ -1395,8 +1594,10 @@ def txn_commit_append(sim, txn, catalog: AppendCatalog):
         yield from resolver.read_manifest_lists(sim, 1, txn.id)  # Read current manifest
 
         # Check if conflict is real or false (same as CAS mode)
-        # If tables commute (no overlapping data), no need to re-append manifest list
-        yield from resolver.merge_table_conflicts(sim, txn, v_catalog)
+        # In ML+ mode:
+        # - False conflict: ML entry still valid, no ML update needed
+        # - Real conflict: ML entry needs update, re-append with merged data
+        yield from resolver.merge_table_conflicts(sim, txn, v_catalog, catalog)
 
         # Update write set to next version
         resolver.update_write_set(txn, v_catalog)

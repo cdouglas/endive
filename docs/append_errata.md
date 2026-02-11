@@ -33,21 +33,32 @@ This document tracks shortcuts, deferred tasks, and technical debt incurred duri
 
 ---
 
-## Phase 2: Manifest List Append
+## Phase 2: Manifest List Append (ML+)
+
+### Protocol Clarification
+
+The ML+ protocol was revised to correctly model tentative entries:
+
+1. **Tentative Entries**: ML entries are written before catalog commit, tagged with txn_id
+2. **Reader Filtering**: Readers filter entries based on committed transactions
+3. **Deferred Validation**: Entry validity determined by catalog commit, not ML append
+4. **Conflict-Aware Updates**: On catalog conflict:
+   - False conflict (different partition): ML entry still valid, no re-append
+   - Real conflict (same partition): ML entry needs update, re-append after merge
 
 ### Shortcuts Taken
 
-1. **Simplified Retry Logic**: When manifest append fails due to version mismatch, we immediately read and retry. Real implementations might queue the retry or apply backoff.
+1. **No Per-Entry Transaction Tracking**: The simulation doesn't actually store ML entries or track which txn_id wrote each entry. The filtering behavior is implicit in the protocol.
 
-2. **No Manifest Content Modeling**: The manifest list append doesn't model actual manifest content - it only checks table versions. Real implementations would need to merge manifest entries.
+2. **No Manifest Content Modeling**: The simulation uses `REAL_CONFLICT_PROBABILITY` to determine if a conflict requires ML re-append, rather than modeling actual manifest content.
 
-3. **Version Mismatch Handling**: On version mismatch, we update the dirty version and retry. This doesn't model the complexity of detecting whether the version change is compatible (e.g., non-overlapping data files).
+3. **Simplified Sealing**: Sealing is triggered purely by offset threshold, not by entry count or other factors.
 
 ### Deferred Tasks
 
-1. **Manifest Content Merge**: When manifest append fails, real implementations may need to merge content from the new version. This is deferred as it requires more complex manifest modeling.
+1. **Per-Table Append Statistics**: Currently we track global manifest_append_physical_success/failure counts. Per-table breakdowns could be useful for analysis.
 
-2. **Per-Table Append Statistics**: Currently we track global manifest_append_success/retry counts. Per-table breakdowns could be useful for analysis.
+2. **Concurrent ML Append Contention**: Multiple transactions appending to the same table's ML may have contention patterns worth modeling.
 
 ---
 
@@ -122,6 +133,33 @@ validation happens at append time (same as CAS, but at table-level).
 
 ---
 
+## ML+ Protocol Refinement: Tentative Entries
+
+### Key Insight
+
+ML entries are **tentative** until the associated catalog transaction commits. This is
+critical for understanding conflict resolution with ML+.
+
+### Protocol Flow
+
+1. Transaction appends to ML (entry is tentative, tagged with txn_id)
+2. Transaction attempts catalog commit
+3. On catalog success: ML entry becomes permanent
+4. On catalog failure:
+   - False conflict (different partition): ML entry still valid, just retry catalog
+   - Real conflict (same partition): ML entry needs update, re-append after merge
+
+### Changes Made
+
+- `try_ML_APPEND()` now does physical validation only (returns `bool`)
+- Removed logical validation from ML append (no table version check)
+- ML entry validity determined by catalog commit outcome
+- `resolve_real_conflict()` now re-appends to ML in ML+ mode
+- `resolve_false_conflict()` does NOT re-append (entry still valid)
+- Conflict type (false vs real) determined by `REAL_CONFLICT_PROBABILITY`
+
+---
+
 ## General Notes
 
 ### Code Quality Trade-offs
@@ -142,4 +180,35 @@ validation happens at append time (same as CAS, but at table-level).
 
 ---
 
-*Last updated: Protocol simplification (validation at append time)*
+## Realistic Latency Modeling (Phase 1)
+
+### Implementation Notes
+
+1. **Lognormal distribution added**: New `generate_latency_lognormal()` function supports measured cloud latency distributions.
+
+2. **Dual format support**: Configuration parsing handles both:
+   - Legacy: `mean/stddev` (normal distribution)
+   - New: `median/sigma` (lognormal distribution)
+
+3. **Provider profiles defined**: AWS, Azure, GCP, and "instant" profiles with measured parameters.
+
+### Technical Debt
+
+1. **Provider profiles not yet applied automatically**: The `PROVIDER_PROFILES` dict is defined but not used in config loading. Phase 2 will add `storage.provider` config to apply profiles.
+
+2. **No failure latency multipliers yet**: The `failure_multiplier` field is parsed but not used in latency generation. Phase 4 will implement this.
+
+3. **No contention scaling yet**: The `contention_scaling` field is defined in profiles but not implemented. Phase 4 will add `ContentionTracker`.
+
+4. **Lognormal conversion approximation**: The `convert_mean_stddev_to_lognormal()` uses an approximation that may not perfectly preserve the mean. This is acceptable for backward compatibility but noted as a known limitation.
+
+### Deferred to Later Phases
+
+- Phase 2: Storage/catalog separation, provider config application
+- Phase 3: Configuration precedence rules
+- Phase 4: Failure multipliers, contention tracking
+- Phase 5: Full validation test suite
+
+---
+
+*Last updated: Phase 1 - Lognormal latency distributions*
