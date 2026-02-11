@@ -343,6 +343,187 @@ class TestTailHeaviness:
                 assert ratio < 3, f"{provider}: light-tailed ratio {ratio:.1f} should be < 3"
 
 
+class TestSeparateFailureDistributions:
+    """Validate that separate failure distributions are used correctly."""
+
+    def test_azure_append_failure_uses_separate_distribution(self, tmp_path):
+        """Azure append failures should use the separate failure distribution."""
+        config_content = """
+[simulation]
+duration_ms = 10000
+output_path = "results.parquet"
+seed = 42
+
+[catalog]
+num_tables = 1
+
+[transaction]
+retry = 3
+runtime.min = 1000
+runtime.mean = 5000
+runtime.sigma = 0.5
+inter_arrival.distribution = "exponential"
+inter_arrival.scale = 500
+
+[storage]
+provider = "azure"
+max_parallel = 4
+min_latency = 1
+"""
+        config_file = tmp_path / "test_config.toml"
+        config_file.write_text(config_content)
+
+        main.configure_from_toml(str(config_file))
+        main.CONTENTION_SCALING_ENABLED = False
+
+        # Generate success latencies
+        np.random.seed(42)
+        success_samples = [main.get_append_latency(success=True) for _ in range(5000)]
+        success_median = np.median(success_samples)
+
+        # Generate failure latencies
+        np.random.seed(42)
+        failure_samples = [main.get_append_latency(success=False) for _ in range(5000)]
+        failure_median = np.median(failure_samples)
+
+        # Azure Blob append: success median ~87ms, failure median ~2072ms
+        # Ratio should be ~24x
+        ratio = failure_median / success_median
+        assert ratio > 15, f"Azure append failure/success ratio {ratio:.1f} should be > 15"
+        assert ratio < 40, f"Azure append failure/success ratio {ratio:.1f} should be < 40"
+
+    def test_gcp_cas_failure_uses_separate_distribution(self, tmp_path):
+        """GCP CAS failures should use the separate failure distribution."""
+        config_content = """
+[simulation]
+duration_ms = 10000
+output_path = "results.parquet"
+seed = 42
+
+[catalog]
+num_tables = 1
+
+[transaction]
+retry = 3
+runtime.min = 1000
+runtime.mean = 5000
+runtime.sigma = 0.5
+inter_arrival.distribution = "exponential"
+inter_arrival.scale = 500
+
+[storage]
+provider = "gcp"
+max_parallel = 4
+min_latency = 1
+"""
+        config_file = tmp_path / "test_config.toml"
+        config_file.write_text(config_content)
+
+        main.configure_from_toml(str(config_file))
+        main.CONTENTION_SCALING_ENABLED = False
+
+        # Generate success latencies
+        np.random.seed(42)
+        success_samples = [main.get_cas_latency(success=True) for _ in range(5000)]
+        success_median = np.median(success_samples)
+
+        # Generate failure latencies
+        np.random.seed(42)
+        failure_samples = [main.get_cas_latency(success=False) for _ in range(5000)]
+        failure_median = np.median(failure_samples)
+
+        # GCP CAS: success median ~170ms, failure median ~4500ms
+        # Ratio should be ~26x
+        ratio = failure_median / success_median
+        assert ratio > 10, f"GCP CAS failure/success ratio {ratio:.1f} should be > 10"
+        assert ratio < 50, f"GCP CAS failure/success ratio {ratio:.1f} should be < 50"
+
+    def test_s3x_failure_similar_to_success(self, tmp_path):
+        """S3 Express failures should have similar latency to successes."""
+        config_content = """
+[simulation]
+duration_ms = 10000
+output_path = "results.parquet"
+seed = 42
+
+[catalog]
+num_tables = 1
+
+[transaction]
+retry = 3
+runtime.min = 1000
+runtime.mean = 5000
+runtime.sigma = 0.5
+inter_arrival.distribution = "exponential"
+inter_arrival.scale = 500
+
+[storage]
+provider = "s3x"
+max_parallel = 4
+min_latency = 1
+"""
+        config_file = tmp_path / "test_config.toml"
+        config_file.write_text(config_content)
+
+        main.configure_from_toml(str(config_file))
+        main.CONTENTION_SCALING_ENABLED = False
+
+        # Generate success latencies
+        np.random.seed(42)
+        success_samples = [main.get_cas_latency(success=True) for _ in range(5000)]
+        success_median = np.median(success_samples)
+
+        # Generate failure latencies
+        np.random.seed(42)
+        failure_samples = [main.get_cas_latency(success=False) for _ in range(5000)]
+        failure_median = np.median(failure_samples)
+
+        # S3 Express CAS: success ~22ms, failure ~21ms (0.95x)
+        ratio = failure_median / success_median
+        assert 0.7 < ratio < 1.5, f"S3x CAS failure/success ratio {ratio:.2f} should be ~1.0"
+
+    def test_failure_distribution_has_correct_shape(self, tmp_path):
+        """Failure distributions should have the specified sigma (tail heaviness)."""
+        config_content = """
+[simulation]
+duration_ms = 10000
+output_path = "results.parquet"
+seed = 42
+
+[catalog]
+num_tables = 1
+
+[transaction]
+retry = 3
+runtime.min = 1000
+runtime.mean = 5000
+runtime.sigma = 0.5
+inter_arrival.distribution = "exponential"
+inter_arrival.scale = 500
+
+[storage]
+provider = "azure"
+max_parallel = 4
+min_latency = 1
+"""
+        config_file = tmp_path / "test_config.toml"
+        config_file.write_text(config_content)
+
+        main.configure_from_toml(str(config_file))
+        main.CONTENTION_SCALING_ENABLED = False
+
+        # Azure append failure: sigma=0.68, so p99/p50 ≈ exp(2.326*0.68) ≈ 4.9
+        np.random.seed(42)
+        failure_samples = [main.get_append_latency(success=False) for _ in range(20000)]
+
+        p50 = np.percentile(failure_samples, 50)
+        p99 = np.percentile(failure_samples, 99)
+        ratio = p99 / p50
+
+        # Expected ratio ~4.9 for sigma=0.68
+        assert 3.0 < ratio < 8.0, f"Azure append failure p99/p50 ratio {ratio:.1f} should be ~4.9"
+
+
 class TestEndToEndSimulation:
     """End-to-end tests with actual simulation runs."""
 

@@ -1,0 +1,39 @@
+# Experiment 8.4: Manifest List Append Mode on Azure Premium (CAS Catalog)
+#
+# Research Question: How does ML+ mode perform on Azure Premium,
+# given Azure's dramatically different failure characteristics?
+#
+# Key Azure considerations:
+# - CAS has heavy tails (sigma=0.73, p99/p50 ~10x)
+# - Append failures are 36x slower than successes
+# - Contention scaling is high for CAS (6x at 16 threads)
+#
+# ML+ mode may help by reducing manifest list I/O, but if append
+# failures occur, they're extremely expensive on Azure.
+
+[simulation]
+duration_ms = 3600000  # 1 hour
+output_path = "results.parquet"
+
+[experiment]
+label = "exp8_4_ml_append_azurex"
+
+[catalog]
+num_tables = 10
+num_groups = 10
+table_metadata_inlined = true
+
+[transaction]
+retry = 10
+runtime.min = 50000
+runtime.mean = 180000
+runtime.sigma = 1.5
+inter_arrival.distribution = "exponential"
+inter_arrival.scale = 100.0
+real_conflict_probability = 0.0
+manifest_list_mode = "append"
+
+[storage]
+provider = "azurex"  # Azure Premium Block Blob
+max_parallel = 4
+min_latency = 1

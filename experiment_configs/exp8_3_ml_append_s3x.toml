@@ -1,0 +1,41 @@
+# Experiment 8.3: Manifest List Append Mode on S3 Express (CAS Catalog)
+#
+# Research Question: How does manifest list append mode (ML+) affect
+# conflict resolution overhead when using CAS for catalog operations?
+#
+# In ML+ mode:
+# - Manifest list entries are appended (not rewritten)
+# - Entries are tagged with txn_id and filtered by committed transactions
+# - False conflicts may be resolved faster (no ML rewrite needed)
+# - Real conflicts still require merge and re-append
+#
+# The catalog still uses CAS, so catalog-level conflicts work as before.
+# The benefit is reduced I/O for manifest list operations.
+
+[simulation]
+duration_ms = 3600000  # 1 hour
+output_path = "results.parquet"
+
+[experiment]
+label = "exp8_3_ml_append_s3x"
+
+[catalog]
+num_tables = 10
+num_groups = 10
+table_metadata_inlined = true  # Keep metadata inlined for baseline comparison
+
+[transaction]
+retry = 10
+runtime.min = 50000
+runtime.mean = 180000
+runtime.sigma = 1.5
+inter_arrival.distribution = "exponential"
+inter_arrival.scale = 100.0
+real_conflict_probability = 0.0
+# KEY PARAMETER: Manifest list mode
+manifest_list_mode = "append"  # vs "rewrite" (default)
+
+[storage]
+provider = "s3x"  # S3 Express One Zone
+max_parallel = 4
+min_latency = 1

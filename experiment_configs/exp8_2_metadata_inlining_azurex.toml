@@ -1,0 +1,41 @@
+# Experiment 8.2: Table Metadata Inlining Impact on Azure Premium
+#
+# Research Question: How does disabling table metadata inlining affect
+# commit latency on Azure Premium Block Blob?
+#
+# Azure Premium has:
+# - CAS median ~64ms (vs S3 Express ~22ms)
+# - Heavy-tailed CAS distribution (sigma=0.73)
+# - Append failures are 36x slower than successes
+#
+# The overhead of non-inlined metadata may be proportionally smaller
+# but compounded by Azure's heavier tail latency.
+#
+# Run with both inlined=true (baseline) and inlined=false to compare.
+
+[simulation]
+duration_ms = 3600000  # 1 hour
+output_path = "results.parquet"
+
+[experiment]
+label = "exp8_2_metadata_inlining_azurex"
+
+[catalog]
+num_tables = 10
+num_groups = 10
+# KEY PARAMETER: Toggle this between runs
+table_metadata_inlined = false
+
+[transaction]
+retry = 10
+runtime.min = 50000
+runtime.mean = 180000
+runtime.sigma = 1.5
+inter_arrival.distribution = "exponential"
+inter_arrival.scale = 100.0
+real_conflict_probability = 0.0
+
+[storage]
+provider = "azurex"  # Azure Premium Block Blob
+max_parallel = 4
+min_latency = 1

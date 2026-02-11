@@ -1,0 +1,37 @@
+# Experiment 8.1: Table Metadata Inlining Impact on S3 Express One Zone
+#
+# Research Question: How does disabling table metadata inlining affect
+# commit latency on S3 Express One Zone (low-latency storage)?
+#
+# When table_metadata_inlined=false, each commit requires additional
+# reads/writes to separate table metadata files, adding I/O overhead.
+# On S3 Express with ~22ms CAS latency, this overhead may be significant.
+#
+# Run with both inlined=true (baseline) and inlined=false to compare.
+
+[simulation]
+duration_ms = 3600000  # 1 hour
+output_path = "results.parquet"
+
+[experiment]
+label = "exp8_1_metadata_inlining_s3x"
+
+[catalog]
+num_tables = 10
+num_groups = 10
+# KEY PARAMETER: Toggle this between runs
+table_metadata_inlined = false
+
+[transaction]
+retry = 10
+runtime.min = 50000
+runtime.mean = 180000
+runtime.sigma = 1.5
+inter_arrival.distribution = "exponential"
+inter_arrival.scale = 100.0
+real_conflict_probability = 0.0
+
+[storage]
+provider = "s3x"  # S3 Express One Zone
+max_parallel = 4
+min_latency = 1

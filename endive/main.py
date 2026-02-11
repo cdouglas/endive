@@ -173,11 +173,16 @@ CONTENTION_TRACKER = ContentionTracker()
 # Parameters:
 #   median: Median latency in ms (used to compute mu = ln(median))
 #   sigma: Lognormal sigma parameter (controls tail heaviness)
-#   failure_multiplier: Ratio of failed op latency to success latency
+#   failure: Separate distribution for failed operations (optional)
+#     - If present, use these parameters instead of success * multiplier
+#     - failure.median: Median latency for failed operations
+#     - failure.sigma: Sigma for failed operations
+#   failure_multiplier: Legacy - ratio of fail/success latency (used if no failure dist)
 #   contention_scaling: Latency multiplier at 16 threads vs 1 thread
 PROVIDER_PROFILES = {
     # AWS S3 Standard - CAS only (no conditional append support)
-    # Aggregate: mu=11.04, sigma=0.14, median=60.8ms
+    # Success: mu=11.04, sigma=0.14, median=60.8ms
+    # Failure: median=65ms (1.07x), similar distribution shape
     "s3": {
         "manifest_list": {
             "read": {"median": 61, "sigma": 0.14},
@@ -187,13 +192,19 @@ PROVIDER_PROFILES = {
             "read": {"median": 61, "sigma": 0.14},
             "write": {"median": 63, "sigma": 0.14}
         },
-        "cas": {"median": 61, "sigma": 0.14, "failure_multiplier": 1.22},
+        "cas": {
+            "median": 61, "sigma": 0.14,
+            "failure": {"median": 65, "sigma": 0.38},  # Heavier tail on failures
+            "failure_multiplier": 1.22  # Legacy fallback
+        },
         "append": None,  # S3 Standard does not support conditional append
-        "contention_scaling": {"cas": 0.97, "append": None},  # Slightly faster at high contention
+        "contention_scaling": {"cas": 0.97, "append": None},
     },
     # AWS S3 Express One Zone - CAS + conditional append
-    # CAS: mu=9.98, sigma=0.22, median=22.4ms
-    # Append: mu=9.90, sigma=0.25, median=20.5ms
+    # CAS success: median=22.4ms, sigma=0.22
+    # CAS failure: median=21.1ms (0.95x), similar shape
+    # Append success: median=20.5ms, sigma=0.25
+    # Append failure: median=22.6ms (1.09x), similar shape
     "s3x": {
         "manifest_list": {
             "read": {"median": 22, "sigma": 0.22},
@@ -203,14 +214,23 @@ PROVIDER_PROFILES = {
             "read": {"median": 22, "sigma": 0.22},
             "write": {"median": 21, "sigma": 0.25}
         },
-        "cas": {"median": 22, "sigma": 0.22, "failure_multiplier": 0.95},  # Failures slightly faster
-        "append": {"median": 21, "sigma": 0.25, "failure_multiplier": 1.09},
+        "cas": {
+            "median": 22, "sigma": 0.22,
+            "failure": {"median": 21, "sigma": 0.22},  # Failures slightly faster
+            "failure_multiplier": 0.95
+        },
+        "append": {
+            "median": 21, "sigma": 0.25,
+            "failure": {"median": 23, "sigma": 0.25},
+            "failure_multiplier": 1.09
+        },
         "contention_scaling": {"cas": 1.77, "append": 1.85},
     },
     # Azure Blob Storage (Standard tier) - CAS + conditional append
-    # CAS: mu=11.70, sigma=0.82, median=93.1ms (very heavy tails, p99/p50=50x)
-    # Append: mu=11.40, sigma=0.28, median=87.3ms
-    # WARNING: Append failures are 31.6x slower than successes!
+    # CAS success: median=93ms, sigma=0.82 (very heavy tails)
+    # CAS failure: median=75ms (0.81x), failures actually faster
+    # Append success: median=87ms, sigma=0.28
+    # Append failure: median=2072ms, sigma=0.68 (COMPLETELY DIFFERENT DISTRIBUTION!)
     "azure": {
         "manifest_list": {
             "read": {"median": 87, "sigma": 0.28},
@@ -220,14 +240,25 @@ PROVIDER_PROFILES = {
             "read": {"median": 87, "sigma": 0.28},
             "write": {"median": 95, "sigma": 0.28}
         },
-        "cas": {"median": 93, "sigma": 0.82, "failure_multiplier": 0.81},  # Failures faster
-        "append": {"median": 87, "sigma": 0.28, "failure_multiplier": 31.6},  # Failures MUCH slower!
+        "cas": {
+            "median": 93, "sigma": 0.82,
+            "failure": {"median": 75, "sigma": 0.90},  # Failures faster but heavier tail
+            "failure_multiplier": 0.81
+        },
+        "append": {
+            "median": 87, "sigma": 0.28,
+            # CRITICAL: Append failures have completely different distribution!
+            # Failure median=2072ms, p99/p50≈4.9 -> sigma≈0.68
+            "failure": {"median": 2072, "sigma": 0.68},
+            "failure_multiplier": 31.6
+        },
         "contention_scaling": {"cas": 5.4, "append": 1.07},
     },
     # Azure Premium Block Blob - CAS + conditional append
-    # CAS: mu=11.25, sigma=0.73, median=63.5ms (heavy tails)
-    # Append: mu=11.14, sigma=0.23, median=69.9ms
-    # WARNING: Append failures are 36.2x slower than successes!
+    # CAS success: median=64ms, sigma=0.73
+    # CAS failure: median=82ms (1.28x)
+    # Append success: median=70ms, sigma=0.23
+    # Append failure: median=2534ms, sigma=0.65 (COMPLETELY DIFFERENT DISTRIBUTION!)
     "azurex": {
         "manifest_list": {
             "read": {"median": 70, "sigma": 0.23},
@@ -237,13 +268,22 @@ PROVIDER_PROFILES = {
             "read": {"median": 70, "sigma": 0.23},
             "write": {"median": 72, "sigma": 0.23}
         },
-        "cas": {"median": 64, "sigma": 0.73, "failure_multiplier": 1.28},
-        "append": {"median": 70, "sigma": 0.23, "failure_multiplier": 36.2},  # Failures MUCH slower!
+        "cas": {
+            "median": 64, "sigma": 0.73,
+            "failure": {"median": 82, "sigma": 0.85},
+            "failure_multiplier": 1.28
+        },
+        "append": {
+            "median": 70, "sigma": 0.23,
+            # CRITICAL: Append failures have completely different distribution!
+            "failure": {"median": 2534, "sigma": 0.65},
+            "failure_multiplier": 36.2
+        },
         "contention_scaling": {"cas": 6.0, "append": 1.02},
     },
     # GCP Cloud Storage - CAS only (no conditional append data)
-    # CAS: mu=12.44, sigma=0.91, median=170ms (extremely heavy tails, p99/p50=39x)
-    # Note: Apparent speedup under contention (0.7x) is an artifact of outlier sensitivity
+    # CAS success: median=170ms, sigma=0.91 (extremely heavy tails)
+    # CAS failure: mean=7111ms, estimated median≈4000-5000ms based on heavy tails
     "gcp": {
         "manifest_list": {
             "read": {"median": 170, "sigma": 0.91},
@@ -253,9 +293,14 @@ PROVIDER_PROFILES = {
             "read": {"median": 170, "sigma": 0.91},
             "write": {"median": 200, "sigma": 0.91}
         },
-        "cas": {"median": 170, "sigma": 0.91, "failure_multiplier": 13.4},
+        "cas": {
+            "median": 170, "sigma": 0.91,
+            # Failures are dramatically slower (mean 7111ms vs 530ms)
+            "failure": {"median": 4500, "sigma": 1.0},  # Estimated from mean=7111
+            "failure_multiplier": 13.4
+        },
         "append": None,  # No append data available for GCP
-        "contention_scaling": {"cas": 0.70, "append": None},  # Artifact - use 1.0 in practice
+        "contention_scaling": {"cas": 0.70, "append": None},
     },
     # Hypothetical infinitely fast system for "what if" experiments
     "instant": {
@@ -395,6 +440,13 @@ def get_provider_latency_config(provider: str, operation: str, sub_op: str = Non
     }
     if 'failure_multiplier' in op_config:
         result['failure_multiplier'] = op_config['failure_multiplier']
+
+    # Include separate failure distribution if present
+    if 'failure' in op_config:
+        result['failure'] = {
+            'median': op_config['failure']['median'],
+            'sigma': op_config['failure']['sigma']
+        }
 
     return result
 
@@ -1088,23 +1140,31 @@ def get_cas_latency(success: bool = True) -> float:
     """Get CAS operation latency.
 
     Args:
-        success: If True, draw from success distribution; else apply failure multiplier.
-                 Based on measurements, failed operations can be significantly slower
-                 (e.g., Azure append failures are 34x slower than successes).
+        success: If True, draw from success distribution; else use failure distribution.
+                 Based on measurements, failed operations can have completely different
+                 distributions (e.g., GCP CAS failures are 13x slower with heavier tails).
 
     Returns:
         Latency in milliseconds.
     """
-    base = generate_latency_from_config(T_CAS)
+    if not success and 'failure' in T_CAS:
+        # Use separate failure distribution
+        failure_config = {
+            'mu': lognormal_mu_from_median(T_CAS['failure']['median']),
+            'sigma': T_CAS['failure']['sigma'],
+            'distribution': 'lognormal'
+        }
+        base = generate_latency_from_config(failure_config)
+    else:
+        base = generate_latency_from_config(T_CAS)
+        # Legacy: apply failure multiplier if no separate distribution
+        if not success:
+            multiplier = T_CAS.get('failure_multiplier', 1.0)
+            base *= multiplier
 
     # Apply contention scaling
     if CONTENTION_SCALING_ENABLED:
         base *= CONTENTION_TRACKER.get_contention_factor("cas")
-
-    # Apply failure multiplier
-    if not success:
-        multiplier = T_CAS.get('failure_multiplier', 1.0)
-        base *= multiplier
 
     return base
 
@@ -1131,22 +1191,31 @@ def get_append_latency(success: bool = True) -> float:
     """Get append operation latency (for catalog log append).
 
     Args:
-        success: If True, draw from success distribution; else apply failure multiplier.
-                 Based on measurements, Azure append failures are 34x slower than successes.
+        success: If True, draw from success distribution; else use failure distribution.
+                 CRITICAL: Azure append failures have completely different distribution!
+                 Success median=87ms, Failure median=2072ms (24x), with different shape.
 
     Returns:
         Latency in milliseconds.
     """
-    base = generate_latency_from_config(T_APPEND)
+    if not success and 'failure' in T_APPEND:
+        # Use separate failure distribution - critical for Azure!
+        failure_config = {
+            'mu': lognormal_mu_from_median(T_APPEND['failure']['median']),
+            'sigma': T_APPEND['failure']['sigma'],
+            'distribution': 'lognormal'
+        }
+        base = generate_latency_from_config(failure_config)
+    else:
+        base = generate_latency_from_config(T_APPEND)
+        # Legacy: apply failure multiplier if no separate distribution
+        if not success:
+            multiplier = T_APPEND.get('failure_multiplier', 1.0)
+            base *= multiplier
 
     # Apply contention scaling
     if CONTENTION_SCALING_ENABLED:
         base *= CONTENTION_TRACKER.get_contention_factor("append")
-
-    # Apply failure multiplier
-    if not success:
-        multiplier = T_APPEND.get('failure_multiplier', 1.0)
-        base *= multiplier
 
     return base
 

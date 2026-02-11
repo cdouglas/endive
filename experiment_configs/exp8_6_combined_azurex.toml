@@ -1,0 +1,40 @@
+# Experiment 8.6: Combined Optimizations on Azure Premium Block Blob
+#
+# Research Question: What is the combined effect of metadata separation
+# and ML+ mode on Azure Premium, with its heavy-tailed distributions?
+#
+# Azure-specific concerns:
+# - CAS heavy tails (p99 can be 10x+ median)
+# - Append failures are 36x slower than successes
+# - Additional I/O from non-inlined metadata may hit tail latencies
+#
+# This is the worst-case scenario for additional I/O: Azure's heavy
+# tails mean that each additional operation has a chance of being
+# dramatically slow.
+
+[simulation]
+duration_ms = 3600000  # 1 hour
+output_path = "results.parquet"
+
+[experiment]
+label = "exp8_6_combined_azurex"
+
+[catalog]
+num_tables = 10
+num_groups = 10
+table_metadata_inlined = false
+
+[transaction]
+retry = 10
+runtime.min = 50000
+runtime.mean = 180000
+runtime.sigma = 1.5
+inter_arrival.distribution = "exponential"
+inter_arrival.scale = 100.0
+real_conflict_probability = 0.0
+manifest_list_mode = "append"
+
+[storage]
+provider = "azurex"  # Azure Premium Block Blob
+max_parallel = 4
+min_latency = 1
