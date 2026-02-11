@@ -1,128 +1,124 @@
 # Endive: Iceberg Catalog Simulator
 
-One-off, deterministic discrete-event simulator for Apache Iceberg workloads.
-Endive simulates workloads of spurious conflicts, measuring commit throughput
-and latency under varying conditions. Object store latency, etc. are drawn from
-distributions.
+Discrete-event simulator for Apache Iceberg's optimistic concurrency control (OCC). Models catalog contention, conflict resolution, and commit latency under varying workloads to answer: **When does commit throughput saturate? What causes latency to explode?**
 
 ## What Endive Simulates
 
-Iceberg installs new versions of tables using a compare-and-set (CAS) in its
-Catalog. If the CAS fails but the transaction commutes with the new state, it
-will merge its metadata with the concurrent transaction(s) before retrying.
+Iceberg installs new versions of tables using a compare-and-set (CAS) in its Catalog. When CAS fails but the transaction commutes with the new state, it merges its metadata with concurrent transactions before retrying.
 
-A lot of attention is paid to the root of each table (i.e., the
-[Catalog](https://iceberg.apache.org/rest-catalog-spec/)) and formats at the
-leaves (e.g., Apaches [ORC](https://orc.apache.org) and
-[Parquet](https://parquet.apache.org), [Vortex](https://vortex.dev/),
-[F3](https://dl.acm.org/doi/abs/10.1145/3749163))),
-[AnyBlox](https://dl.acm.org/doi/10.14778/3749646.3749672), but the metadata
-near the root of the table can also be a bottleneck even when there is no real
-conflict and the catalog is unreasonably fast.
+The simulator models:
+- **CAS-based commits**: Traditional catalog pointer updates
+- **Append-based commits**: Conditional append to catalog log (ML+)
+- **Conflict resolution**: False conflicts (no data overlap) vs real conflicts (manifest file I/O)
+- **Cloud storage latencies**: Provider-specific distributions from YCSB measurements
 
-There are simpler ways to model these conflicts, but it was honestly fun to
-develop using Claude Code and parallelize simulation runs.
+Latency parameters are calibrated from:
+- **CAS/Append operations**: June 2025 YCSB benchmarks (AWS, Azure, GCP)
+- **PUT/GET operations**: Durner et al. VLDB 2023 measurements
 
 ## Quick Start
 
-### Run a Single Simulation
-
 ```bash
-# Run experiment 2.1 (single table, false conflicts)
-python -m endive.main experiment_configs/exp2_1_single_table_false_conflicts.toml --yes
+# Install
+pip install -r requirements.txt && pip install -e .
 
-# Results saved to: experiments/exp2_1_single_table_false-<hash>/
+# Run single simulation (1 hour simulated, ~4 seconds wall-clock)
+python -m endive.main experiment_configs/exp8_0_baseline_s3x.toml --yes
+
+# Run tests
+pytest tests/ -v
 ```
 
 ## Analysis
 
-### Generate Plots
-
 ```bash
-# Analyze experiment 2.1 results
+# Generate saturation curves
 python -m endive.saturation_analysis \
     -i experiments \
-    -p "exp2_1_*" \
-    -o plots/exp2_1
+    -p "exp8_*_s3x*" \
+    -o plots/exp8_s3x
 
-# Analyze with grouping (e.g., experiment 2.2 by table count)
+# With grouping (compare configurations)
 python -m endive.saturation_analysis \
     -i experiments \
-    -p "exp2_2_*" \
-    -o plots/exp2_2 \
-    --group-by num_tables
+    -p "exp8_*" \
+    -o plots/exp8 \
+    --group-by label
 ```
 
-This generates:
+Outputs:
 - `latency_vs_throughput.png` - Latency curves with error bands
 - `success_vs_throughput.png` - Success rate degradation
-- `overhead_vs_throughput.png` - Commit protocol overhead
 - `experiment_index.csv` - Summary statistics
 
-### Regenerate All Plots
-
-```bash
-./scripts/regenerate_all_plots.sh
-```
-
-## Configuration Example
+## Configuration
 
 ```toml
 [simulation]
 duration_ms = 3600000      # 1 hour
-output_path = "results.parquet"
 
 [experiment]
-label = "exp2_1_single_table_false"
+label = "exp8_0_baseline"
 
 [catalog]
-num_tables = 1
-num_groups = 1
+num_tables = 10
+num_groups = 1             # Catalog-level contention
+table_metadata_inlined = true
 
 [transaction]
 retry = 10
 runtime.mean = 180000      # 3 minutes
-runtime.sigma = 1.5
-inter_arrival.scale = 500.0  # ~2 txn/sec offered load
-
-# Conflict configuration
-real_conflict_probability = 0.0  # 0=false only, 1=real only
+inter_arrival.scale = 100.0
+manifest_list_mode = "rewrite"  # or "append" for ML+
 
 [storage]
-T_CAS.mean = 1             # Fast catalog
-T_MANIFEST_LIST.read.mean = 50
-T_MANIFEST_FILE.read.mean = 50
+provider = "s3x"           # s3, s3x, azure, azurex, gcp
+max_parallel = 4
 ```
 
-See [`experiment_configs/`](experiment_configs/) for complete examples.
+See `experiment_configs/` for complete examples.
 
-## Running Tests
+## Experiment Configurations
+
+| Label | Description |
+|-------|-------------|
+| exp8_0_baseline | CAS catalog, full metadata write |
+| exp8_1_metadata_inlining | Table metadata inlined in CAS |
+| exp8_3_ml_append | Manifest list append mode |
+| exp8_5_combined | Both optimizations |
+
+Providers: `s3x` (S3 Express), `azure` (Azure Standard), `azurex` (Azure Premium)
+
+## Storage Provider Latencies
+
+| Provider | CAS Median | PUT Base | PUT Rate |
+|----------|------------|----------|----------|
+| S3 Express | 22ms | 10ms | 10 ms/MiB |
+| Azure Std | 87ms | 50ms | 25 ms/MiB |
+| Azure Premium | 64ms | 30ms | 15 ms/MiB |
+| S3 Standard | 23ms | 30ms | 20 ms/MiB |
+
+*Sources: YCSB June 2025, Durner et al. VLDB 2023*
+
+## Tests
 
 ```bash
-# All tests (~3 minutes)
-pytest tests/ -v
-
-# Specific test suites
-pytest tests/test_simulator.py -v                    # Core simulator
-pytest tests/test_numerical_accuracy.py -v           # Numerical validation
-pytest tests/test_statistical_rigor.py -v            # Distribution conformance
-
-# With coverage
-pytest tests/ --cov=endive --cov-report=html
-
-# Fast subset
-pytest tests/test_simulator.py tests/test_conflict_resolution.py -v
+pytest tests/ -v                            # All tests (~3 min)
+pytest tests/test_simulator.py -v           # Core simulator
+pytest tests/test_append_catalog.py -v      # Append mode
+pytest tests/test_statistical_rigor.py -v   # Distribution tests
 ```
 
 ## Documentation
 
-- **[docs/QUICKSTART.md](docs/QUICKSTART.md)** - Detailed getting started guide
-- **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** - Simulator design and invariants
-- **[docs/ANALYSIS_GUIDE.md](docs/ANALYSIS_GUIDE.md)** - Plot generation and interpretation
+- **[docs/QUICKSTART.md](docs/QUICKSTART.md)** - Getting started
+- **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** - Design and invariants
+- **[docs/model.md](docs/model.md)** - Model simplifications
+- **[docs/errata.md](docs/errata.md)** - Technical debt and gaps
 - **[experiment_configs/README.md](experiment_configs/README.md)** - Experiment descriptions
-- **[docs/](docs/)** - Complete documentation index
 
 ## References
 
 - **Apache Iceberg**: https://iceberg.apache.org/
+- **Durner et al. VLDB 2023**: "Exploiting Cloud Object Storage for High-Performance Analytics"
 - **SimPy Framework**: https://simpy.readthedocs.io/

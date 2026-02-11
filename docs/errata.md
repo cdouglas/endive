@@ -302,4 +302,39 @@ critical for understanding conflict resolution with ML+.
 
 ---
 
-*Last updated: Phase 5 - Validation tests*
+## Size-Based PUT Latency Model (Phase 6)
+
+### Implementation Notes
+
+1. **Durner et al. VLDB 2023 model**: File writes use size-based latency:
+   ```
+   latency = base_latency + size_mib * latency_per_mib + lognormal_noise
+   ```
+
+2. **Provider-specific parameters**:
+   - S3 Standard: 30ms base, 20 ms/MiB (~50 MiB/s throughput)
+   - S3 Express: 10ms base, 10 ms/MiB (~100 MiB/s throughput)
+   - Azure Standard: 50ms base, 25 ms/MiB (~40 MiB/s throughput)
+   - Azure Premium: 30ms base, 15 ms/MiB (~67 MiB/s throughput)
+
+3. **Applied to**: Table metadata writes, manifest list writes (when T_PUT configured)
+
+### Technical Debt
+
+1. **Estimated Azure parameters**: Azure latency parameters are estimates based on ratio to AWS. Real measurements from production would improve accuracy.
+
+2. **Read latency uses PUT model**: We use PUT latency for reads too, assuming similar characteristics for small files. Real GET latency may differ.
+
+3. **Fixed table metadata size**: `TABLE_METADATA_SIZE_BYTES` is configurable (default 10KB) but static during simulation. Real metadata grows with schema complexity.
+
+4. **Manifest list size tracked per-table**: Uses `catalog.ml_offset[tbl_id]` for size estimation. This doesn't account for variations in entry sizes.
+
+### Deferred
+
+- Measure actual Azure/GCP PUT throughput for calibration
+- Model different GET vs PUT latency profiles
+- Dynamic table metadata sizing based on schema complexity
+
+---
+
+*Last updated: Phase 6 - Size-based PUT latency*

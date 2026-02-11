@@ -85,6 +85,11 @@ MANIFEST_LIST_MODE: str  # "rewrite" (default) or "append"
 MANIFEST_LIST_SEAL_THRESHOLD: int  # Bytes before manifest list is sealed/rewritten (0 = disabled)
 MANIFEST_LIST_ENTRY_SIZE: int  # Average bytes per manifest list entry
 
+# Size-based PUT latency (Durner et al. VLDB 2023)
+# latency = base_latency + size_mib * latency_per_mib + lognormal_noise
+T_PUT: dict  # {'base_latency_ms': float, 'latency_per_mib_ms': float, 'sigma': float}
+TABLE_METADATA_SIZE_BYTES: int  # Size of table metadata JSON file (~1-10 KB)
+
 STATS = Stats()
 
 # Contention tracking for latency scaling
@@ -181,9 +186,18 @@ CONTENTION_TRACKER = ContentionTracker()
 #   contention_scaling: Latency multiplier at 16 threads vs 1 thread
 PROVIDER_PROFILES = {
     # AWS S3 Standard - CAS only (no conditional append support)
-    # Success: mu=11.04, sigma=0.14, median=60.8ms
+    # CAS: Success median=60.8ms, sigma=0.14 (YCSB June 2025)
     # Failure: median=65ms (1.07x), similar distribution shape
+    # PUT latency model from Durner et al. VLDB 2023:
+    #   latency = base_latency + size * latency_per_mib
+    #   base_latency ~30ms (first byte), throughput ~50 MiB/s (20 ms/MiB)
     "s3": {
+        "put": {
+            "base_latency_ms": 30,       # Durner et al. Fig 2: ~30ms first byte
+            "latency_per_mib_ms": 20,    # Durner et al. Sec 2.8: 50 MiB/s = 20ms/MiB
+            "sigma": 0.30,               # Variance estimate from Fig 3 (25-95 MiB/s range)
+            "_provenance": "Durner et al. VLDB 2023, Section 2.3, 2.8"
+        },
         "manifest_list": {
             "read": {"median": 61, "sigma": 0.14},
             "write": {"median": 63, "sigma": 0.14}
@@ -201,11 +215,19 @@ PROVIDER_PROFILES = {
         "contention_scaling": {"cas": 0.97, "append": None},
     },
     # AWS S3 Express One Zone - CAS + conditional append
-    # CAS success: median=22.4ms, sigma=0.22
+    # CAS success: median=22.4ms, sigma=0.22 (YCSB June 2025)
     # CAS failure: median=21.1ms (0.95x), similar shape
     # Append success: median=20.5ms, sigma=0.25
     # Append failure: median=22.6ms (1.09x), similar shape
+    # PUT latency: Estimated from S3 Express positioning as ~3x faster than S3 Standard
+    #   S3 Express is designed for single-digit ms latency for small objects
     "s3x": {
+        "put": {
+            "base_latency_ms": 10,       # Estimate: ~3x faster than S3 Standard (30ms)
+            "latency_per_mib_ms": 10,    # Estimate: ~2x faster throughput (100 MiB/s)
+            "sigma": 0.25,               # Similar variance to CAS operations
+            "_provenance": "Estimate based on S3 Express positioning vs S3 Standard (Durner et al.)"
+        },
         "manifest_list": {
             "read": {"median": 22, "sigma": 0.22},
             "write": {"median": 21, "sigma": 0.25}
@@ -227,11 +249,19 @@ PROVIDER_PROFILES = {
         "contention_scaling": {"cas": 1.77, "append": 1.85},
     },
     # Azure Blob Storage (Standard tier) - CAS + conditional append
-    # CAS success: median=93ms, sigma=0.82 (very heavy tails)
+    # CAS success: median=93ms, sigma=0.82 (very heavy tails) (YCSB June 2025)
     # CAS failure: median=75ms (0.81x), failures actually faster
     # Append success: median=87ms, sigma=0.28
     # Append failure: median=2072ms, sigma=0.68 (COMPLETELY DIFFERENT DISTRIBUTION!)
+    # PUT latency: Estimated from Azure documentation and Durner et al. Cloud X/Y comparison
+    #   Azure typically has higher latency than AWS; Cloud Y in Durner had 12-15 ms/MiB
     "azure": {
+        "put": {
+            "base_latency_ms": 50,       # Estimate: Azure typically higher latency than AWS
+            "latency_per_mib_ms": 25,    # Estimate: ~40 MiB/s, slower than S3
+            "sigma": 0.50,               # Higher variance due to heavy tails in CAS
+            "_provenance": "Estimate based on Azure vs AWS positioning; Durner et al. Cloud Y data"
+        },
         "manifest_list": {
             "read": {"median": 87, "sigma": 0.28},
             "write": {"median": 95, "sigma": 0.28}
@@ -255,11 +285,18 @@ PROVIDER_PROFILES = {
         "contention_scaling": {"cas": 5.4, "append": 1.07},
     },
     # Azure Premium Block Blob - CAS + conditional append
-    # CAS success: median=64ms, sigma=0.73
+    # CAS success: median=64ms, sigma=0.73 (YCSB June 2025)
     # CAS failure: median=82ms (1.28x)
     # Append success: median=70ms, sigma=0.23
     # Append failure: median=2534ms, sigma=0.65 (COMPLETELY DIFFERENT DISTRIBUTION!)
+    # PUT latency: Estimated from Premium tier positioning (~1.5x faster than Standard)
     "azurex": {
+        "put": {
+            "base_latency_ms": 30,       # Estimate: Premium ~1.7x faster than Standard
+            "latency_per_mib_ms": 15,    # Estimate: ~67 MiB/s, faster than Standard
+            "sigma": 0.40,               # Lower variance than Standard tier
+            "_provenance": "Estimate based on Azure Premium vs Standard tier ratio"
+        },
         "manifest_list": {
             "read": {"median": 70, "sigma": 0.23},
             "write": {"median": 72, "sigma": 0.23}
@@ -282,9 +319,16 @@ PROVIDER_PROFILES = {
         "contention_scaling": {"cas": 6.0, "append": 1.02},
     },
     # GCP Cloud Storage - CAS only (no conditional append data)
-    # CAS success: median=170ms, sigma=0.91 (extremely heavy tails)
+    # CAS success: median=170ms, sigma=0.91 (extremely heavy tails) (YCSB June 2025)
     # CAS failure: mean=7111ms, estimated median≈4000-5000ms based on heavy tails
+    # PUT latency: Durner et al. Cloud X had 12-15 ms/MiB; GCP likely similar or slower
     "gcp": {
+        "put": {
+            "base_latency_ms": 40,       # Estimate: similar to Cloud X in Durner et al.
+            "latency_per_mib_ms": 17,    # Durner et al. Cloud X: 12-15 ms/MiB, estimate 17
+            "sigma": 0.60,               # High variance based on CAS heavy tails
+            "_provenance": "Estimate based on Durner et al. Cloud X data (likely GCP)"
+        },
         "manifest_list": {
             "read": {"median": 170, "sigma": 0.91},
             "write": {"median": 200, "sigma": 0.91}
@@ -304,6 +348,12 @@ PROVIDER_PROFILES = {
     },
     # Hypothetical infinitely fast system for "what if" experiments
     "instant": {
+        "put": {
+            "base_latency_ms": 0.5,      # Near-instant base latency
+            "latency_per_mib_ms": 0.1,   # ~10 GB/s effective throughput
+            "sigma": 0.1,
+            "_provenance": "Synthetic: infinitely fast for baseline comparison"
+        },
         "manifest_list": {
             "read": {"median": 1, "sigma": 0.1},
             "write": {"median": 1, "sigma": 0.1}
@@ -503,6 +553,10 @@ def apply_provider_defaults(provider: str, storage_cfg: dict, catalog_backend: s
                 # Fallback to provider append config
                 result['T_APPEND'] = get_provider_latency_config(provider, 'append')
 
+        # Size-based PUT latency (always from storage provider)
+        if profile.get('put'):
+            result['T_PUT'] = profile['put']
+
     return result
 
 
@@ -661,6 +715,7 @@ def configure_from_toml(config_file: str):
     global LATENCY_DISTRIBUTION
     global STORAGE_PROVIDER, CATALOG_BACKEND
     global CONTENTION_SCALING_ENABLED, CATALOG_CONTENTION_SCALING
+    global T_PUT, TABLE_METADATA_SIZE_BYTES
 
     with open(config_file, "rb") as f:
         config = tomllib.load(f)
@@ -929,6 +984,21 @@ def configure_from_toml(config_file: str):
     # Reset contention tracker
     CONTENTION_TRACKER.reset()
 
+    # === SIZE-BASED PUT LATENCY (Durner et al. VLDB 2023) ===
+
+    # T_PUT: size-based latency model for file writes
+    # latency = base_latency + size_mib * latency_per_mib + lognormal_noise
+    if 'T_PUT' in provider_defaults and 'T_PUT' not in storage_cfg:
+        T_PUT = provider_defaults['T_PUT']
+    elif 'T_PUT' in storage_cfg:
+        T_PUT = storage_cfg['T_PUT']
+    else:
+        T_PUT = None  # Will fall back to legacy fixed latencies
+
+    # TABLE_METADATA_SIZE_BYTES: Size of table metadata JSON file
+    # Typical sizes: 1-10 KB for simple tables, up to 100 KB for complex schemas
+    TABLE_METADATA_SIZE_BYTES = storage_cfg.get('table_metadata_size_bytes', 10 * 1024)  # Default 10 KB
+
     # NOTE: Table partitioning is done in CLI after seed is set for determinism
 
 
@@ -1187,6 +1257,89 @@ def get_manifest_file_latency(operation: str) -> float:
     return generate_latency_from_config(params)
 
 
+def get_put_latency(size_bytes: int) -> float:
+    """Get PUT operation latency based on file size.
+
+    Uses the size-based latency model from Durner et al. VLDB 2023:
+        latency = base_latency + size_mib * latency_per_mib + lognormal_noise
+
+    The model accounts for:
+    - Fixed connection/first-byte overhead (base_latency)
+    - Data transfer time proportional to size (latency_per_mib)
+    - Variance in cloud storage performance (lognormal noise)
+
+    Args:
+        size_bytes: Size of the file to write in bytes
+
+    Returns:
+        Latency in milliseconds.
+    """
+    if T_PUT is None:
+        # Fallback to manifest list write latency if PUT not configured
+        return get_manifest_list_latency('write')
+
+    base_latency = T_PUT.get('base_latency_ms', 30)
+    latency_per_mib = T_PUT.get('latency_per_mib_ms', 20)
+    sigma = T_PUT.get('sigma', 0.3)
+
+    # Convert bytes to MiB
+    size_mib = size_bytes / (1024 * 1024)
+
+    # Compute deterministic component: base + size * rate
+    deterministic_latency = base_latency + size_mib * latency_per_mib
+
+    # Add lognormal noise around the deterministic value
+    # We use deterministic_latency as the median (exp(mu) = deterministic_latency)
+    if deterministic_latency > 0:
+        mu = np.log(deterministic_latency)
+        latency = np.random.lognormal(mean=mu, sigma=sigma)
+    else:
+        latency = deterministic_latency
+
+    return max(latency, MIN_LATENCY)
+
+
+def get_table_metadata_latency(operation: str) -> float:
+    """Get table metadata read/write latency based on file size.
+
+    For writes, uses the size-based PUT latency model.
+    For reads, uses the same model (GET latency similar to PUT for small files).
+
+    Args:
+        operation: "read" or "write"
+
+    Returns:
+        Latency in milliseconds.
+    """
+    if T_PUT is not None:
+        # Use size-based PUT latency
+        return get_put_latency(TABLE_METADATA_SIZE_BYTES)
+    else:
+        # Fallback to legacy config
+        if operation == 'read':
+            return generate_latency_from_config(T_TABLE_METADATA_R)
+        else:
+            return generate_latency_from_config(T_TABLE_METADATA_W)
+
+
+def get_manifest_list_write_latency(size_bytes: int) -> float:
+    """Get manifest list write latency based on current size.
+
+    Uses the size-based PUT latency model for manifest list writes.
+
+    Args:
+        size_bytes: Current size of the manifest list in bytes
+
+    Returns:
+        Latency in milliseconds.
+    """
+    if T_PUT is not None:
+        return get_put_latency(size_bytes)
+    else:
+        # Fallback to fixed latency
+        return get_manifest_list_latency('write')
+
+
 def get_append_latency(success: bool = True) -> float:
     """Get append operation latency (for catalog log append).
 
@@ -1228,14 +1381,6 @@ def get_log_entry_read_latency() -> float:
 def get_compaction_latency() -> float:
     """Get compaction CAS latency (larger payload than normal CAS)."""
     return generate_latency_from_config(T_COMPACTION)
-
-
-def get_table_metadata_latency(operation: str) -> float:
-    """Get table metadata latency for read or write operation."""
-    if operation == 'read':
-        return generate_latency_from_config(T_TABLE_METADATA_R)
-    else:
-        return generate_latency_from_config(T_TABLE_METADATA_W)
 
 
 def sample_conflicting_manifests() -> int:
@@ -1354,6 +1499,14 @@ def print_configuration():
     print(f"  Manifest F W: {format_latency(T_MANIFEST_FILE.get('write', T_MANIFEST_FILE))}")
     print(f"  Max Parallel: {MAX_PARALLEL}")
 
+    # Size-based PUT latency (Durner et al. VLDB 2023)
+    if T_PUT is not None:
+        print("\n[Size-Based Latency (Durner et al. VLDB 2023)]")
+        print(f"  Base latency:     {T_PUT.get('base_latency_ms', 30):.1f}ms")
+        print(f"  Latency/MiB:      {T_PUT.get('latency_per_mib_ms', 20):.1f}ms")
+        print(f"  Variance (sigma): {T_PUT.get('sigma', 0.3):.2f}")
+        print(f"  Table metadata:   {TABLE_METADATA_SIZE_BYTES/1024:.1f} KB")
+
     print("\n" + "="*70 + "\n")
 
 
@@ -1382,10 +1535,16 @@ class ConflictResolver:
         return catalog.seq - txn.v_catalog_seq
 
     @staticmethod
-    def read_manifest_lists(sim, n_snapshots: int, txn_id: int):
+    def read_manifest_lists(sim, n_snapshots: int, txn_id: int, avg_ml_size: int = None):
         """Read n manifest lists in batches respecting MAX_PARALLEL limit.
 
         Yields timeout events for simulating parallel I/O with batching.
+
+        Args:
+            sim: SimPy environment
+            n_snapshots: Number of manifest lists to read
+            txn_id: Transaction ID for logging
+            avg_ml_size: Optional average manifest list size for size-based latency
         """
         if n_snapshots <= 0:
             return
@@ -1396,7 +1555,11 @@ class ConflictResolver:
         for batch_start in range(0, n_snapshots, MAX_PARALLEL):
             batch_size = min(MAX_PARALLEL, n_snapshots - batch_start)
             # All reads in this batch happen in parallel, take max time
-            batch_latencies = [get_manifest_list_latency('read') for _ in range(batch_size)]
+            if T_PUT is not None and avg_ml_size is not None:
+                # Use size-based latency (read ~= PUT for small files)
+                batch_latencies = [get_put_latency(avg_ml_size) for _ in range(batch_size)]
+            else:
+                batch_latencies = [get_manifest_list_latency('read') for _ in range(batch_size)]
             yield sim.timeout(max(batch_latencies))
             logger.debug(f"{sim.now} TXN {txn_id} Read batch of {batch_size} manifest lists")
 
@@ -1483,7 +1646,12 @@ class ConflictResolver:
         yield sim.timeout(get_metadata_root_latency('read'))
 
         # Read manifest list (to get pointers to manifest files)
-        yield sim.timeout(get_manifest_list_latency('read'))
+        # Use size-based latency if catalog and T_PUT available
+        if catalog is not None and T_PUT is not None:
+            ml_size = catalog.ml_offset[table_id]
+            yield sim.timeout(get_put_latency(ml_size))  # Read ~= PUT for small files
+        else:
+            yield sim.timeout(get_manifest_list_latency('read'))
 
         # Read conflicting manifest files (respects MAX_PARALLEL)
         for batch_start in range(0, n_conflicting, MAX_PARALLEL):
@@ -1517,9 +1685,14 @@ class ConflictResolver:
             while not physical_success:
                 STATS.manifest_append_physical_failure += 1
                 if catalog.ml_sealed[table_id]:
-                    # Sealed - rewrite
+                    # Sealed - rewrite (size-based latency)
                     STATS.manifest_append_sealed_rewrite += 1
-                    yield sim.timeout(get_manifest_list_latency('write'))
+                    ml_size = catalog.ml_offset[table_id]
+                    if T_PUT is not None:
+                        yield sim.timeout(get_put_latency(ml_size))  # Read
+                        yield sim.timeout(get_manifest_list_write_latency(ml_size))  # Write
+                    else:
+                        yield sim.timeout(get_manifest_list_latency('write'))
                     catalog.rewrite_manifest_list(table_id)
                     txn.v_ml_offset[table_id] = catalog.ml_offset[table_id]
                     break
@@ -1530,8 +1703,12 @@ class ConflictResolver:
             STATS.manifest_append_physical_success += 1
             logger.debug(f"{sim.now} TXN {txn.id} ML_APPEND table {table_id} after real conflict")
         else:
-            # Traditional mode: Write updated manifest list
-            yield sim.timeout(get_manifest_list_latency('write'))
+            # Traditional mode: Write updated manifest list (size-based latency)
+            if catalog is not None and T_PUT is not None:
+                ml_size = catalog.ml_offset[table_id]
+                yield sim.timeout(get_manifest_list_write_latency(ml_size))
+            else:
+                yield sim.timeout(get_manifest_list_latency('write'))
 
         # Update validation version
         txn.v_dirty[table_id] = v_catalog[table_id]
@@ -1843,11 +2020,26 @@ class AppendCatalog:
         logger.debug(f"ML table {tbl_id} REWRITTEN - offset reset")
 
 
-def txn_ml_w(sim, txn):
-    """Write manifest lists for all tables written in transaction."""
-    # Write each manifest list with latency from normal distribution
-    for _ in txn.v_tblw:
-        yield sim.timeout(get_manifest_list_latency('write'))
+def txn_ml_w(sim, txn, catalog=None):
+    """Write manifest lists for all tables written in transaction.
+
+    Uses size-based PUT latency when T_PUT is configured (Durner et al. VLDB 2023).
+    For each table being written, the manifest list size is estimated from
+    the catalog's ml_offset tracking.
+
+    Args:
+        sim: SimPy environment
+        txn: Transaction being committed
+        catalog: Optional catalog for size-based latency (uses fixed latency if None)
+    """
+    for tbl_id in txn.v_tblw:
+        if catalog is not None and T_PUT is not None:
+            # Use size-based latency from catalog's manifest list size
+            ml_size = catalog.ml_offset[tbl_id] + MANIFEST_LIST_ENTRY_SIZE
+            yield sim.timeout(get_manifest_list_write_latency(ml_size))
+        else:
+            # Fallback to fixed latency
+            yield sim.timeout(get_manifest_list_latency('write'))
     logger.debug(f"{sim.now} TXN {txn.id} ML_W")
 
 
@@ -1879,9 +2071,14 @@ def txn_ml_append(sim, txn, catalog):
             STATS.manifest_append_sealed_rewrite += 1
             logger.debug(f"{sim.now} TXN {txn.id} ML table {tbl_id} SEALED - rewriting")
 
-            # Read current manifest list, rewrite it
-            yield sim.timeout(get_manifest_list_latency('read'))
-            yield sim.timeout(get_manifest_list_latency('write'))
+            # Read current manifest list, rewrite it (size-based latency)
+            ml_size = catalog.ml_offset[tbl_id]
+            if T_PUT is not None:
+                yield sim.timeout(get_put_latency(ml_size))  # Read ~= PUT for small files
+                yield sim.timeout(get_manifest_list_write_latency(ml_size))
+            else:
+                yield sim.timeout(get_manifest_list_latency('read'))
+                yield sim.timeout(get_manifest_list_latency('write'))
             catalog.rewrite_manifest_list(tbl_id)
 
             # Update our offset (entry is in the new object)
@@ -1901,8 +2098,13 @@ def txn_ml_append(sim, txn, catalog):
             if catalog.ml_sealed[tbl_id]:
                 STATS.manifest_append_sealed_rewrite += 1
                 logger.debug(f"{sim.now} TXN {txn.id} ML table {tbl_id} SEALED during append - rewriting")
-                yield sim.timeout(get_manifest_list_latency('read'))
-                yield sim.timeout(get_manifest_list_latency('write'))
+                ml_size = catalog.ml_offset[tbl_id]
+                if T_PUT is not None:
+                    yield sim.timeout(get_put_latency(ml_size))  # Read ~= PUT for small files
+                    yield sim.timeout(get_manifest_list_write_latency(ml_size))
+                else:
+                    yield sim.timeout(get_manifest_list_latency('read'))
+                    yield sim.timeout(get_manifest_list_latency('write'))
                 catalog.rewrite_manifest_list(tbl_id)
                 txn.v_ml_offset[tbl_id] = catalog.ml_offset[tbl_id]
                 break
@@ -1958,7 +2160,9 @@ def txn_commit(sim, txn, catalog):
             v_catalog[t] = catalog.tbl[t]
 
         # Read manifest lists for all snapshots between our read and current
-        yield from resolver.read_manifest_lists(sim, n_snapshots_behind, txn.id)
+        # Use average manifest list size for size-based latency estimation
+        avg_ml_size = sum(catalog.ml_offset) // len(catalog.ml_offset) if catalog.ml_offset else None
+        yield from resolver.read_manifest_lists(sim, n_snapshots_behind, txn.id, avg_ml_size)
 
         # Merge conflicts for affected tables
         # In ML+ mode, catalog is needed to re-append on real conflicts
@@ -2042,7 +2246,9 @@ def txn_commit_append(sim, txn, catalog: AppendCatalog):
         # Resolve conflict: read manifest list(s) for affected tables
         # This is same as CAS conflict resolution but at table level
         resolver = ConflictResolver()
-        yield from resolver.read_manifest_lists(sim, 1, txn.id)  # Read current manifest
+        # Use average manifest list size for size-based latency estimation
+        avg_ml_size = sum(catalog.ml_offset) // len(catalog.ml_offset) if catalog.ml_offset else None
+        yield from resolver.read_manifest_lists(sim, 1, txn.id, avg_ml_size)  # Read current manifest
 
         # Check if conflict is real or false (same as CAS mode)
         # In ML+ mode:
@@ -2128,7 +2334,7 @@ def txn_gen(sim, txn_id, catalog):
     if MANIFEST_LIST_MODE == "append":
         yield sim.process(txn_ml_append(sim, txn, catalog))
     else:
-        yield sim.process(txn_ml_w(sim, txn))
+        yield sim.process(txn_ml_w(sim, txn, catalog))
     while txn.t_commit < 0 and txn.t_abort < 0:
         # attempt commit
         txn.n_retries += 1
