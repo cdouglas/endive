@@ -1321,15 +1321,37 @@ def print_configuration():
         print(f"    Value:      {INTER_ARRIVAL_PARAMS['value']:.1f}ms")
         print(f"    (Rate:      {1000/INTER_ARRIVAL_PARAMS['value']:.2f} txn/sec)")
 
-    print("\n[Storage Latencies (ms, mean±stddev)]")
+    def format_latency(config: dict) -> str:
+        """Format latency config for display."""
+        if not isinstance(config, dict):
+            return str(config)
+        if 'mu' in config:
+            # Processed lognormal distribution: compute median from mu
+            mu = float(config['mu'])
+            sigma = config.get('sigma', 0)
+            median = np.exp(mu)
+            return f"{median:.1f}ms (σ={sigma:.2f})"
+        elif 'median' in config:
+            # Raw lognormal distribution: show median (sigma)
+            return f"{config['median']:.1f}ms (σ={config['sigma']:.2f})"
+        elif 'mean' in config:
+            # Normal distribution: show mean±stddev
+            return f"{config['mean']:.1f}±{config.get('stddev', 0):.1f}ms"
+        else:
+            return str(config)
+
+    print("\n[Storage Latencies]")
+    print(f"  Provider:     {STORAGE_PROVIDER}")
     print(f"  Min Latency:  {MIN_LATENCY:.1f}ms")
-    print(f"  CAS:          {T_CAS['mean']:.1f}±{T_CAS['stddev']:.1f}")
-    print(f"  Metadata R/W: {T_METADATA_ROOT['read']['mean']:.1f}±{T_METADATA_ROOT['read']['stddev']:.1f} / "
-          f"{T_METADATA_ROOT['write']['mean']:.1f}±{T_METADATA_ROOT['write']['stddev']:.1f}")
-    print(f"  Manifest L:   {T_MANIFEST_LIST['read']['mean']:.1f}±{T_MANIFEST_LIST['read']['stddev']:.1f} / "
-          f"{T_MANIFEST_LIST['write']['mean']:.1f}±{T_MANIFEST_LIST['write']['stddev']:.1f}")
-    print(f"  Manifest F:   {T_MANIFEST_FILE['read']['mean']:.1f}±{T_MANIFEST_FILE['read']['stddev']:.1f} / "
-          f"{T_MANIFEST_FILE['write']['mean']:.1f}±{T_MANIFEST_FILE['write']['stddev']:.1f}")
+    print(f"  CAS:          {format_latency(T_CAS)}")
+    if T_APPEND:
+        print(f"  Append:       {format_latency(T_APPEND)}")
+    print(f"  Metadata R:   {format_latency(T_METADATA_ROOT.get('read', T_METADATA_ROOT))}")
+    print(f"  Metadata W:   {format_latency(T_METADATA_ROOT.get('write', T_METADATA_ROOT))}")
+    print(f"  Manifest L R: {format_latency(T_MANIFEST_LIST.get('read', T_MANIFEST_LIST))}")
+    print(f"  Manifest L W: {format_latency(T_MANIFEST_LIST.get('write', T_MANIFEST_LIST))}")
+    print(f"  Manifest F R: {format_latency(T_MANIFEST_FILE.get('read', T_MANIFEST_FILE))}")
+    print(f"  Manifest F W: {format_latency(T_MANIFEST_FILE.get('write', T_MANIFEST_FILE))}")
     print(f"  Max Parallel: {MAX_PARALLEL}")
 
     print("\n" + "="*70 + "\n")

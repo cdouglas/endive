@@ -1,0 +1,34 @@
+# Experiment 8.0c: Baseline on Azure Blob Storage (Standard)
+#
+# This is the baseline configuration for comparison:
+# - Table metadata inlined (default)
+# - Manifest list rewrite mode (default)
+#
+# Azure standard has heavier tails than premium tier.
+
+[simulation]
+duration_ms = 3600000  # 1 hour
+output_path = "results.parquet"
+
+[experiment]
+label = "exp8_0_baseline_azure"
+
+[catalog]
+num_tables = 10
+num_groups = 10
+table_metadata_inlined = true
+
+[transaction]
+retry = 10
+runtime.min = 50000
+runtime.mean = 180000
+runtime.sigma = 1.5
+inter_arrival.distribution = "exponential"
+inter_arrival.scale = 100.0
+real_conflict_probability = 0.0
+manifest_list_mode = "rewrite"
+
+[storage]
+provider = "azure"  # Azure Blob Storage (Standard)
+max_parallel = 4
+min_latency = 1
