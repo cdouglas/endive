@@ -692,6 +692,224 @@ min_latency = 1
         assert abs(main.T_CAS['sigma'] - 0.80) < 0.01
 
 
+class TestFailureLatencyMultiplier:
+    """Test failure latency multiplier (Phase 4)."""
+
+    def test_failure_multiplier_applied(self):
+        """Failure latency should be multiplied when success=False."""
+        main.MIN_LATENCY = 0.1
+        main.CONTENTION_SCALING_ENABLED = False
+
+        # Set up T_CAS with known multiplier
+        main.T_CAS = {
+            'mu': np.log(50),
+            'sigma': 0.3,
+            'distribution': 'lognormal',
+            'failure_multiplier': 2.0
+        }
+
+        np.random.seed(42)
+        success_samples = [main.get_cas_latency(success=True) for _ in range(1000)]
+        np.random.seed(42)  # Same seed
+        failure_samples = [main.get_cas_latency(success=False) for _ in range(1000)]
+
+        success_mean = np.mean(success_samples)
+        failure_mean = np.mean(failure_samples)
+
+        # Failure should be ~2x success
+        assert abs(failure_mean / success_mean - 2.0) < 0.1
+
+    def test_no_multiplier_default(self):
+        """Without failure_multiplier, success and failure should be same."""
+        main.MIN_LATENCY = 0.1
+        main.CONTENTION_SCALING_ENABLED = False
+
+        main.T_CAS = {
+            'mu': np.log(50),
+            'sigma': 0.3,
+            'distribution': 'lognormal'
+            # No failure_multiplier
+        }
+
+        np.random.seed(42)
+        success_samples = [main.get_cas_latency(success=True) for _ in range(1000)]
+        np.random.seed(42)
+        failure_samples = [main.get_cas_latency(success=False) for _ in range(1000)]
+
+        # Should be identical
+        assert success_samples == failure_samples
+
+    def test_append_failure_multiplier(self):
+        """Append operations should also support failure multiplier."""
+        main.MIN_LATENCY = 0.1
+        main.CONTENTION_SCALING_ENABLED = False
+
+        # Azure-like: append failures are 34x slower!
+        main.T_APPEND = {
+            'mu': np.log(77),
+            'sigma': 0.28,
+            'distribution': 'lognormal',
+            'failure_multiplier': 34.3
+        }
+
+        np.random.seed(42)
+        success_samples = [main.get_append_latency(success=True) for _ in range(1000)]
+        np.random.seed(42)
+        failure_samples = [main.get_append_latency(success=False) for _ in range(1000)]
+
+        success_mean = np.mean(success_samples)
+        failure_mean = np.mean(failure_samples)
+
+        # Failure should be ~34x success
+        assert abs(failure_mean / success_mean - 34.3) < 1.0
+
+
+class TestContentionScaling:
+    """Test contention-based latency scaling (Phase 4)."""
+
+    def test_contention_tracker_basic(self):
+        """ContentionTracker should count operations."""
+        tracker = main.ContentionTracker()
+
+        assert tracker.active_cas == 0
+        tracker.enter_cas()
+        assert tracker.active_cas == 1
+        tracker.enter_cas()
+        assert tracker.active_cas == 2
+        tracker.exit_cas()
+        assert tracker.active_cas == 1
+        tracker.exit_cas()
+        assert tracker.active_cas == 0
+
+    def test_contention_factor_calculation(self):
+        """Contention factor should scale linearly from 1.0 to scaling value."""
+        tracker = main.ContentionTracker()
+        main.CONTENTION_SCALING_ENABLED = True
+        main.CATALOG_CONTENTION_SCALING = {'cas': 1.4, 'append': 1.8}
+
+        # At 1 concurrent: factor = 1.0
+        tracker.active_cas = 1
+        assert tracker.get_contention_factor("cas") == 1.0
+
+        # At 16 concurrent: factor = 1.4
+        tracker.active_cas = 16
+        factor_16 = tracker.get_contention_factor("cas")
+        assert abs(factor_16 - 1.4) < 0.01
+
+        # At 8 concurrent: factor = 1.0 + (1.4-1.0) * 7/15 ≈ 1.187
+        tracker.active_cas = 8
+        factor_8 = tracker.get_contention_factor("cas")
+        expected = 1.0 + 0.4 * 7 / 15
+        assert abs(factor_8 - expected) < 0.01
+
+    def test_contention_scaling_disabled(self):
+        """When disabled, contention factor should be 1.0."""
+        tracker = main.ContentionTracker()
+        main.CONTENTION_SCALING_ENABLED = False
+        main.CATALOG_CONTENTION_SCALING = {'cas': 1.4}
+
+        tracker.active_cas = 16
+        assert tracker.get_contention_factor("cas") == 1.0
+
+    def test_contention_scaling_applied_to_latency(self):
+        """Latency should increase with contention when enabled."""
+        main.MIN_LATENCY = 0.1
+        main.CONTENTION_SCALING_ENABLED = True
+        main.CATALOG_CONTENTION_SCALING = {'cas': 2.0}  # 2x at 16 threads
+        main.CONTENTION_TRACKER.reset()
+
+        main.T_CAS = {
+            'mu': np.log(50),
+            'sigma': 0.3,
+            'distribution': 'lognormal'
+        }
+
+        # Low contention
+        main.CONTENTION_TRACKER.active_cas = 1
+        np.random.seed(42)
+        low_contention = [main.get_cas_latency() for _ in range(1000)]
+
+        # High contention
+        main.CONTENTION_TRACKER.active_cas = 16
+        np.random.seed(42)
+        high_contention = [main.get_cas_latency() for _ in range(1000)]
+
+        low_mean = np.mean(low_contention)
+        high_mean = np.mean(high_contention)
+
+        # High contention should be ~2x low contention
+        assert abs(high_mean / low_mean - 2.0) < 0.1
+
+        # Cleanup
+        main.CONTENTION_SCALING_ENABLED = False
+        main.CONTENTION_TRACKER.reset()
+
+    def test_contention_scaling_auto_enabled_with_provider(self, tmp_path):
+        """Contention scaling should auto-enable when provider is specified."""
+        config_content = """
+[simulation]
+duration_ms = 10000
+output_path = "results.parquet"
+seed = 42
+
+[catalog]
+num_tables = 1
+
+[transaction]
+retry = 3
+runtime.min = 1000
+runtime.mean = 5000
+runtime.sigma = 0.5
+inter_arrival.distribution = "exponential"
+inter_arrival.scale = 500
+
+[storage]
+provider = "aws"
+max_parallel = 4
+min_latency = 1
+"""
+        config_file = tmp_path / "test_config.toml"
+        config_file.write_text(config_content)
+
+        main.configure_from_toml(str(config_file))
+
+        assert main.CONTENTION_SCALING_ENABLED == True
+        assert main.CATALOG_CONTENTION_SCALING.get('cas') == 1.4
+        assert main.CATALOG_CONTENTION_SCALING.get('append') == 1.8
+
+    def test_contention_scaling_can_be_disabled(self, tmp_path):
+        """Contention scaling can be explicitly disabled."""
+        config_content = """
+[simulation]
+duration_ms = 10000
+output_path = "results.parquet"
+seed = 42
+
+[catalog]
+num_tables = 1
+
+[transaction]
+retry = 3
+runtime.min = 1000
+runtime.mean = 5000
+runtime.sigma = 0.5
+inter_arrival.distribution = "exponential"
+inter_arrival.scale = 500
+
+[storage]
+provider = "aws"
+contention_scaling_enabled = false
+max_parallel = 4
+min_latency = 1
+"""
+        config_file = tmp_path / "test_config.toml"
+        config_file.write_text(config_content)
+
+        main.configure_from_toml(str(config_file))
+
+        assert main.CONTENTION_SCALING_ENABLED == False
+
+
 class TestLatencyPercentiles:
     """Test that generated latencies match expected percentiles."""
 

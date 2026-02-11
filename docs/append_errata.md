@@ -241,4 +241,31 @@ critical for understanding conflict resolution with ML+.
 
 ---
 
-*Last updated: Phase 2 - Storage/catalog separation*
+## Failure Latency and Contention Scaling (Phase 4)
+
+### Implementation Notes
+
+1. **Failure latency multiplier**: `get_cas_latency(success=False)` applies `failure_multiplier` from config. Based on measurements:
+   - AWS CAS: 1.17x (failures slightly slower)
+   - Azure append: 34.3x (failures dramatically slower!)
+
+2. **ContentionTracker class**: Tracks concurrent CAS/append operations. Applies linear scaling from 1.0 at 1 concurrent to provider's `contention_scaling` at 16 concurrent.
+
+3. **Auto-enable with provider**: Contention scaling auto-enables when `storage.provider` is set. Can be explicitly disabled with `contention_scaling_enabled = false`.
+
+### Technical Debt
+
+1. **Contention tracking not integrated with simulation**: The `CONTENTION_TRACKER.enter_cas()` / `exit_cas()` calls are not yet added to the commit paths. The tracking infrastructure is in place but the actual counting of concurrent operations requires integration with the simulation loop.
+
+2. **Failure multiplier not applied in simulation**: The `success` parameter to `get_cas_latency()` / `get_append_latency()` is available but the commit paths don't yet pass the correct value based on CAS outcome.
+
+3. **No per-thread scaling data**: Contention scaling uses aggregate 16-thread vs 1-thread ratio. The per-thread measurements in simulation_summary.md could enable finer-grained modeling.
+
+### Deferred
+
+- Integration of contention tracking with commit_txn() and append commit paths
+- Passing success/failure state to latency functions based on CAS outcome
+
+---
+
+*Last updated: Phase 4 - Failure latency and contention scaling*

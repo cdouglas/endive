@@ -87,6 +87,79 @@ MANIFEST_LIST_ENTRY_SIZE: int  # Average bytes per manifest list entry
 
 STATS = Stats()
 
+# Contention tracking for latency scaling
+CONTENTION_SCALING_ENABLED: bool = False  # Enable contention-based latency scaling
+CATALOG_CONTENTION_SCALING: dict = {}  # {'cas': 1.4, 'append': 1.8} from provider
+
+
+class ContentionTracker:
+    """Track concurrent catalog operations for latency scaling.
+
+    Based on measurements showing that latency increases with contention:
+    - AWS CAS: 1.4x increase at 16 threads vs 1 thread
+    - AWS Append: 1.8x increase
+    - Azure CAS: 5.8x increase (scales poorly)
+    """
+
+    def __init__(self):
+        self.active_cas = 0
+        self.active_append = 0
+
+    def enter_cas(self):
+        """Mark start of CAS operation."""
+        self.active_cas += 1
+
+    def exit_cas(self):
+        """Mark end of CAS operation."""
+        self.active_cas = max(0, self.active_cas - 1)
+
+    def enter_append(self):
+        """Mark start of append operation."""
+        self.active_append += 1
+
+    def exit_append(self):
+        """Mark end of append operation."""
+        self.active_append = max(0, self.active_append - 1)
+
+    def get_contention_factor(self, op_type: str) -> float:
+        """Get latency multiplier based on current contention level.
+
+        Uses linear interpolation from 1.0 at 1 concurrent operation to
+        the provider's contention_scaling value at 16 concurrent operations.
+
+        Args:
+            op_type: "cas" or "append"
+
+        Returns:
+            Multiplier for base latency (1.0 if no scaling configured)
+        """
+        if not CONTENTION_SCALING_ENABLED:
+            return 1.0
+
+        if op_type == "cas":
+            n = max(1, self.active_cas)
+            scaling = CATALOG_CONTENTION_SCALING.get('cas', 1.0)
+        else:
+            n = max(1, self.active_append)
+            scaling = CATALOG_CONTENTION_SCALING.get('append', 1.0)
+
+        if scaling is None or scaling == 1.0:
+            return 1.0
+
+        # Linear interpolation: factor = 1 + (scaling - 1) * (n - 1) / 15
+        # At n=1: factor=1.0, at n=16: factor=scaling
+        return 1.0 + (scaling - 1.0) * min(n - 1, 15) / 15.0
+
+    def reset(self):
+        """Reset counters (for testing)."""
+        self.active_cas = 0
+        self.active_append = 0
+
+
+# Global contention tracker instance
+CONTENTION_TRACKER = ContentionTracker()
+
+
 # =============================================================================
 # Provider Profiles - Based on June 2025 YCSB benchmark measurements
 # =============================================================================
@@ -485,6 +558,7 @@ def configure_from_toml(config_file: str):
     global T_APPEND, T_LOG_ENTRY_READ, T_COMPACTION
     global LATENCY_DISTRIBUTION
     global STORAGE_PROVIDER, CATALOG_BACKEND
+    global CONTENTION_SCALING_ENABLED, CATALOG_CONTENTION_SCALING
 
     with open(config_file, "rb") as f:
         config = tomllib.load(f)
@@ -721,6 +795,38 @@ def configure_from_toml(config_file: str):
     RETRY_BACKOFF_MAX_MS = config.get("transaction", {}).get("retry_backoff", {}).get("max_ms", 5000.0)
     RETRY_BACKOFF_JITTER = config.get("transaction", {}).get("retry_backoff", {}).get("jitter", 0.1)
 
+    # === CONTENTION SCALING ===
+
+    # Enable contention scaling if a provider is used and contention_scaling_enabled is not False
+    contention_enabled = storage_cfg.get("contention_scaling_enabled", None)
+    if contention_enabled is not None:
+        CONTENTION_SCALING_ENABLED = contention_enabled
+    elif STORAGE_PROVIDER and STORAGE_PROVIDER in PROVIDER_PROFILES:
+        # Auto-enable when using a provider profile
+        CONTENTION_SCALING_ENABLED = True
+    else:
+        CONTENTION_SCALING_ENABLED = False
+
+    # Get contention scaling factors from provider
+    if CONTENTION_SCALING_ENABLED:
+        # Determine which provider to use for contention scaling
+        if CATALOG_BACKEND == "service":
+            service_cfg = catalog_cfg.get("service", {})
+            scaling_provider = service_cfg.get("provider", STORAGE_PROVIDER)
+        else:
+            scaling_provider = STORAGE_PROVIDER
+
+        if scaling_provider and scaling_provider in PROVIDER_PROFILES:
+            profile = PROVIDER_PROFILES[scaling_provider]
+            CATALOG_CONTENTION_SCALING = profile.get('contention_scaling', {}) or {}
+        else:
+            CATALOG_CONTENTION_SCALING = {}
+    else:
+        CATALOG_CONTENTION_SCALING = {}
+
+    # Reset contention tracker
+    CONTENTION_TRACKER.reset()
+
     # NOTE: Table partitioning is done in CLI after seed is set for determinism
 
 
@@ -928,9 +1034,29 @@ def generate_latency_from_config(params: dict) -> float:
         return generate_latency(params['mean'], params['stddev'])
 
 
-def get_cas_latency() -> float:
-    """Get CAS operation latency."""
-    return generate_latency_from_config(T_CAS)
+def get_cas_latency(success: bool = True) -> float:
+    """Get CAS operation latency.
+
+    Args:
+        success: If True, draw from success distribution; else apply failure multiplier.
+                 Based on measurements, failed operations can be significantly slower
+                 (e.g., Azure append failures are 34x slower than successes).
+
+    Returns:
+        Latency in milliseconds.
+    """
+    base = generate_latency_from_config(T_CAS)
+
+    # Apply contention scaling
+    if CONTENTION_SCALING_ENABLED:
+        base *= CONTENTION_TRACKER.get_contention_factor("cas")
+
+    # Apply failure multiplier
+    if not success:
+        multiplier = T_CAS.get('failure_multiplier', 1.0)
+        base *= multiplier
+
+    return base
 
 
 def get_metadata_root_latency(operation: str) -> float:
@@ -951,9 +1077,28 @@ def get_manifest_file_latency(operation: str) -> float:
     return generate_latency_from_config(params)
 
 
-def get_append_latency() -> float:
-    """Get append operation latency (for catalog log append)."""
-    return generate_latency_from_config(T_APPEND)
+def get_append_latency(success: bool = True) -> float:
+    """Get append operation latency (for catalog log append).
+
+    Args:
+        success: If True, draw from success distribution; else apply failure multiplier.
+                 Based on measurements, Azure append failures are 34x slower than successes.
+
+    Returns:
+        Latency in milliseconds.
+    """
+    base = generate_latency_from_config(T_APPEND)
+
+    # Apply contention scaling
+    if CONTENTION_SCALING_ENABLED:
+        base *= CONTENTION_TRACKER.get_contention_factor("append")
+
+    # Apply failure multiplier
+    if not success:
+        multiplier = T_APPEND.get('failure_multiplier', 1.0)
+        base *= multiplier
+
+    return base
 
 
 def get_log_entry_read_latency() -> float:
