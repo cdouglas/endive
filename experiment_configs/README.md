@@ -14,7 +14,7 @@ Each configuration file is ready to run and includes:
 
 ```bash
 # Activate virtual environment
-source bin/activate
+source .venv/bin/activate
 
 # Run with default parameters
 python -m endive.main experiment_configs/exp2_1_single_table_false_conflicts.toml
@@ -125,6 +125,65 @@ done
 - Non-linear interaction between table count and real conflicts
 - Heatmap of saturation throughput
 - Optimal table count depends on conflict probability
+
+### Phase 6: Append-Based Operations
+
+#### Experiment 6.1: Append vs CAS Baseline
+**File:** `exp6_1_append_vs_cas_baseline.toml`
+
+**Research Question:** How does append mode compare to CAS mode under baseline conditions?
+
+**Key Parameters to Sweep:**
+- `catalog.mode`: ["cas", "append"]
+- `inter_arrival.scale`: [10, 50, 100, 200, 500, 1000]
+
+**Key Findings:**
+- Append mode success rate at high contention
+- Retry count reduction for multi-table workloads
+- Convergence behavior at low contention
+
+#### Experiment 6.2: Multi-Table False Conflict Reduction
+**File:** `exp6_2_multi_table_append.toml`
+
+**Research Question:** How does append mode scale with increasing table counts?
+
+**Key Parameters to Sweep:**
+- `num_tables`: [10, 20, 50, 100]
+- `inter_arrival.scale`: [10, 50, 100, 200, 500]
+
+**Key Findings:**
+- Append mode benefit increases with more tables
+- Concurrent commits to different tables succeed without retry
+- Comparison with CAS mode at same table counts
+
+#### Experiment 6.3: Compaction Threshold Sensitivity
+**File:** `exp6_3_compaction_threshold.toml`
+
+**Research Question:** What is the optimal compaction threshold?
+
+**Key Parameters to Sweep:**
+- `compaction_threshold`: [1000000, 4000000, 16000000, 64000000] (1MB-64MB)
+- `inter_arrival.scale`: [10, 50, 100, 200, 500]
+
+**Key Findings:**
+- Compaction frequency vs overhead trade-off
+- Log read cost with different thresholds
+- Optimal threshold for different workloads
+
+#### Experiment 6.4: Manifest List Append Impact
+**File:** `exp6_4_manifest_list_append.toml`
+
+**Research Question:** How does manifest list append mode affect conflict resolution?
+
+**Key Parameters to Sweep:**
+- `manifest_list_mode`: ["rewrite", "append"]
+- `catalog.mode`: ["cas", "append"]
+- `real_conflict_probability`: [0.0, 0.1, 0.3, 0.5]
+
+**Key Findings:**
+- Conflict resolution latency reduction
+- Combined benefit with catalog append mode
+- Impact varies with real conflict probability
 
 ## Output Organization
 
