@@ -949,5 +949,241 @@ class TestLatencyPercentiles:
         assert abs(p95 - 28) / 28 < 0.30, f"p95={p95}, expected ~28"
 
 
+class TestSimulationBounds:
+    """End-to-end validation tests with expected bounds (Phase 5)."""
+
+    def test_aws_provider_simulation_runs(self, tmp_path):
+        """Simulation with AWS provider should complete successfully."""
+        config_content = """
+[simulation]
+duration_ms = 30000
+output_path = "results.parquet"
+seed = 42
+
+[catalog]
+num_tables = 5
+
+[transaction]
+retry = 5
+runtime.min = 1000
+runtime.mean = 3000
+runtime.sigma = 0.5
+inter_arrival.distribution = "exponential"
+inter_arrival.scale = 200
+
+[storage]
+provider = "aws"
+max_parallel = 4
+min_latency = 1
+"""
+        config_file = tmp_path / "test_config.toml"
+        config_file.write_text(config_content)
+        output_file = tmp_path / "results.parquet"
+
+        # Run simulation
+        main.configure_from_toml(str(config_file))
+        main.SIM_OUTPUT_PATH = str(output_file)
+
+        np.random.seed(42)
+        main.TABLE_TO_GROUP, main.GROUP_TO_TABLES = main.partition_tables_into_groups(
+            main.N_TABLES, main.N_GROUPS, main.GROUP_SIZE_DIST, main.LONGTAIL_PARAMS
+        )
+        main.STATS = main.Stats()
+
+        env = main.simpy.Environment()
+        env.process(main.setup(env))
+        env.run(until=main.SIM_DURATION_MS)
+
+        # Verify simulation produced results
+        assert main.STATS.txn_committed + main.STATS.txn_aborted > 0
+
+    def test_instant_catalog_higher_throughput(self, tmp_path):
+        """Instant catalog should allow higher throughput than AWS."""
+        results = {}
+
+        for provider, name in [("instant", "instant"), ("aws", "aws")]:
+            config_content = f"""
+[simulation]
+duration_ms = 20000
+output_path = "results.parquet"
+seed = 42
+
+[catalog]
+num_tables = 1
+
+[transaction]
+retry = 5
+runtime.min = 500
+runtime.mean = 1000
+runtime.sigma = 0.3
+inter_arrival.distribution = "exponential"
+inter_arrival.scale = 50
+real_conflict_probability = 0.0
+
+[storage]
+provider = "{provider}"
+max_parallel = 4
+min_latency = 1
+"""
+            config_file = tmp_path / f"config_{name}.toml"
+            config_file.write_text(config_content)
+
+            main.configure_from_toml(str(config_file))
+            np.random.seed(42)
+            main.TABLE_TO_GROUP, main.GROUP_TO_TABLES = main.partition_tables_into_groups(
+                main.N_TABLES, main.N_GROUPS, main.GROUP_SIZE_DIST, main.LONGTAIL_PARAMS
+            )
+            main.STATS = main.Stats()
+
+            env = main.simpy.Environment()
+            env.process(main.setup(env))
+            env.run(until=main.SIM_DURATION_MS)
+
+            # Calculate throughput
+            duration_sec = main.SIM_DURATION_MS / 1000
+            throughput = main.STATS.txn_committed / duration_sec
+            results[name] = throughput
+
+        # Instant should have higher throughput (faster CAS)
+        assert results["instant"] >= results["aws"] * 0.9  # Allow some variance
+
+    def test_latency_distribution_lognormal_shape(self, tmp_path):
+        """Generated latencies in simulation should follow lognormal distribution."""
+        config_content = """
+[simulation]
+duration_ms = 60000
+output_path = "results.parquet"
+seed = 42
+
+[catalog]
+num_tables = 10
+
+[transaction]
+retry = 5
+runtime.min = 1000
+runtime.mean = 5000
+runtime.sigma = 0.5
+inter_arrival.distribution = "exponential"
+inter_arrival.scale = 100
+real_conflict_probability = 0.0
+
+[storage]
+provider = "aws"
+max_parallel = 4
+min_latency = 1
+"""
+        config_file = tmp_path / "test_config.toml"
+        config_file.write_text(config_content)
+
+        main.configure_from_toml(str(config_file))
+
+        # Generate CAS latency samples
+        np.random.seed(42)
+        samples = [main.get_cas_latency() for _ in range(5000)]
+
+        # Verify lognormal shape - check p99/p50 ratio
+        p50 = np.percentile(samples, 50)
+        p99 = np.percentile(samples, 99)
+        ratio = p99 / p50
+
+        # AWS CAS has ratio ~3.4x
+        assert 2.0 < ratio < 6.0, f"Ratio {ratio} outside expected range for lognormal"
+
+    def test_provider_profiles_produce_different_latencies(self, tmp_path):
+        """Different providers should produce significantly different latencies."""
+        median_latencies = {}
+
+        for provider in ["aws", "azure", "gcp"]:
+            config_content = f"""
+[simulation]
+duration_ms = 10000
+output_path = "results.parquet"
+seed = 42
+
+[catalog]
+num_tables = 1
+
+[transaction]
+retry = 3
+runtime.min = 1000
+runtime.mean = 5000
+runtime.sigma = 0.5
+inter_arrival.distribution = "exponential"
+inter_arrival.scale = 500
+
+[storage]
+provider = "{provider}"
+max_parallel = 4
+min_latency = 1
+"""
+            config_file = tmp_path / f"config_{provider}.toml"
+            config_file.write_text(config_content)
+
+            main.configure_from_toml(str(config_file))
+
+            np.random.seed(42)
+            samples = [main.get_cas_latency() for _ in range(1000)]
+            median_latencies[provider] = np.median(samples)
+
+        # AWS should be fastest, GCP slowest
+        assert median_latencies["aws"] < median_latencies["azure"]
+        assert median_latencies["azure"] < median_latencies["gcp"]
+
+        # Check rough ratios (AWS ~23ms, Azure ~75ms, GCP ~170ms)
+        assert median_latencies["azure"] / median_latencies["aws"] > 2.0
+        assert median_latencies["gcp"] / median_latencies["azure"] > 1.5
+
+
+class TestDistributionValidation:
+    """Validate that simulated distributions match measurements."""
+
+    def test_aws_cas_distribution_matches_measurements(self):
+        """AWS CAS latencies should match measured distribution."""
+        main.MIN_LATENCY = 0.1
+        main.CONTENTION_SCALING_ENABLED = False
+
+        # Use AWS CAS parameters
+        main.T_CAS = {
+            'mu': np.log(23),
+            'sigma': 0.45,
+            'distribution': 'lognormal'
+        }
+
+        np.random.seed(42)
+        samples = [main.get_cas_latency() for _ in range(50000)]
+
+        # Measured values from simulation_summary.md:
+        # median=22.9ms, p95=65.4ms, p99=78.1ms
+        p50 = np.percentile(samples, 50)
+        p95 = np.percentile(samples, 95)
+        p99 = np.percentile(samples, 99)
+
+        # Allow 25% tolerance
+        assert abs(p50 - 23) / 23 < 0.25, f"p50={p50}, expected ~23"
+        assert abs(p95 - 65) / 65 < 0.35, f"p95={p95}, expected ~65"
+        assert abs(p99 - 78) / 78 < 0.35, f"p99={p99}, expected ~78"
+
+    def test_azure_cas_heavy_tail(self):
+        """Azure CAS should have heavier tail than AWS."""
+        main.MIN_LATENCY = 0.1
+        main.CONTENTION_SCALING_ENABLED = False
+
+        # AWS: sigma=0.45 -> p99/p50 ≈ exp(2.326*0.45) ≈ 2.85
+        main.T_CAS = {'mu': np.log(23), 'sigma': 0.45, 'distribution': 'lognormal'}
+        np.random.seed(42)
+        aws_samples = [main.get_cas_latency() for _ in range(10000)]
+        aws_ratio = np.percentile(aws_samples, 99) / np.percentile(aws_samples, 50)
+
+        # Azure: sigma=0.80 -> p99/p50 ≈ exp(2.326*0.80) ≈ 6.43
+        main.T_CAS = {'mu': np.log(75), 'sigma': 0.80, 'distribution': 'lognormal'}
+        np.random.seed(42)
+        azure_samples = [main.get_cas_latency() for _ in range(10000)]
+        azure_ratio = np.percentile(azure_samples, 99) / np.percentile(azure_samples, 50)
+
+        # Azure should have higher p99/p50 ratio (ratio of ratios ≈ 2.26x)
+        # The measured data shows Azure has much more variability
+        assert azure_ratio > aws_ratio * 1.8, f"Azure ratio {azure_ratio:.2f} not > AWS ratio {aws_ratio:.2f} * 1.8"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

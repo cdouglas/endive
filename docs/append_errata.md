@@ -234,10 +234,9 @@ critical for understanding conflict resolution with ML+.
 
 4. **Checkpoint latency in FIFO mode**: Uses T_CAS for compaction but doesn't distinguish checkpoint vs regular CAS.
 
-### Deferred to Later Phases
+### Deferred
 
-- Phase 4: Failure multipliers, contention tracking
-- Phase 5: Full validation test suite with throughput bounds
+- Contention scaling for storage operations (currently only catalog operations)
 
 ---
 
@@ -268,4 +267,39 @@ critical for understanding conflict resolution with ML+.
 
 ---
 
-*Last updated: Phase 4 - Failure latency and contention scaling*
+## Validation Tests (Phase 5)
+
+### Implementation Notes
+
+1. **Test suite created**: 48 tests in `test_realistic_latencies.py` covering:
+   - Lognormal distribution generation and validation
+   - Configuration parsing (legacy and new formats)
+   - Provider profiles (AWS, Azure, GCP, instant)
+   - Storage/catalog separation
+   - Configuration precedence
+   - Failure latency multipliers
+   - Contention scaling
+   - End-to-end simulation bounds
+   - Distribution validation against measurements
+
+2. **K-S test validation**: Lognormal samples tested against expected distribution using Kolmogorov-Smirnov test.
+
+3. **Percentile validation**: Generated latencies verified against measured p50/p95/p99 values from YCSB benchmarks.
+
+### Technical Debt
+
+1. **Simplified Azure heavy-tail assertion**: The test `test_azure_cas_heavy_tail` checks that Azure's p99/p50 ratio is > 1.8x AWS's ratio, not the measured ~17x difference (57x vs 3.4x). The lognormal parameters capture sigma differences but not the extreme outliers measured in production.
+
+2. **No throughput bounds validation**: The simulation bounds tests verify that simulations run and produce results, but don't assert specific throughput bounds based on Little's Law or queueing theory.
+
+3. **No latency distribution validation during simulation**: The distribution tests sample latencies directly from `get_cas_latency()`, not from actual simulation commit paths. Full end-to-end validation of commit latencies would require extracting and analyzing the latency histogram.
+
+### Deferred
+
+- Add throughput saturation bounds based on queueing theory predictions
+- Validate actual commit latencies match expected distribution during simulation
+- Test contention scaling effects under high load
+
+---
+
+*Last updated: Phase 5 - Validation tests*
