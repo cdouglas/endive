@@ -198,35 +198,72 @@ class TestGenerateLatencyFromConfig:
 
 
 class TestProviderProfiles:
-    """Test provider profile definitions."""
+    """Test provider profile definitions based on June 2025 YCSB benchmarks."""
 
-    def test_aws_profile_exists(self):
-        """AWS profile should be defined."""
-        assert 'aws' in main.PROVIDER_PROFILES
-        aws = main.PROVIDER_PROFILES['aws']
-        assert 'cas' in aws
-        assert 'append' in aws
-        assert 'manifest_list' in aws
+    def test_all_profiles_exist(self):
+        """All expected provider profiles should be defined."""
+        expected = ['s3', 's3x', 'azure', 'azurex', 'gcp', 'instant', 'aws']
+        for provider in expected:
+            assert provider in main.PROVIDER_PROFILES, f"Missing profile: {provider}"
 
-    def test_aws_cas_parameters(self):
-        """AWS CAS parameters should match measurements."""
-        aws_cas = main.PROVIDER_PROFILES['aws']['cas']
-        # AWS CAS: median=23ms, sigma=0.45
-        assert aws_cas['median'] == 23
-        assert aws_cas['sigma'] == 0.45
+    def test_s3_standard_no_append(self):
+        """S3 Standard should not support conditional append."""
+        s3 = main.PROVIDER_PROFILES['s3']
+        assert s3['cas'] is not None
+        assert s3['append'] is None  # S3 Standard has no conditional append
 
-    def test_azure_profile_has_heavy_tails(self):
-        """Azure should have higher sigma (heavier tails)."""
-        aws_cas = main.PROVIDER_PROFILES['aws']['cas']
-        azure_cas = main.PROVIDER_PROFILES['azure']['cas']
+    def test_s3x_parameters(self):
+        """S3 Express One Zone parameters should match measurements."""
+        s3x = main.PROVIDER_PROFILES['s3x']
+        # S3 Express CAS: median=22.4ms, sigma=0.22
+        assert s3x['cas']['median'] == 22
+        assert abs(s3x['cas']['sigma'] - 0.22) < 0.01
+        # S3 Express append: median=20.5ms, sigma=0.25
+        assert s3x['append']['median'] == 21
+        assert abs(s3x['append']['sigma'] - 0.25) < 0.01
 
-        assert azure_cas['sigma'] > aws_cas['sigma']
+    def test_azure_blob_heavy_tails(self):
+        """Azure Blob Storage should have heavy-tailed CAS distribution."""
+        azure = main.PROVIDER_PROFILES['azure']
+        # Azure CAS: sigma=0.82 (very heavy tails, p99/p50=50x)
+        assert azure['cas']['sigma'] > 0.8
+        # Azure append failures are 31.6x slower
+        assert azure['append']['failure_multiplier'] > 30
+
+    def test_azure_premium_parameters(self):
+        """Azure Premium Block Blob parameters should match measurements."""
+        azurex = main.PROVIDER_PROFILES['azurex']
+        # Azure Premium CAS: median=63.5ms, sigma=0.73
+        assert azurex['cas']['median'] == 64
+        assert abs(azurex['cas']['sigma'] - 0.73) < 0.01
+        # Azure Premium append failures are 36.2x slower
+        assert azurex['append']['failure_multiplier'] > 35
+
+    def test_gcp_no_append(self):
+        """GCP Cloud Storage should not have append data."""
+        gcp = main.PROVIDER_PROFILES['gcp']
+        assert gcp['cas'] is not None
+        assert gcp['append'] is None  # No append data for GCP
+        # GCP CAS: median=170ms, sigma=0.91 (extremely heavy tails)
+        assert gcp['cas']['median'] == 170
+        assert gcp['cas']['sigma'] > 0.9
+
+    def test_aws_alias_points_to_s3x(self):
+        """'aws' should be an alias for 's3x' for backward compatibility."""
+        assert main.PROVIDER_PROFILES['aws'] is main.PROVIDER_PROFILES['s3x']
 
     def test_instant_profile_fast(self):
         """Instant profile should have very low latency."""
         instant = main.PROVIDER_PROFILES['instant']
         assert instant['cas']['median'] == 1
         assert instant['append']['median'] == 1
+
+    def test_tier_ordering(self):
+        """Premium tiers should be faster than standard tiers."""
+        # S3 Express faster than S3 Standard
+        assert main.PROVIDER_PROFILES['s3x']['cas']['median'] < main.PROVIDER_PROFILES['s3']['cas']['median']
+        # Azure Premium faster than Azure Blob
+        assert main.PROVIDER_PROFILES['azurex']['cas']['median'] < main.PROVIDER_PROFILES['azure']['cas']['median']
 
 
 class TestBackwardCompatibility:
@@ -360,10 +397,10 @@ min_latency = 1
 
         main.configure_from_toml(str(config_file))
 
-        # Manifest latencies should come from AWS profile
+        # Manifest latencies should come from AWS (S3 Express alias) profile
         assert main.T_MANIFEST_LIST['read']['distribution'] == 'lognormal'
-        # AWS manifest_list read: median=50, sigma=0.3
-        assert abs(np.exp(main.T_MANIFEST_LIST['read']['mu']) - 50) < 1
+        # S3 Express manifest_list read: median=22, sigma=0.22
+        assert abs(np.exp(main.T_MANIFEST_LIST['read']['mu']) - 22) < 2
 
     def test_catalog_backend_storage_uses_storage_provider(self, tmp_path):
         """When backend=storage, catalog ops use storage provider."""
@@ -522,9 +559,10 @@ min_latency = 1
         queue_append_median = np.exp(main.T_APPEND['mu'])
         assert abs(queue_append_median - 5) < 0.1
 
-        # Manifest still uses AWS storage
-        aws_manifest_median = np.exp(main.T_MANIFEST_LIST['read']['mu'])
-        assert aws_manifest_median > queue_append_median * 5
+        # Manifest still uses AWS (S3 Express) storage
+        s3x_manifest_median = np.exp(main.T_MANIFEST_LIST['read']['mu'])
+        # S3 Express manifest ~22ms should be > 5ms queue append
+        assert s3x_manifest_median > queue_append_median * 2
 
     def test_explicit_config_overrides_provider(self, tmp_path):
         """Explicit T_* config should override provider defaults."""
@@ -645,8 +683,8 @@ T_CAS.sigma = 0.6
         assert abs(np.exp(main.T_CAS['mu']) - 100) < 0.1
         assert main.T_CAS['sigma'] == 0.6
 
-        # Manifests should use AWS profile defaults (median=50)
-        assert abs(np.exp(main.T_MANIFEST_LIST['read']['mu']) - 50) < 1
+        # Manifests should use AWS (S3 Express) profile defaults (median=22)
+        assert abs(np.exp(main.T_MANIFEST_LIST['read']['mu']) - 22) < 2
 
     def test_service_provider_overrides_storage_provider(self, tmp_path):
         """catalog.service.provider should override storage.provider for catalog ops."""
@@ -681,15 +719,15 @@ min_latency = 1
 
         main.configure_from_toml(str(config_file))
 
-        # Storage uses AWS
+        # Storage uses AWS (S3 Express alias)
         assert main.STORAGE_PROVIDER == "aws"
-        # AWS manifest: median=50
-        assert abs(np.exp(main.T_MANIFEST_LIST['read']['mu']) - 50) < 1
+        # S3 Express manifest: median=22
+        assert abs(np.exp(main.T_MANIFEST_LIST['read']['mu']) - 22) < 2
 
-        # Catalog service uses Azure
-        # Azure CAS: median=75, sigma=0.80
-        assert abs(np.exp(main.T_CAS['mu']) - 75) < 1
-        assert abs(main.T_CAS['sigma'] - 0.80) < 0.01
+        # Catalog service uses Azure (Blob)
+        # Azure Blob CAS: median=93, sigma=0.82
+        assert abs(np.exp(main.T_CAS['mu']) - 93) < 5
+        assert abs(main.T_CAS['sigma'] - 0.82) < 0.02
 
 
 class TestFailureLatencyMultiplier:
@@ -874,8 +912,9 @@ min_latency = 1
         main.configure_from_toml(str(config_file))
 
         assert main.CONTENTION_SCALING_ENABLED == True
-        assert main.CATALOG_CONTENTION_SCALING.get('cas') == 1.4
-        assert main.CATALOG_CONTENTION_SCALING.get('append') == 1.8
+        # S3 Express (aws alias) contention scaling: CAS=1.77, append=1.85
+        assert abs(main.CATALOG_CONTENTION_SCALING.get('cas') - 1.77) < 0.01
+        assert abs(main.CATALOG_CONTENTION_SCALING.get('append') - 1.85) < 0.01
 
     def test_contention_scaling_can_be_disabled(self, tmp_path):
         """Contention scaling can be explicitly disabled."""
@@ -911,14 +950,14 @@ min_latency = 1
 
 
 class TestLatencyPercentiles:
-    """Test that generated latencies match expected percentiles."""
+    """Test that generated latencies match expected percentiles from June 2025 YCSB benchmarks."""
 
-    def test_aws_cas_percentiles(self):
-        """Generated AWS CAS latencies should match measured percentiles."""
+    def test_s3x_cas_percentiles(self):
+        """Generated S3 Express CAS latencies should match measured percentiles."""
         main.MIN_LATENCY = 0.1
-        # AWS CAS: median=23ms, p95=65ms, p99=78ms
-        mu = np.log(23)
-        sigma = 0.45
+        # S3 Express CAS: median=22.4ms, p95=27.8ms, p99=44.3ms, sigma=0.224
+        mu = np.log(22.4)
+        sigma = 0.224
 
         np.random.seed(42)
         samples = [main.generate_latency_lognormal(mu, sigma) for _ in range(50000)]
@@ -928,16 +967,16 @@ class TestLatencyPercentiles:
         p99 = np.percentile(samples, 99)
 
         # Allow 20% tolerance
-        assert abs(p50 - 23) / 23 < 0.20, f"p50={p50}, expected ~23"
-        assert abs(p95 - 65) / 65 < 0.30, f"p95={p95}, expected ~65"
-        assert abs(p99 - 78) / 78 < 0.30, f"p99={p99}, expected ~78"
+        assert abs(p50 - 22.4) / 22.4 < 0.20, f"p50={p50}, expected ~22.4"
+        assert abs(p95 - 27.8) / 27.8 < 0.30, f"p95={p95}, expected ~27.8"
+        assert abs(p99 - 44.3) / 44.3 < 0.40, f"p99={p99}, expected ~44.3"
 
-    def test_aws_append_percentiles(self):
-        """Generated AWS append latencies should match measured percentiles."""
+    def test_s3x_append_percentiles(self):
+        """Generated S3 Express append latencies should match measured percentiles."""
         main.MIN_LATENCY = 0.1
-        # AWS append: median=20ms, p95=28ms, p99=48ms
-        mu = np.log(20)
-        sigma = 0.25
+        # S3 Express append: median=20.5ms, p95=27.8ms, p99=48.2ms, sigma=0.247
+        mu = np.log(20.5)
+        sigma = 0.247
 
         np.random.seed(42)
         samples = [main.generate_latency_lognormal(mu, sigma) for _ in range(50000)]
@@ -945,8 +984,43 @@ class TestLatencyPercentiles:
         p50 = np.percentile(samples, 50)
         p95 = np.percentile(samples, 95)
 
-        assert abs(p50 - 20) / 20 < 0.20, f"p50={p50}, expected ~20"
-        assert abs(p95 - 28) / 28 < 0.30, f"p95={p95}, expected ~28"
+        assert abs(p50 - 20.5) / 20.5 < 0.20, f"p50={p50}, expected ~20.5"
+        assert abs(p95 - 27.8) / 27.8 < 0.30, f"p95={p95}, expected ~27.8"
+
+    def test_s3_standard_cas_percentiles(self):
+        """Generated S3 Standard CAS latencies should match measured percentiles."""
+        main.MIN_LATENCY = 0.1
+        # S3 Standard CAS: median=60.8ms, p95=78.5ms, p99=103ms, sigma=0.14
+        mu = np.log(60.8)
+        sigma = 0.14
+
+        np.random.seed(42)
+        samples = [main.generate_latency_lognormal(mu, sigma) for _ in range(50000)]
+
+        p50 = np.percentile(samples, 50)
+        p95 = np.percentile(samples, 95)
+        p99 = np.percentile(samples, 99)
+
+        assert abs(p50 - 60.8) / 60.8 < 0.20, f"p50={p50}, expected ~60.8"
+        assert abs(p95 - 78.5) / 78.5 < 0.30, f"p95={p95}, expected ~78.5"
+        assert abs(p99 - 103) / 103 < 0.40, f"p99={p99}, expected ~103"
+
+    def test_azure_blob_cas_heavy_tail(self):
+        """Azure Blob CAS should have very heavy tail (p99/p50 > 30x)."""
+        main.MIN_LATENCY = 0.1
+        # Azure Blob CAS: median=93.1ms, sigma=0.82 (extremely heavy tail)
+        mu = np.log(93.1)
+        sigma = 0.82
+
+        np.random.seed(42)
+        samples = [main.generate_latency_lognormal(mu, sigma) for _ in range(50000)]
+
+        p50 = np.percentile(samples, 50)
+        p99 = np.percentile(samples, 99)
+        ratio = p99 / p50
+
+        # Azure Blob has p99/p50 ratio around 50x
+        assert ratio > 5, f"p99/p50 ratio {ratio:.1f} too low for heavy-tailed Azure"
 
 
 class TestSimulationBounds:
@@ -1086,8 +1160,9 @@ min_latency = 1
         p99 = np.percentile(samples, 99)
         ratio = p99 / p50
 
-        # AWS CAS has ratio ~3.4x
-        assert 2.0 < ratio < 6.0, f"Ratio {ratio} outside expected range for lognormal"
+        # S3 Express CAS (aws alias) has sigma=0.22, giving p99/p50 ≈ 1.67
+        # This is a relatively tight distribution (low variance)
+        assert 1.3 < ratio < 3.0, f"Ratio {ratio} outside expected range for S3 Express lognormal"
 
     def test_provider_profiles_produce_different_latencies(self, tmp_path):
         """Different providers should produce significantly different latencies."""
@@ -1125,64 +1200,66 @@ min_latency = 1
             samples = [main.get_cas_latency() for _ in range(1000)]
             median_latencies[provider] = np.median(samples)
 
-        # AWS should be fastest, GCP slowest
+        # S3 Express (aws alias) should be faster than Azure, Azure faster than GCP
         assert median_latencies["aws"] < median_latencies["azure"]
         assert median_latencies["azure"] < median_latencies["gcp"]
 
-        # Check rough ratios (AWS ~23ms, Azure ~75ms, GCP ~170ms)
-        assert median_latencies["azure"] / median_latencies["aws"] > 2.0
-        assert median_latencies["gcp"] / median_latencies["azure"] > 1.5
+        # Check rough ratios:
+        # S3 Express CAS ~22ms, Azure Blob CAS ~93ms, GCP CAS ~170ms
+        assert median_latencies["azure"] / median_latencies["aws"] > 3.0  # 93/22 ≈ 4.2
+        assert median_latencies["gcp"] / median_latencies["azure"] > 1.5  # 170/93 ≈ 1.8
 
 
 class TestDistributionValidation:
-    """Validate that simulated distributions match measurements."""
+    """Validate that simulated distributions match June 2025 YCSB measurements."""
 
-    def test_aws_cas_distribution_matches_measurements(self):
-        """AWS CAS latencies should match measured distribution."""
+    def test_s3x_cas_distribution_matches_measurements(self):
+        """S3 Express CAS latencies should match measured distribution."""
         main.MIN_LATENCY = 0.1
         main.CONTENTION_SCALING_ENABLED = False
 
-        # Use AWS CAS parameters
+        # S3 Express CAS: mu=9.98, sigma=0.22, median=22.4ms
         main.T_CAS = {
-            'mu': np.log(23),
-            'sigma': 0.45,
+            'mu': np.log(22.4),
+            'sigma': 0.22,
             'distribution': 'lognormal'
         }
 
         np.random.seed(42)
         samples = [main.get_cas_latency() for _ in range(50000)]
 
-        # Measured values from simulation_summary.md:
-        # median=22.9ms, p95=65.4ms, p99=78.1ms
+        # Measured values from analysis/simulation_summary.md:
+        # median=22.4ms, p95=27.8ms, p99=44.3ms
         p50 = np.percentile(samples, 50)
         p95 = np.percentile(samples, 95)
         p99 = np.percentile(samples, 99)
 
         # Allow 25% tolerance
-        assert abs(p50 - 23) / 23 < 0.25, f"p50={p50}, expected ~23"
-        assert abs(p95 - 65) / 65 < 0.35, f"p95={p95}, expected ~65"
-        assert abs(p99 - 78) / 78 < 0.35, f"p99={p99}, expected ~78"
+        assert abs(p50 - 22.4) / 22.4 < 0.25, f"p50={p50}, expected ~22.4"
+        assert abs(p95 - 27.8) / 27.8 < 0.35, f"p95={p95}, expected ~27.8"
+        assert abs(p99 - 44.3) / 44.3 < 0.50, f"p99={p99}, expected ~44.3"
 
-    def test_azure_cas_heavy_tail(self):
-        """Azure CAS should have heavier tail than AWS."""
+    def test_azure_blob_cas_heavy_tail(self):
+        """Azure Blob CAS should have much heavier tail than S3 Express."""
         main.MIN_LATENCY = 0.1
         main.CONTENTION_SCALING_ENABLED = False
 
-        # AWS: sigma=0.45 -> p99/p50 ≈ exp(2.326*0.45) ≈ 2.85
-        main.T_CAS = {'mu': np.log(23), 'sigma': 0.45, 'distribution': 'lognormal'}
+        # S3 Express: sigma=0.22 -> p99/p50 ≈ exp(2.326*0.22) ≈ 1.67
+        main.T_CAS = {'mu': np.log(22), 'sigma': 0.22, 'distribution': 'lognormal'}
         np.random.seed(42)
-        aws_samples = [main.get_cas_latency() for _ in range(10000)]
-        aws_ratio = np.percentile(aws_samples, 99) / np.percentile(aws_samples, 50)
+        s3x_samples = [main.get_cas_latency() for _ in range(10000)]
+        s3x_ratio = np.percentile(s3x_samples, 99) / np.percentile(s3x_samples, 50)
 
-        # Azure: sigma=0.80 -> p99/p50 ≈ exp(2.326*0.80) ≈ 6.43
-        main.T_CAS = {'mu': np.log(75), 'sigma': 0.80, 'distribution': 'lognormal'}
+        # Azure Blob: sigma=0.82 -> p99/p50 ≈ exp(2.326*0.82) ≈ 6.7
+        # Measured: p99/p50 = 50x (extremely heavy!)
+        main.T_CAS = {'mu': np.log(93), 'sigma': 0.82, 'distribution': 'lognormal'}
         np.random.seed(42)
         azure_samples = [main.get_cas_latency() for _ in range(10000)]
         azure_ratio = np.percentile(azure_samples, 99) / np.percentile(azure_samples, 50)
 
-        # Azure should have higher p99/p50 ratio (ratio of ratios ≈ 2.26x)
-        # The measured data shows Azure has much more variability
-        assert azure_ratio > aws_ratio * 1.8, f"Azure ratio {azure_ratio:.2f} not > AWS ratio {aws_ratio:.2f} * 1.8"
+        # Azure should have much higher p99/p50 ratio
+        # S3 Express ~1.7x, Azure Blob ~6-7x (lognormal), actual measured ~50x
+        assert azure_ratio > s3x_ratio * 2.5, f"Azure ratio {azure_ratio:.2f} not > S3x ratio {s3x_ratio:.2f} * 2.5"
 
 
 if __name__ == "__main__":

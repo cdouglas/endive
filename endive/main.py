@@ -164,56 +164,101 @@ CONTENTION_TRACKER = ContentionTracker()
 # Provider Profiles - Based on June 2025 YCSB benchmark measurements
 # =============================================================================
 
+# Provider profiles based on YCSB benchmark measurements (June 2025)
+# Source: analysis/simulation_summary.md and analysis/distributions.json
+#
+# IMPORTANT: Storage tiers have distinct latency characteristics.
+# Do NOT merge tiers (e.g., S3 vs S3 Express, Azure Blob vs Azure Premium).
+#
+# Parameters:
+#   median: Median latency in ms (used to compute mu = ln(median))
+#   sigma: Lognormal sigma parameter (controls tail heaviness)
+#   failure_multiplier: Ratio of failed op latency to success latency
+#   contention_scaling: Latency multiplier at 16 threads vs 1 thread
 PROVIDER_PROFILES = {
-    "aws": {
-        # Storage operations (S3)
+    # AWS S3 Standard - CAS only (no conditional append support)
+    # Aggregate: mu=11.04, sigma=0.14, median=60.8ms
+    "s3": {
         "manifest_list": {
-            "read": {"median": 50, "sigma": 0.3},
-            "write": {"median": 60, "sigma": 0.3}
+            "read": {"median": 61, "sigma": 0.14},
+            "write": {"median": 63, "sigma": 0.14}
         },
         "manifest_file": {
-            "read": {"median": 50, "sigma": 0.3},
-            "write": {"median": 60, "sigma": 0.3}
+            "read": {"median": 61, "sigma": 0.14},
+            "write": {"median": 63, "sigma": 0.14}
         },
-        # Catalog operations (when backend = "storage")
-        # AWS CAS: mu=10.16, sigma=0.45, median=23ms
-        "cas": {"median": 23, "sigma": 0.45, "failure_multiplier": 1.17},
-        # AWS Append: mu=9.90, sigma=0.25, median=20ms
-        "append": {"median": 20, "sigma": 0.25, "failure_multiplier": 1.09},
-        "contention_scaling": {"cas": 1.4, "append": 1.8},
+        "cas": {"median": 61, "sigma": 0.14, "failure_multiplier": 1.22},
+        "append": None,  # S3 Standard does not support conditional append
+        "contention_scaling": {"cas": 0.97, "append": None},  # Slightly faster at high contention
     },
+    # AWS S3 Express One Zone - CAS + conditional append
+    # CAS: mu=9.98, sigma=0.22, median=22.4ms
+    # Append: mu=9.90, sigma=0.25, median=20.5ms
+    "s3x": {
+        "manifest_list": {
+            "read": {"median": 22, "sigma": 0.22},
+            "write": {"median": 21, "sigma": 0.25}
+        },
+        "manifest_file": {
+            "read": {"median": 22, "sigma": 0.22},
+            "write": {"median": 21, "sigma": 0.25}
+        },
+        "cas": {"median": 22, "sigma": 0.22, "failure_multiplier": 0.95},  # Failures slightly faster
+        "append": {"median": 21, "sigma": 0.25, "failure_multiplier": 1.09},
+        "contention_scaling": {"cas": 1.77, "append": 1.85},
+    },
+    # Azure Blob Storage (Standard tier) - CAS + conditional append
+    # CAS: mu=11.70, sigma=0.82, median=93.1ms (very heavy tails, p99/p50=50x)
+    # Append: mu=11.40, sigma=0.28, median=87.3ms
+    # WARNING: Append failures are 31.6x slower than successes!
     "azure": {
         "manifest_list": {
-            "read": {"median": 75, "sigma": 0.3},
-            "write": {"median": 85, "sigma": 0.3}
+            "read": {"median": 87, "sigma": 0.28},
+            "write": {"median": 95, "sigma": 0.28}
         },
         "manifest_file": {
-            "read": {"median": 75, "sigma": 0.3},
-            "write": {"median": 85, "sigma": 0.3}
+            "read": {"median": 87, "sigma": 0.28},
+            "write": {"median": 95, "sigma": 0.28}
         },
-        # Azure CAS: mu=11.44, sigma=0.80, median=75ms (heavy tails!)
-        "cas": {"median": 75, "sigma": 0.80, "failure_multiplier": 1.02},
-        # Azure Append: mu=11.25, sigma=0.28, median=77ms
-        # Note: Azure append failures are 34x slower than successes!
-        "append": {"median": 77, "sigma": 0.28, "failure_multiplier": 34.3},
-        "contention_scaling": {"cas": 5.8, "append": 1.1},
+        "cas": {"median": 93, "sigma": 0.82, "failure_multiplier": 0.81},  # Failures faster
+        "append": {"median": 87, "sigma": 0.28, "failure_multiplier": 31.6},  # Failures MUCH slower!
+        "contention_scaling": {"cas": 5.4, "append": 1.07},
     },
+    # Azure Premium Block Blob - CAS + conditional append
+    # CAS: mu=11.25, sigma=0.73, median=63.5ms (heavy tails)
+    # Append: mu=11.14, sigma=0.23, median=69.9ms
+    # WARNING: Append failures are 36.2x slower than successes!
+    "azurex": {
+        "manifest_list": {
+            "read": {"median": 70, "sigma": 0.23},
+            "write": {"median": 72, "sigma": 0.23}
+        },
+        "manifest_file": {
+            "read": {"median": 70, "sigma": 0.23},
+            "write": {"median": 72, "sigma": 0.23}
+        },
+        "cas": {"median": 64, "sigma": 0.73, "failure_multiplier": 1.28},
+        "append": {"median": 70, "sigma": 0.23, "failure_multiplier": 36.2},  # Failures MUCH slower!
+        "contention_scaling": {"cas": 6.0, "append": 1.02},
+    },
+    # GCP Cloud Storage - CAS only (no conditional append data)
+    # CAS: mu=12.44, sigma=0.91, median=170ms (extremely heavy tails, p99/p50=39x)
+    # Note: Apparent speedup under contention (0.7x) is an artifact of outlier sensitivity
     "gcp": {
         "manifest_list": {
-            "read": {"median": 100, "sigma": 0.5},
-            "write": {"median": 120, "sigma": 0.5}
+            "read": {"median": 170, "sigma": 0.91},
+            "write": {"median": 200, "sigma": 0.91}
         },
         "manifest_file": {
-            "read": {"median": 100, "sigma": 0.5},
-            "write": {"median": 120, "sigma": 0.5}
+            "read": {"median": 170, "sigma": 0.91},
+            "write": {"median": 200, "sigma": 0.91}
         },
-        # GCP CAS: mu=12.44, sigma=0.91, median=170ms (very heavy tails)
         "cas": {"median": 170, "sigma": 0.91, "failure_multiplier": 13.4},
         "append": None,  # No append data available for GCP
-        "contention_scaling": {"cas": 0.7, "append": None},
+        "contention_scaling": {"cas": 0.70, "append": None},  # Artifact - use 1.0 in practice
     },
+    # Hypothetical infinitely fast system for "what if" experiments
     "instant": {
-        # Hypothetical infinitely fast system for "what if" experiments
         "manifest_list": {
             "read": {"median": 1, "sigma": 0.1},
             "write": {"median": 1, "sigma": 0.1}
@@ -227,6 +272,11 @@ PROVIDER_PROFILES = {
         "contention_scaling": {"cas": 1.0, "append": 1.0},
     },
 }
+
+# Backward compatibility aliases
+# "aws" was previously used but mixed S3 and S3 Express data
+# Map to S3 Express since it supports both CAS and append
+PROVIDER_PROFILES["aws"] = PROVIDER_PROFILES["s3x"]
 
 
 def lognormal_mu_from_median(median_ms: float) -> float:
