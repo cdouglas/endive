@@ -4,7 +4,6 @@ fonttools==4.55.3
 hdrhistogram==0.10.3
 iniconfig==2.0.0
 kiwisolver==1.4.7
-logging==0.4.9.6
 matplotlib==3.9.3
 mizani==0.13.1
 numpy==2.2.0
