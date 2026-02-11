@@ -64,6 +64,10 @@ RETRY_BACKOFF_MULTIPLIER: float  # Multiplier for each retry
 RETRY_BACKOFF_MAX_MS: float  # Maximum backoff time in milliseconds
 RETRY_BACKOFF_JITTER: float  # Jitter factor (0.0 to 1.0) for randomization
 
+# Storage and catalog configuration
+STORAGE_PROVIDER: str | None  # "aws", "azure", "gcp", "instant", or None for custom
+CATALOG_BACKEND: str  # "storage" (default), "service", or "fifo_queue"
+
 # Append mode parameters (catalog mode = "append")
 CATALOG_MODE: str  # "cas" (default) or "append"
 COMPACTION_THRESHOLD: int  # Bytes before triggering compaction (default 16MB)
@@ -231,6 +235,102 @@ def parse_latency_config(config_section: dict, defaults: dict = None) -> dict:
     return result
 
 
+def get_provider_latency_config(provider: str, operation: str, sub_op: str = None) -> dict | None:
+    """Get latency configuration from a provider profile.
+
+    Args:
+        provider: Provider name (aws, azure, gcp, instant)
+        operation: Operation type (cas, append, manifest_list, manifest_file)
+        sub_op: Sub-operation for nested configs (read, write)
+
+    Returns:
+        Dict with mu, sigma, distribution, and optionally failure_multiplier.
+        Returns None if provider or operation not found.
+    """
+    if provider not in PROVIDER_PROFILES:
+        return None
+
+    profile = PROVIDER_PROFILES[provider]
+    if operation not in profile:
+        return None
+
+    op_config = profile[operation]
+    if op_config is None:
+        return None
+
+    # Handle nested configs (manifest_list, manifest_file)
+    if sub_op:
+        if sub_op not in op_config:
+            return None
+        op_config = op_config[sub_op]
+
+    # Convert profile format to internal format
+    result = {
+        'mu': lognormal_mu_from_median(op_config['median']),
+        'sigma': op_config['sigma'],
+        'distribution': 'lognormal'
+    }
+    if 'failure_multiplier' in op_config:
+        result['failure_multiplier'] = op_config['failure_multiplier']
+
+    return result
+
+
+def apply_provider_defaults(provider: str, storage_cfg: dict, catalog_backend: str, catalog_cfg: dict) -> dict:
+    """Apply provider profile defaults, then overlay explicit config.
+
+    Args:
+        provider: Provider name or None for custom config
+        storage_cfg: Explicit storage configuration from TOML
+        catalog_backend: "storage", "service", or "fifo_queue"
+        catalog_cfg: Catalog configuration section (may have service/fifo_queue subsections)
+
+    Returns:
+        Dict with resolved latency configurations for all operations.
+    """
+    result = {}
+
+    # Start with provider defaults if specified
+    if provider and provider in PROVIDER_PROFILES:
+        profile = PROVIDER_PROFILES[provider]
+
+        # Storage operations (always from storage provider)
+        for op in ['manifest_list', 'manifest_file']:
+            if profile.get(op):
+                result[f'T_{op.upper()}'] = {
+                    'read': get_provider_latency_config(provider, op, 'read'),
+                    'write': get_provider_latency_config(provider, op, 'write')
+                }
+
+        # Catalog operations depend on backend
+        if catalog_backend == 'storage':
+            # Catalog uses storage provider latencies
+            if profile.get('cas'):
+                result['T_CAS'] = get_provider_latency_config(provider, 'cas')
+            if profile.get('append'):
+                result['T_APPEND'] = get_provider_latency_config(provider, 'append')
+        elif catalog_backend == 'service':
+            # Check for catalog.service.provider or explicit config
+            service_cfg = catalog_cfg.get('service', {})
+            service_provider = service_cfg.get('provider', provider)
+            if service_provider and service_provider in PROVIDER_PROFILES:
+                service_profile = PROVIDER_PROFILES[service_provider]
+                if service_profile.get('cas'):
+                    result['T_CAS'] = get_provider_latency_config(service_provider, 'cas')
+                if service_profile.get('append'):
+                    result['T_APPEND'] = get_provider_latency_config(service_provider, 'append')
+        elif catalog_backend == 'fifo_queue':
+            # FIFO queue has its own config, checkpoints use storage
+            queue_cfg = catalog_cfg.get('fifo_queue', {})
+            if 'append' in queue_cfg:
+                result['T_APPEND'] = parse_latency_config(queue_cfg['append'])
+            elif provider and PROVIDER_PROFILES.get(provider, {}).get('append'):
+                # Fallback to provider append config
+                result['T_APPEND'] = get_provider_latency_config(provider, 'append')
+
+    return result
+
+
 def partition_tables_into_groups(n_tables: int, n_groups: int, distribution: str, longtail_params: dict) -> tuple[dict, dict]:
     """Partition tables into groups.
 
@@ -384,6 +484,7 @@ def configure_from_toml(config_file: str):
     global MANIFEST_LIST_MODE, MANIFEST_LIST_SEAL_THRESHOLD, MANIFEST_LIST_ENTRY_SIZE
     global T_APPEND, T_LOG_ENTRY_READ, T_COMPACTION
     global LATENCY_DISTRIBUTION
+    global STORAGE_PROVIDER, CATALOG_BACKEND
 
     with open(config_file, "rb") as f:
         config = tomllib.load(f)
@@ -416,77 +517,141 @@ def configure_from_toml(config_file: str):
     COMPACTION_MAX_ENTRIES = config["catalog"].get("compaction_max_entries", 0)  # 0 = disabled (size only)
     LOG_ENTRY_SIZE = config["catalog"].get("log_entry_size", 100)  # 100 bytes default
 
-    # Load storage latencies - supports both legacy (mean/stddev) and new (median/sigma) formats
+    # Load storage and catalog configuration
     MAX_PARALLEL = config["storage"]["max_parallel"]
     MIN_LATENCY = config["storage"]["min_latency"]
 
-    # Global latency distribution setting (can be overridden per-operation)
-    LATENCY_DISTRIBUTION = config.get("storage", {}).get("latency_distribution", "normal")
-
-    # Helper to get storage config with defaults
     storage_cfg = config.get("storage", {})
+    catalog_cfg = config.get("catalog", {})
 
-    # Parse T_CAS - check for both formats
-    if "T_CAS" in storage_cfg:
-        T_CAS = parse_latency_config(storage_cfg["T_CAS"])
+    # Provider and backend configuration
+    STORAGE_PROVIDER = storage_cfg.get("provider", None)
+    CATALOG_BACKEND = catalog_cfg.get("backend", "storage")  # Default: catalog ops in storage
+
+    # Global latency distribution setting (can be overridden per-operation)
+    LATENCY_DISTRIBUTION = storage_cfg.get("latency_distribution", "normal")
+
+    # Hardcoded defaults (normal distribution for backward compatibility)
+    default_cas = {'mean': 100.0, 'stddev': 10.0, 'distribution': 'normal'}
+    default_metadata_root = {'mean': 1.0, 'stddev': 0.1, 'distribution': 'normal'}
+    default_manifest = {'mean': 50.0, 'stddev': 5.0, 'distribution': 'normal'}
+    default_manifest_write = {'mean': 60.0, 'stddev': 6.0, 'distribution': 'normal'}
+    default_append = {'mean': 50.0, 'stddev': 5.0, 'distribution': 'normal'}
+    default_log_read = {'mean': 5.0, 'stddev': 1.0, 'distribution': 'normal'}
+    default_compaction = {'mean': 200.0, 'stddev': 20.0, 'distribution': 'normal'}
+
+    # Apply provider profile defaults if specified
+    if STORAGE_PROVIDER and STORAGE_PROVIDER in PROVIDER_PROFILES:
+        provider_defaults = apply_provider_defaults(
+            STORAGE_PROVIDER, storage_cfg, CATALOG_BACKEND, catalog_cfg
+        )
     else:
-        # Default: normal distribution for backward compatibility
-        T_CAS = {'mean': 100.0, 'stddev': 10.0, 'distribution': 'normal'}
+        provider_defaults = {}
 
-    # Parse T_METADATA_ROOT
+    # === STORAGE OPERATIONS (always from storage, never from catalog service) ===
+
+    # T_MANIFEST_LIST: use provider defaults if available, else explicit config, else hardcoded
+    if 'T_MANIFEST_LIST' in provider_defaults and "T_MANIFEST_LIST" not in storage_cfg:
+        T_MANIFEST_LIST = provider_defaults['T_MANIFEST_LIST']
+    elif "T_MANIFEST_LIST" in storage_cfg:
+        T_MANIFEST_LIST = {
+            'read': parse_latency_config(storage_cfg["T_MANIFEST_LIST"].get("read", {}), default_manifest),
+            'write': parse_latency_config(storage_cfg["T_MANIFEST_LIST"].get("write", {}), default_manifest_write)
+        }
+    else:
+        T_MANIFEST_LIST = {'read': default_manifest.copy(), 'write': default_manifest_write.copy()}
+
+    # T_MANIFEST_FILE: same logic
+    if 'T_MANIFEST_FILE' in provider_defaults and "T_MANIFEST_FILE" not in storage_cfg:
+        T_MANIFEST_FILE = provider_defaults['T_MANIFEST_FILE']
+    elif "T_MANIFEST_FILE" in storage_cfg:
+        T_MANIFEST_FILE = {
+            'read': parse_latency_config(storage_cfg["T_MANIFEST_FILE"].get("read", {}), default_manifest),
+            'write': parse_latency_config(storage_cfg["T_MANIFEST_FILE"].get("write", {}), default_manifest_write)
+        }
+    else:
+        T_MANIFEST_FILE = {'read': default_manifest.copy(), 'write': default_manifest_write.copy()}
+
+    # T_METADATA_ROOT: typically fast (catalog pointer), explicit config or default
     if "T_METADATA_ROOT" in storage_cfg:
         T_METADATA_ROOT = {
-            'read': parse_latency_config(storage_cfg["T_METADATA_ROOT"].get("read", {}),
-                                         {'mean': 1.0, 'stddev': 0.1, 'distribution': 'normal'}),
-            'write': parse_latency_config(storage_cfg["T_METADATA_ROOT"].get("write", {}),
-                                          {'mean': 1.0, 'stddev': 0.1, 'distribution': 'normal'})
+            'read': parse_latency_config(storage_cfg["T_METADATA_ROOT"].get("read", {}), default_metadata_root),
+            'write': parse_latency_config(storage_cfg["T_METADATA_ROOT"].get("write", {}), default_metadata_root)
         }
     else:
-        T_METADATA_ROOT = {
-            'read': {'mean': 1.0, 'stddev': 0.1, 'distribution': 'normal'},
-            'write': {'mean': 1.0, 'stddev': 0.1, 'distribution': 'normal'}
-        }
+        T_METADATA_ROOT = {'read': default_metadata_root.copy(), 'write': default_metadata_root.copy()}
 
-    # Parse T_MANIFEST_LIST
-    if "T_MANIFEST_LIST" in storage_cfg:
-        T_MANIFEST_LIST = {
-            'read': parse_latency_config(storage_cfg["T_MANIFEST_LIST"].get("read", {}),
-                                         {'mean': 50.0, 'stddev': 5.0, 'distribution': 'normal'}),
-            'write': parse_latency_config(storage_cfg["T_MANIFEST_LIST"].get("write", {}),
-                                          {'mean': 60.0, 'stddev': 6.0, 'distribution': 'normal'})
-        }
-    else:
-        T_MANIFEST_LIST = {
-            'read': {'mean': 50.0, 'stddev': 5.0, 'distribution': 'normal'},
-            'write': {'mean': 60.0, 'stddev': 6.0, 'distribution': 'normal'}
-        }
+    # === CATALOG OPERATIONS (depend on backend) ===
 
-    # Parse T_MANIFEST_FILE
-    if "T_MANIFEST_FILE" in storage_cfg:
-        T_MANIFEST_FILE = {
-            'read': parse_latency_config(storage_cfg["T_MANIFEST_FILE"].get("read", {}),
-                                         {'mean': 50.0, 'stddev': 5.0, 'distribution': 'normal'}),
-            'write': parse_latency_config(storage_cfg["T_MANIFEST_FILE"].get("write", {}),
-                                          {'mean': 60.0, 'stddev': 6.0, 'distribution': 'normal'})
-        }
-    else:
-        T_MANIFEST_FILE = {
-            'read': {'mean': 50.0, 'stddev': 5.0, 'distribution': 'normal'},
-            'write': {'mean': 60.0, 'stddev': 6.0, 'distribution': 'normal'}
-        }
+    # Determine catalog latency source based on backend
+    if CATALOG_BACKEND == "service":
+        # Catalog service has its own config section
+        service_cfg = catalog_cfg.get("service", {})
+        service_provider = service_cfg.get("provider", STORAGE_PROVIDER)
 
-    # Parse append mode storage latencies
-    T_APPEND = parse_latency_config(
-        storage_cfg.get("T_APPEND", {}),
-        {'mean': 50.0, 'stddev': 5.0, 'distribution': 'normal'}
-    )
+        # T_CAS: use service config, or service provider, or storage provider
+        if "T_CAS" in service_cfg:
+            T_CAS = parse_latency_config(service_cfg["T_CAS"], default_cas)
+        elif service_provider and service_provider in PROVIDER_PROFILES:
+            T_CAS = get_provider_latency_config(service_provider, 'cas') or default_cas
+        elif "T_CAS" in storage_cfg:
+            T_CAS = parse_latency_config(storage_cfg["T_CAS"], default_cas)
+        else:
+            T_CAS = default_cas.copy()
+
+        # T_APPEND: same logic
+        if "T_APPEND" in service_cfg:
+            T_APPEND = parse_latency_config(service_cfg["T_APPEND"], default_append)
+        elif service_provider and service_provider in PROVIDER_PROFILES:
+            T_APPEND = get_provider_latency_config(service_provider, 'append') or default_append
+        elif "T_APPEND" in storage_cfg:
+            T_APPEND = parse_latency_config(storage_cfg["T_APPEND"], default_append)
+        else:
+            T_APPEND = default_append.copy()
+
+    elif CATALOG_BACKEND == "fifo_queue":
+        # FIFO queue: append from queue config, CAS for compaction from storage
+        queue_cfg = catalog_cfg.get("fifo_queue", {})
+
+        # T_APPEND: queue append latency
+        if "append" in queue_cfg:
+            T_APPEND = parse_latency_config(queue_cfg["append"], default_append)
+        elif 'T_APPEND' in provider_defaults:
+            T_APPEND = provider_defaults['T_APPEND']
+        else:
+            T_APPEND = default_append.copy()
+
+        # T_CAS: compaction uses storage
+        if "T_CAS" in storage_cfg:
+            T_CAS = parse_latency_config(storage_cfg["T_CAS"], default_cas)
+        elif 'T_CAS' in provider_defaults:
+            T_CAS = provider_defaults['T_CAS']
+        else:
+            T_CAS = default_cas.copy()
+
+    else:  # backend == "storage" (default)
+        # Catalog in storage: use provider defaults or explicit config
+        if 'T_CAS' in provider_defaults and "T_CAS" not in storage_cfg:
+            T_CAS = provider_defaults['T_CAS']
+        elif "T_CAS" in storage_cfg:
+            T_CAS = parse_latency_config(storage_cfg["T_CAS"], default_cas)
+        else:
+            T_CAS = default_cas.copy()
+
+        if 'T_APPEND' in provider_defaults and "T_APPEND" not in storage_cfg:
+            T_APPEND = provider_defaults['T_APPEND']
+        elif "T_APPEND" in storage_cfg:
+            T_APPEND = parse_latency_config(storage_cfg["T_APPEND"], default_append)
+        else:
+            T_APPEND = default_append.copy()
+
+    # === OTHER STORAGE LATENCIES ===
+
     T_LOG_ENTRY_READ = parse_latency_config(
-        storage_cfg.get("T_LOG_ENTRY_READ", {}),
-        {'mean': 5.0, 'stddev': 1.0, 'distribution': 'normal'}
+        storage_cfg.get("T_LOG_ENTRY_READ", {}), default_log_read
     )
     T_COMPACTION = parse_latency_config(
-        storage_cfg.get("T_COMPACTION", {}),
-        {'mean': 200.0, 'stddev': 20.0, 'distribution': 'normal'}
+        storage_cfg.get("T_COMPACTION", {}), default_compaction
     )
 
     # Table metadata inlining configuration

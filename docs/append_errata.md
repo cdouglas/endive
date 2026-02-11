@@ -211,4 +211,34 @@ critical for understanding conflict resolution with ML+.
 
 ---
 
-*Last updated: Phase 1 - Lognormal latency distributions*
+## Storage/Catalog Separation (Phase 2)
+
+### Implementation Notes
+
+1. **Storage provider config**: `storage.provider = "aws"` applies AWS profile to all storage operations (manifests).
+
+2. **Catalog backend config**: `catalog.backend` determines where catalog ops run:
+   - `"storage"` (default): CAS/append use storage provider latencies
+   - `"service"`: CAS/append use `[catalog.service]` config
+   - `"fifo_queue"`: Append uses queue config, checkpoints use storage
+
+3. **Precedence implemented**: Provider defaults < explicit T_* config (Phase 3 scope reduced)
+
+### Technical Debt
+
+1. **Contention scaling not applied yet**: Provider profiles define `contention_scaling` but it's not used. Phase 4 will implement this.
+
+2. **Failure multiplier not applied yet**: Provider profiles define `failure_multiplier` but latency functions don't use it. Phase 4 will implement this.
+
+3. **No provider validation**: Invalid provider names silently fall back to defaults. Could add warning/error.
+
+4. **Checkpoint latency in FIFO mode**: Uses T_CAS for compaction but doesn't distinguish checkpoint vs regular CAS.
+
+### Deferred to Later Phases
+
+- Phase 4: Failure multipliers, contention tracking
+- Phase 5: Full validation test suite with throughput bounds
+
+---
+
+*Last updated: Phase 2 - Storage/catalog separation*

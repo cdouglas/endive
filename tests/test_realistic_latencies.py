@@ -328,6 +328,241 @@ T_MANIFEST_FILE.write.sigma = 0.3
         assert main.T_CAS['sigma'] == 0.45
 
 
+class TestStorageCatalogSeparation:
+    """Test storage vs catalog configuration separation."""
+
+    def test_storage_provider_sets_manifest_latencies(self, tmp_path):
+        """Storage provider should set manifest latencies."""
+        config_content = """
+[simulation]
+duration_ms = 10000
+output_path = "results.parquet"
+seed = 42
+
+[catalog]
+num_tables = 1
+
+[transaction]
+retry = 3
+runtime.min = 1000
+runtime.mean = 5000
+runtime.sigma = 0.5
+inter_arrival.distribution = "exponential"
+inter_arrival.scale = 500
+
+[storage]
+provider = "aws"
+max_parallel = 4
+min_latency = 1
+"""
+        config_file = tmp_path / "test_config.toml"
+        config_file.write_text(config_content)
+
+        main.configure_from_toml(str(config_file))
+
+        # Manifest latencies should come from AWS profile
+        assert main.T_MANIFEST_LIST['read']['distribution'] == 'lognormal'
+        # AWS manifest_list read: median=50, sigma=0.3
+        assert abs(np.exp(main.T_MANIFEST_LIST['read']['mu']) - 50) < 1
+
+    def test_catalog_backend_storage_uses_storage_provider(self, tmp_path):
+        """When backend=storage, catalog ops use storage provider."""
+        config_content = """
+[simulation]
+duration_ms = 10000
+output_path = "results.parquet"
+seed = 42
+
+[catalog]
+num_tables = 1
+backend = "storage"
+
+[transaction]
+retry = 3
+runtime.min = 1000
+runtime.mean = 5000
+runtime.sigma = 0.5
+inter_arrival.distribution = "exponential"
+inter_arrival.scale = 500
+
+[storage]
+provider = "aws"
+max_parallel = 4
+min_latency = 1
+"""
+        config_file = tmp_path / "test_config.toml"
+        config_file.write_text(config_content)
+
+        main.configure_from_toml(str(config_file))
+
+        # CAS should use AWS profile (median=23)
+        assert main.T_CAS['distribution'] == 'lognormal'
+        assert abs(np.exp(main.T_CAS['mu']) - 23) < 1
+
+    def test_catalog_backend_service_uses_service_provider(self, tmp_path):
+        """When backend=service, catalog ops use service provider."""
+        config_content = """
+[simulation]
+duration_ms = 10000
+output_path = "results.parquet"
+seed = 42
+
+[catalog]
+num_tables = 1
+backend = "service"
+
+[catalog.service]
+provider = "instant"
+
+[transaction]
+retry = 3
+runtime.min = 1000
+runtime.mean = 5000
+runtime.sigma = 0.5
+inter_arrival.distribution = "exponential"
+inter_arrival.scale = 500
+
+[storage]
+provider = "aws"
+max_parallel = 4
+min_latency = 1
+"""
+        config_file = tmp_path / "test_config.toml"
+        config_file.write_text(config_content)
+
+        main.configure_from_toml(str(config_file))
+
+        # Storage uses AWS (manifest slow)
+        assert main.T_MANIFEST_LIST['read']['distribution'] == 'lognormal'
+        aws_manifest_median = np.exp(main.T_MANIFEST_LIST['read']['mu'])
+
+        # Catalog uses instant (CAS fast)
+        assert main.T_CAS['distribution'] == 'lognormal'
+        instant_cas_median = np.exp(main.T_CAS['mu'])
+
+        # AWS manifest should be much slower than instant CAS
+        assert aws_manifest_median > instant_cas_median * 10
+
+    def test_catalog_backend_service_explicit_latency(self, tmp_path):
+        """Service backend can have explicit latency config."""
+        config_content = """
+[simulation]
+duration_ms = 10000
+output_path = "results.parquet"
+seed = 42
+
+[catalog]
+num_tables = 1
+backend = "service"
+
+[catalog.service]
+T_CAS.median = 15.0
+T_CAS.sigma = 0.3
+
+[transaction]
+retry = 3
+runtime.min = 1000
+runtime.mean = 5000
+runtime.sigma = 0.5
+inter_arrival.distribution = "exponential"
+inter_arrival.scale = 500
+
+[storage]
+provider = "aws"
+max_parallel = 4
+min_latency = 1
+"""
+        config_file = tmp_path / "test_config.toml"
+        config_file.write_text(config_content)
+
+        main.configure_from_toml(str(config_file))
+
+        # CAS should use explicit service config
+        assert main.T_CAS['distribution'] == 'lognormal'
+        assert abs(np.exp(main.T_CAS['mu']) - 15) < 0.1
+        assert main.T_CAS['sigma'] == 0.3
+
+    def test_fifo_queue_backend(self, tmp_path):
+        """FIFO queue backend uses queue config for append."""
+        config_content = """
+[simulation]
+duration_ms = 10000
+output_path = "results.parquet"
+seed = 42
+
+[catalog]
+num_tables = 1
+mode = "append"
+backend = "fifo_queue"
+
+[catalog.fifo_queue]
+append.median = 5.0
+append.sigma = 0.2
+
+[transaction]
+retry = 3
+runtime.min = 1000
+runtime.mean = 5000
+runtime.sigma = 0.5
+inter_arrival.distribution = "exponential"
+inter_arrival.scale = 500
+
+[storage]
+provider = "aws"
+max_parallel = 4
+min_latency = 1
+"""
+        config_file = tmp_path / "test_config.toml"
+        config_file.write_text(config_content)
+
+        main.configure_from_toml(str(config_file))
+
+        # Append should use FIFO queue config (fast)
+        assert main.T_APPEND['distribution'] == 'lognormal'
+        queue_append_median = np.exp(main.T_APPEND['mu'])
+        assert abs(queue_append_median - 5) < 0.1
+
+        # Manifest still uses AWS storage
+        aws_manifest_median = np.exp(main.T_MANIFEST_LIST['read']['mu'])
+        assert aws_manifest_median > queue_append_median * 5
+
+    def test_explicit_config_overrides_provider(self, tmp_path):
+        """Explicit T_* config should override provider defaults."""
+        config_content = """
+[simulation]
+duration_ms = 10000
+output_path = "results.parquet"
+seed = 42
+
+[catalog]
+num_tables = 1
+
+[transaction]
+retry = 3
+runtime.min = 1000
+runtime.mean = 5000
+runtime.sigma = 0.5
+inter_arrival.distribution = "exponential"
+inter_arrival.scale = 500
+
+[storage]
+provider = "aws"
+max_parallel = 4
+min_latency = 1
+T_CAS.median = 100.0
+T_CAS.sigma = 0.6
+"""
+        config_file = tmp_path / "test_config.toml"
+        config_file.write_text(config_content)
+
+        main.configure_from_toml(str(config_file))
+
+        # CAS should use explicit config, not AWS default
+        assert main.T_CAS['distribution'] == 'lognormal'
+        assert abs(np.exp(main.T_CAS['mu']) - 100) < 0.1
+        assert main.T_CAS['sigma'] == 0.6
+
+
 class TestLatencyPercentiles:
     """Test that generated latencies match expected percentiles."""
 
