@@ -106,7 +106,8 @@ def get_default_config() -> Dict:
                 'success_vs_throughput_plot': 'success_vs_throughput.png',
                 'overhead_vs_throughput_plot': 'overhead_vs_throughput.png',
                 'overhead_vs_throughput_table': 'overhead_vs_throughput.md',
-                'commit_rate_over_time_plot': 'commit_rate_over_time.png'
+                'commit_rate_over_time_plot': 'commit_rate_over_time.png',
+                'sustainable_throughput_plot': 'sustainable_throughput.png'
             },
             'table': {
                 'float_format': '%.2f',
@@ -827,6 +828,110 @@ def plot_latency_vs_throughput(
     plt.tight_layout()
     plt.savefig(output_path, dpi=300, bbox_inches='tight')
     print(f"\nSaved latency vs throughput plot to {output_path}")
+    plt.close()
+
+
+def plot_sustainable_throughput(
+    index_df: pd.DataFrame,
+    output_path: str,
+    title: str = "Sustainable Throughput (99%+ Success Rate)",
+    success_threshold: float = 99.0,
+    group_by: str = None
+):
+    """
+    Generate latency vs throughput plot showing only sustainable region.
+
+    This plot filters to only show data points where success rate >= threshold,
+    clearly demonstrating the throughput capacity each configuration can sustain
+    without the confusing effects of saturation.
+
+    Args:
+        index_df: Experiment index DataFrame
+        output_path: Path to save plot
+        title: Plot title
+        success_threshold: Minimum success rate to include (default 99%)
+        group_by: Optional parameter to group by (e.g., 'label' for config comparison)
+    """
+    if index_df.empty or 'throughput' not in index_df.columns:
+        print(f"  Skipping {output_path}: No data or missing required columns")
+        return
+
+    # Filter to sustainable region only
+    sustainable_df = index_df[index_df['success_rate'] >= success_threshold].copy()
+
+    if sustainable_df.empty:
+        print(f"  Skipping {output_path}: No data points with success rate >= {success_threshold}%")
+        return
+
+    fig, ax = plt.subplots(figsize=(12, 8))
+
+    # Color palette for different configurations
+    colors = ['#2E86AB', '#A23B72', '#F18F01', '#C73E1D', '#3B1F2B', '#95190C']
+
+    if group_by and group_by in sustainable_df.columns:
+        # Plot separate lines for each group (e.g., different optimization configs)
+        groups = sorted(sustainable_df[group_by].unique())
+
+        for i, group_val in enumerate(groups):
+            subset = sustainable_df[sustainable_df[group_by] == group_val].copy()
+            subset = subset.sort_values('throughput')
+
+            if len(subset) == 0:
+                continue
+
+            color = colors[i % len(colors)]
+
+            # Plot P50 latency as the main line
+            ax.plot(subset['throughput'], subset['p50_commit_latency'],
+                   marker='o', linewidth=2.5, markersize=10,
+                   label=f'{group_val}', color=color)
+
+            # Mark the maximum sustainable throughput with a vertical annotation
+            max_throughput_row = subset.loc[subset['throughput'].idxmax()]
+            max_tp = max_throughput_row['throughput']
+            max_lat = max_throughput_row['p50_commit_latency']
+
+            # Add a subtle marker at the ceiling
+            ax.scatter([max_tp], [max_lat], s=200, marker='|', color=color,
+                      linewidths=3, zorder=5)
+
+    else:
+        # Single series plot
+        df_sorted = sustainable_df.sort_values('throughput')
+
+        ax.plot(df_sorted['throughput'], df_sorted['p50_commit_latency'],
+               marker='o', linewidth=2.5, markersize=10,
+               label='P50 Latency', color='#2E86AB')
+
+        # Show max sustainable throughput
+        if len(df_sorted) > 0:
+            max_tp = df_sorted['throughput'].max()
+            ax.axvline(max_tp, color='green', linestyle='--', linewidth=2, alpha=0.7,
+                      label=f'Max Sustainable: {max_tp:.1f}/s')
+
+    ax.set_xlabel('Achieved Throughput (commits/sec)', fontsize=14, fontweight='bold')
+    ax.set_ylabel('P50 Commit Latency (ms)', fontsize=14, fontweight='bold')
+    ax.set_title(f'{title}\n(Only showing success rate ≥ {success_threshold}%)',
+                fontsize=14, fontweight='bold')
+    ax.legend(loc='upper left', fontsize=11, framealpha=0.9)
+    ax.grid(True, alpha=0.3, linestyle='--')
+
+    # Set reasonable axis limits
+    ax.set_xlim(left=0)
+    ax.set_ylim(bottom=0)
+
+    # Add annotation explaining the plot
+    ax.annotate(
+        f'Each line ends at its maximum sustainable throughput\n'
+        f'(highest throughput with ≥{success_threshold}% success)',
+        xy=(0.98, 0.02), xycoords='axes fraction',
+        ha='right', va='bottom', fontsize=9,
+        bbox=dict(boxstyle='round,pad=0.3', facecolor='lightyellow', alpha=0.8)
+    )
+
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=300, bbox_inches='tight')
+    print(f"\nSaved sustainable throughput plot to {output_path}")
     plt.close()
 
 
@@ -1701,6 +1806,16 @@ def cli():
     )
     generate_latency_vs_throughput_table(
         index_df, table_path,
+        group_by=group_by
+    )
+
+    # Sustainable Throughput (99%+ success region only)
+    plot_filename = CONFIG['output']['files']['sustainable_throughput_plot']
+    plot_path = os.path.join(output_dir, plot_filename)
+    plot_sustainable_throughput(
+        index_df, plot_path,
+        title="Sustainable Throughput",
+        success_threshold=99.0,
         group_by=group_by
     )
 
