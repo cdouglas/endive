@@ -1,310 +1,196 @@
-# Running Baseline Experiments
+# Running Experiments
 
-Quick reference guide for running Phase 2 baseline experiments.
+Quick reference guide for running optimization experiments.
 
 ## Quick Start
 
-### 1. Run experiments in background
+### Run All Experiments
 
 ```bash
-# Full baseline experiments (Phase 2) with 3 seeds per configuration
-nohup ./scripts/run_baseline_experiments.sh --seeds 3 > baseline.log 2>&1 &
+# Full experiment suite with 3 seeds per configuration
+./scripts/run_all_experiments.sh --parallel 4 --seeds 3
 
-# Save the process ID
-echo $! > experiments.pid
+# Quick test mode (1 minute simulations, 3 load levels)
+./scripts/run_all_experiments.sh --quick --parallel 4
+
+# Dry run to see what would execute
+./scripts/run_all_experiments.sh --dry-run --seeds 3
 ```
 
-This will run:
-- **Experiment 2.1**: Single table, 9 load levels, 3 seeds = 27 simulations
-- **Experiment 2.2**: Multi-table, 6 table counts × 9 load levels × 3 seeds = 162 simulations
-- **Total**: 189 simulations (~9.5 hours estimated)
-
-### 2. Monitor progress
+### Run Specific Groups
 
 ```bash
-# Watch with auto-refresh every 5 seconds
-./scripts/monitor_experiments.sh --watch 5
+# Only baseline experiments (no optimizations)
+./scripts/run_all_experiments.sh --groups baseline --seeds 3
 
-# One-time status check
-./scripts/monitor_experiments.sh --summary
+# Only optimization experiments
+./scripts/run_all_experiments.sh --groups metadata,ml_append,combined --seeds 3
+
+# Compare standard vs premium tiers
+./scripts/run_all_experiments.sh --groups baseline,metadata --seeds 3
 ```
 
-### 3. Check if still running
+## Experiment Groups
+
+| Group | Configs | Description |
+|-------|:-------:|-------------|
+| `trivial` | 2 | Single table trivial conflicts |
+| `mixed` | 1 | Single table mixed conflicts |
+| `multi_table` | 2 | Multi-table experiments |
+| `baseline` | 4 | No optimizations (S3, S3x, Azure, Azurex) |
+| `metadata` | 4 | Metadata inlining only |
+| `ml_append` | 3 | ML+ append only (S3x, Azure, Azurex) |
+| `combined` | 3 | Both optimizations |
+
+## Factorial Design
+
+The optimization experiments use a 2×2 factorial design:
+
+| Config | table_metadata_inlined | manifest_list_mode | Effect |
+|--------|:----------------------:|:------------------:|--------|
+| baseline | false | rewrite | Control (no optimizations) |
+| metadata | true | rewrite | Inlining effect only |
+| ml_append | false | append | ML+ effect only |
+| combined | true | append | Interaction effect |
+
+**Provider coverage:**
+
+| Config | S3 | S3 Express | Azure | Azure Premium |
+|--------|:--:|:----------:|:-----:|:-------------:|
+| baseline | ✓ | ✓ | ✓ | ✓ |
+| metadata | ✓ | ✓ | ✓ | ✓ |
+| ml_append | - | ✓ | ✓ | ✓ |
+| combined | - | ✓ | ✓ | ✓ |
+
+*S3 Standard doesn't support conditional append.*
+
+## Background Execution
+
+### Run in Background with Logging
 
 ```bash
-# Check process status
-ps aux | grep run_baseline_experiments.sh
+# Run in background with logging
+nohup ./scripts/run_all_experiments.sh --parallel 8 --seeds 3 2>&1 | \
+    tee experiment_logs/run_$(date +%Y%m%d_%H%M%S).log &
 
-# Or use saved PID
-if ps -p $(cat experiments.pid) > /dev/null; then
-    echo "Experiments still running"
-else
-    echo "Experiments complete or stopped"
-fi
+# Check progress
+./scripts/run_all_experiments.sh --status
 
-# View latest log output
-tail -f experiment_logs/baseline_experiments_*.log
+# Or tail the log
+tail -f experiment_logs/run_*.log
 ```
 
-## Common Scenarios
-
-### Quick Test Run
-
-Before running full experiments, do a quick test:
+### Docker Execution
 
 ```bash
-# Quick test mode: fewer configs, 10-second simulations
-./run_baseline_experiments.sh --quick --seeds 1
+# Build image
+docker build -t cdouglas/endive-sim:latest .
 
-# Expected: ~2-3 minutes for full test
-# Verifies: setup, config generation, result output
+# Run experiments in container
+docker run -d \
+    -e DOCKER_CONTAINER=1 \
+    -e OMP_NUM_THREADS=1 \
+    -v $(pwd)/experiments:/app/experiments \
+    -v $(pwd)/experiment_logs:/app/experiment_logs \
+    cdouglas/endive-sim:latest \
+    bash -c "scripts/run_all_experiments.sh --parallel 8 --seeds 3 2>&1 | \
+        tee experiment_logs/run_\$(date +%Y%m%d_%H%M%S).log"
+
+# Check container logs
+docker logs -f <container_id>
 ```
 
-### Run Only Experiment 2.1
+## Output Structure
 
-```bash
-# Single table saturation only (faster)
-nohup ./run_baseline_experiments.sh --exp2.1 --seeds 3 > exp2_1.log 2>&1 &
 ```
-
-### Run Only Experiment 2.2
-
-```bash
-# Multi-table saturation only
-nohup ./run_baseline_experiments.sh --exp2.2 --seeds 3 > exp2_2.log 2>&1 &
-```
-
-### Higher Confidence Results
-
-```bash
-# Run with 10 seeds per configuration for more stable statistics
-# Warning: Takes ~3x longer!
-nohup ./run_baseline_experiments.sh --seeds 10 > baseline_10seeds.log 2>&1 &
-```
-
-### Dry Run
-
-```bash
-# See what would be executed without running
-./run_baseline_experiments.sh --dry-run --seeds 3
-```
-
-## Understanding the Output
-
-### Log Files
-
-```bash
-experiment_logs/
-└── baseline_experiments_YYYYMMDD_HHMMSS.log
-```
-
-Contains:
-- Configuration summary
-- Progress updates
-- Success/failure status for each run
-- Final summary with counts
-
-### Experiment Results
-
-```bash
 experiments/
-├── exp2_1_single_table_false-HASH/
-│   ├── cfg.toml                  # Shared configuration
-│   ├── SEED1/results.parquet     # First run
-│   ├── SEED2/results.parquet     # Second run
-│   └── SEED3/results.parquet     # Third run
-└── exp2_2_multi_table_false-HASH/
-    ├── cfg.toml
-    └── ...
-```
+├── baseline_s3-HASH/
+│   ├── cfg.toml              # Configuration snapshot
+│   ├── SEED1/results.parquet # First seed
+│   ├── SEED2/results.parquet # Second seed
+│   └── SEED3/results.parquet # Third seed
+├── baseline_s3x-HASH/
+├── metadata_s3-HASH/
+├── ml_append_s3x-HASH/
+├── combined_optimizations_s3x-HASH/
+└── ...
 
-Multiple hash values will appear because each load level and table count creates a different configuration (different hash).
-
-### Monitoring Output
-
-```
-========================================
-EXPERIMENT PROGRESS MONITOR
-========================================
-Time: 2025-11-21 16:45:30
-
-Log file: experiment_logs/baseline_experiments_20251121_164000.log
-
-Overall Progress: 45 / 189 (23%)
-Remaining: 144 simulations
-[===========---------------------------------------] 23%
-
-Results:
-  ✓ Successful: 44
-  ✗ Failed: 1
-
-Current Activity:
-  Load: inter_arrival.scale = 100ms
-  [45/189]  Seed 2/3
-  ✓ Success
+experiment_logs/
+└── run_YYYYMMDD_HHMMSS.log
 ```
 
 ## Time Estimates
 
-Based on 100-second simulations with ~3 minutes total per run:
+| Configuration | Experiments | Est. Time (4 workers) |
+|--------------|:-----------:|:---------------------:|
+| Quick test (1 seed) | ~59 | ~15 seconds |
+| Optimization groups (3 seeds) | ~177 | ~45 seconds |
+| Full suite (3 seeds) | ~450 | ~2 minutes |
 
-| Configuration | Simulations | Est. Time |
-|--------------|-------------|-----------|
-| Full baseline (3 seeds) | 189 | ~9.5 hours |
-| Exp 2.1 only (3 seeds) | 27 | ~1.5 hours |
-| Exp 2.2 only (3 seeds) | 162 | ~8 hours |
-| Quick test (1 seed) | ~6 | ~2 minutes |
-| Full baseline (10 seeds) | 630 | ~31 hours |
+*Actual times depend on load levels and conflict rates.*
 
-**Note:** Actual times vary based on:
-- Load level (higher load = more retries = longer runtime)
-- System performance
-- Other running processes
-
-## Troubleshooting
-
-### Experiments Failed to Start
+## Analysis After Completion
 
 ```bash
-# Check for errors in latest log
-tail -50 experiment_logs/baseline_experiments_*.log
+# Generate plots for specific experiment
+python -m endive.saturation_analysis \
+    -i experiments \
+    -p "baseline_s3x-*" \
+    -o plots/baseline_s3x
 
-# Common issues:
-# 1. Virtual environment not activated
-source .venv/bin/activate
+# Compare optimizations on same provider
+python -m endive.saturation_analysis \
+    -i experiments \
+    -p "*_s3x-*" \
+    -o plots/s3x_comparison \
+    --group-by label
 
-# 2. Module not installed
-pip install -e .
-
-# 3. Config files not found
-ls experiment_configs/*.toml
+# Compare providers for same optimization
+python -m endive.saturation_analysis \
+    -i experiments \
+    -p "baseline_*" \
+    -o plots/baseline_providers \
+    --group-by label
 ```
 
-### High Failure Rate
+## Resume Capability
+
+The runner supports resume after interruption:
 
 ```bash
-# Check specific error messages
-grep "✗ Failed" -A 5 experiment_logs/baseline_experiments_*.log
+# Check status of interrupted run
+./scripts/run_all_experiments.sh --status
 
-# Common causes:
-# - Disk space full (check: df -h)
-# - Permission issues (check: ls -l experiments/)
-# - Config syntax errors (validate: python -m endive.main <config> --dry-run)
+# Resume automatically picks up where it left off
+./scripts/run_all_experiments.sh --parallel 4 --seeds 3
 ```
 
-### Kill Running Experiments
-
-```bash
-# If you need to stop experiments
-kill $(cat experiments.pid)
-
-# Or find and kill manually
-ps aux | grep run_baseline_experiments.sh
-kill <PID>
-
-# The experiments can be resumed - already completed runs are saved
-```
-
-### Resume After Interruption
-
-The experiment script doesn't automatically resume, but you can:
-
-```bash
-# Check what's already completed
-ls -R experiments/exp2_*
-
-# Manually count completed runs per configuration
-# Then restart with remaining configs
-# (Future enhancement: add resume capability)
-```
-
-## Next Steps After Completion
-
-### 1. Verify Results
-
-```bash
-# Check experiment directories were created
-ls -lh experiments/
-
-# Count result files
-find experiments/ -name "results.parquet" | wc -l
-
-# Expected: 189 for full baseline with 3 seeds
-```
-
-### 2. Run Analysis
-
-See `ANALYSIS_GUIDE.md` (to be created) or:
-
-```bash
-# Generate plots for Experiment 2.1
-python -m endive.analysis all \
-    -i experiments/exp2_1_* \
-    -o plots/exp2_1
-
-# Generate plots for Experiment 2.2
-python -m endive.analysis all \
-    -i experiments/exp2_2_* \
-    -o plots/exp2_2
-```
-
-### 3. Proceed to Phase 3
-
-After baseline experiments complete, run Phase 3 (real conflicts):
-
-```bash
-# To be created: run_real_conflict_experiments.sh
-```
+State is saved in `experiments/.runner_state.json`.
 
 ## Command Reference
 
 ```bash
-# Run full baseline experiments
-./run_baseline_experiments.sh --seeds 3
+# Basic usage
+./scripts/run_all_experiments.sh [OPTIONS]
 
-# Run in background
-nohup ./run_baseline_experiments.sh --seeds 3 > baseline.log 2>&1 &
+# Options
+--groups GROUP1,GROUP2    # Run specific groups (default: all)
+--seeds N                 # Number of seeds per config (default: 3)
+--parallel N              # Parallel workers (default: 4)
+--quick                   # Quick mode (1 min sims, 3 load levels)
+--dry-run                 # Show what would run without executing
+--status                  # Show progress of current/last run
 
-# Monitor progress
-./monitor_experiments.sh --watch 5
-
-# Quick test
-./run_baseline_experiments.sh --quick --seeds 1
-
-# Dry run
-./run_baseline_experiments.sh --dry-run
-
-# Specific experiment only
-./run_baseline_experiments.sh --exp2.1 --seeds 3
-./run_baseline_experiments.sh --exp2.2 --seeds 3
-
-# Help
-./run_baseline_experiments.sh --help
-./monitor_experiments.sh --help
+# Examples
+./scripts/run_all_experiments.sh --quick --parallel 4
+./scripts/run_all_experiments.sh --groups baseline,metadata --seeds 5
+./scripts/run_all_experiments.sh --dry-run --seeds 3
 ```
 
 ## Tips
 
-1. **Test first**: Always run `--quick --seeds 1` before full experiments
-2. **Save PID**: Keep track of background process for easy monitoring
-3. **Watch logs**: Use `tail -f` on log files to see real-time progress
-4. **Disk space**: Check available space before starting (experiments can use several GB)
-5. **Patience**: Full baseline experiments take ~9.5 hours - let them run overnight
-6. **Multiple seeds**: 3 seeds provide reasonable confidence; 5-10 seeds for publication-quality results
-
-## File Locations
-
-```
-.
-├── run_baseline_experiments.sh       # Main experiment runner
-├── monitor_experiments.sh            # Progress monitor
-├── experiment_configs/               # Configuration templates
-│   ├── exp2_1_single_table_false_conflicts.toml
-│   ├── exp2_2_multi_table_false_conflicts.toml
-│   └── README.md
-├── experiment_logs/                  # Execution logs
-│   └── baseline_experiments_*.log
-└── experiments/                      # Results (created during run)
-    ├── exp2_1_single_table_false-*/
-    └── exp2_2_multi_table_false-*/
-```
+1. **Test first**: Always run `--quick` before full experiments
+2. **Parallelism**: Use `--parallel` equal to CPU cores for best throughput
+3. **Seeds**: 3 seeds for exploration, 5+ seeds for publication-quality results
+4. **Disk space**: Check available space (~100MB per experiment group)
+5. **Background**: Use `nohup` and `tee` for long runs

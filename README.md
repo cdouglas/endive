@@ -23,10 +23,23 @@ Latency parameters are calibrated from:
 pip install -r requirements.txt && pip install -e .
 
 # Run single simulation (1 hour simulated, ~4 seconds wall-clock)
-python -m endive.main experiment_configs/exp8_0_baseline_s3x.toml --yes
+python -m endive.main experiment_configs/baseline_s3x.toml --yes
 
 # Run tests
 pytest tests/ -v
+```
+
+## Running Experiments
+
+```bash
+# Run all experiments (parallel, with progress bar)
+./scripts/run_all_experiments.sh --parallel 4 --seeds 3
+
+# Quick test mode (1 minute simulations)
+./scripts/run_all_experiments.sh --quick --parallel 4
+
+# Run specific groups
+./scripts/run_all_experiments.sh --groups baseline,metadata --seeds 3
 ```
 
 ## Analysis
@@ -35,14 +48,14 @@ pytest tests/ -v
 # Generate saturation curves
 python -m endive.saturation_analysis \
     -i experiments \
-    -p "exp8_*_s3x*" \
-    -o plots/exp8_s3x
+    -p "baseline_s3x-*" \
+    -o plots/baseline_s3x
 
-# With grouping (compare configurations)
+# Compare configurations across providers
 python -m endive.saturation_analysis \
     -i experiments \
-    -p "exp8_*" \
-    -o plots/exp8 \
+    -p "*_s3x-*" \
+    -o plots/s3x_comparison \
     --group-by label
 ```
 
@@ -58,12 +71,11 @@ Outputs:
 duration_ms = 3600000      # 1 hour
 
 [experiment]
-label = "exp8_0_baseline"
+label = "baseline_s3x"
 
 [catalog]
-num_tables = 10
-num_groups = 1             # Catalog-level contention
-table_metadata_inlined = true
+num_tables = 1
+table_metadata_inlined = false  # true = inlining optimization
 
 [transaction]
 retry = 10
@@ -78,43 +90,53 @@ max_parallel = 4
 
 See `experiment_configs/` for complete examples.
 
-## Experiment Configurations
+## Experiment Design
 
-| Label | Description |
-|-------|-------------|
-| exp8_0_baseline | CAS catalog, full metadata write |
-| exp8_1_metadata_inlining | Table metadata inlined in CAS |
-| exp8_3_ml_append | Manifest list append mode |
-| exp8_5_combined | Both optimizations |
+**Factorial design for optimization experiments:**
 
-Providers: `s3x` (S3 Express), `azure` (Azure Standard), `azurex` (Azure Premium)
+| Config | table_metadata_inlined | manifest_list_mode | Effect |
+|--------|:----------------------:|:------------------:|--------|
+| baseline | false | rewrite | No optimizations (control) |
+| metadata | true | rewrite | Inlining effect only |
+| ml_append | false | append | ML+ effect only |
+| combined | true | append | Both optimizations |
+
+**Provider coverage:**
+
+| Config | S3 | S3 Express | Azure | Azure Premium |
+|--------|:--:|:----------:|:-----:|:-------------:|
+| baseline | ✓ | ✓ | ✓ | ✓ |
+| metadata | ✓ | ✓ | ✓ | ✓ |
+| ml_append | - | ✓ | ✓ | ✓ |
+| combined | - | ✓ | ✓ | ✓ |
+
+*S3 Standard excluded from append experiments (no conditional append support).*
 
 ## Storage Provider Latencies
 
-| Provider | CAS Median | PUT Base | PUT Rate |
-|----------|------------|----------|----------|
-| S3 Express | 22ms | 10ms | 10 ms/MiB |
-| Azure Std | 87ms | 50ms | 25 ms/MiB |
-| Azure Premium | 64ms | 30ms | 15 ms/MiB |
-| S3 Standard | 23ms | 30ms | 20 ms/MiB |
+| Provider | CAS Median | Append | PUT Base | PUT Rate |
+|----------|------------|--------|----------|----------|
+| S3 Standard | 61ms | N/A | 30ms | 20 ms/MiB |
+| S3 Express | 22ms | 21ms | 10ms | 10 ms/MiB |
+| Azure Std | 93ms | 87ms | 50ms | 25 ms/MiB |
+| Azure Premium | 64ms | 70ms | 30ms | 15 ms/MiB |
 
 *Sources: YCSB June 2025, Durner et al. VLDB 2023*
 
 ## Tests
 
 ```bash
-pytest tests/ -v                            # All tests (~3 min)
-pytest tests/test_simulator.py -v           # Core simulator
-pytest tests/test_append_catalog.py -v      # Append mode
-pytest tests/test_statistical_rigor.py -v   # Distribution tests
+pytest tests/ -v                              # All tests (~3 min)
+pytest tests/test_simulator.py -v             # Core simulator
+pytest tests/test_experiment_runner.py -v     # Experiment runner
+pytest tests/test_storage_provider_config.py  # Provider configs
 ```
 
 ## Documentation
 
 - **[docs/QUICKSTART.md](docs/QUICKSTART.md)** - Getting started
 - **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** - Design and invariants
-- **[docs/model.md](docs/model.md)** - Model simplifications
-- **[docs/errata.md](docs/errata.md)** - Technical debt and gaps
+- **[docs/RUNNING_EXPERIMENTS.md](docs/RUNNING_EXPERIMENTS.md)** - Running experiments
 - **[experiment_configs/README.md](experiment_configs/README.md)** - Experiment descriptions
 
 ## References
