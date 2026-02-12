@@ -79,13 +79,12 @@ EXPERIMENT_GROUPS = {
         "metadata_s3x.toml",
         "metadata_azure.toml",
     ],
+    # NOTE: S3 Standard doesn't support conditional append, so excluded from ml_append/combined
     "ml_append": [
-        "ml_append_s3.toml",
         "ml_append_s3x.toml",
         "ml_append_azure.toml",
     ],
     "combined": [
-        "combined_optimizations_s3.toml",
         "combined_optimizations_s3x.toml",
         "combined_optimizations_azure.toml",
     ],
@@ -193,17 +192,12 @@ def create_config_variant(base_config: Path, params: dict, seed: int,
         content = re.sub(r'duration_ms\s*=\s*\d+', f'duration_ms = {duration_ms}', content)
 
     # Apply parameter overrides
+    import re
     for key, value in params.items():
-        import re
-        # Handle dotted keys (e.g., inter_arrival.scale)
-        if "." in key:
-            subkey = key.split(".")[-1]
-            pattern = rf'^{subkey}\s*=\s*.*$'
-            replacement = f'{subkey} = {value}'
-        else:
-            pattern = rf'^{key}\s*=\s*.*$'
-            replacement = f'{key} = {value}'
-
+        # Escape key for regex (handles dots in key names like inter_arrival.scale)
+        escaped_key = re.escape(key)
+        pattern = rf'^{escaped_key}\s*=\s*.*$'
+        replacement = f'{key} = {value}'
         content = re.sub(pattern, replacement, content, flags=re.MULTILINE)
 
     # Write to temp file

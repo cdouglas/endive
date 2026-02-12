@@ -1,4 +1,8 @@
-# Combined Optimizations: Azure Blob Storage
+# Combined Optimizations: Azure Blob Storage with both optimizations
+#
+# Configuration:
+# - table_metadata_inlined = true (no separate metadata I/O)
+# - manifest_list_mode = "append" (ML+ mode)
 #
 # Sweep inter_arrival.scale: [10, 20, 50, 100, 200, 500, 1000, 2000, 5000]
 
@@ -12,7 +16,7 @@ label = "combined_optimizations_azure"
 [catalog]
 num_tables = 1
 num_groups = 1
-table_metadata_inlined = false
+table_metadata_inlined = true  # OPTIMIZATION: inlined metadata
 
 [transaction]
 retry = 10

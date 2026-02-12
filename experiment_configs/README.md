@@ -23,20 +23,25 @@ These experiments support the blog post on catalog and table conflicts.
 
 Compare baseline (no optimizations), metadata inlining, and manifest list append across providers.
 
-| Config | Configuration | Provider |
-|--------|--------------|----------|
-| `baseline_s3.toml` | Baseline (not inlined, rewrite) | S3 |
-| `baseline_s3x.toml` | Baseline (not inlined, rewrite) | S3 Express |
-| `baseline_azure.toml` | Baseline (not inlined, rewrite) | Azure Blob |
-| `metadata_s3.toml` | Metadata inlined (optimization) | S3 |
-| `metadata_s3x.toml` | Metadata inlined (optimization) | S3 Express |
-| `metadata_azure.toml` | Metadata inlined (optimization) | Azure Blob |
-| `ml_append_s3.toml` | ML+ append mode | S3 |
-| `ml_append_s3x.toml` | ML+ append mode | S3 Express |
-| `ml_append_azure.toml` | ML+ append mode | Azure Blob |
-| `combined_optimizations_s3.toml` | Both optimizations | S3 |
-| `combined_optimizations_s3x.toml` | Both optimizations | S3 Express |
-| `combined_optimizations_azure.toml` | Both optimizations | Azure Blob |
+**Factorial Design:**
+
+| Config | table_metadata_inlined | manifest_list_mode | Effect |
+|--------|:----------------------:|:------------------:|--------|
+| baseline | false | rewrite | No optimizations |
+| metadata | true | rewrite | Inlining only |
+| ml_append | false | append | ML+ only |
+| combined | true | append | Both optimizations |
+
+**Provider Coverage:**
+
+| Config | S3 | S3 Express | Azure |
+|--------|:--:|:----------:|:-----:|
+| baseline | ✓ | ✓ | ✓ |
+| metadata | ✓ | ✓ | ✓ |
+| ml_append | - | ✓ | ✓ |
+| combined | - | ✓ | ✓ |
+
+*Note: S3 Standard doesn't support conditional append, so ml_append and combined only run on S3 Express and Azure.*
 
 ## Key Configuration Options
 
@@ -74,13 +79,13 @@ In ML+ (append) mode:
 
 ## Storage Providers
 
-| Provider | CAS Median | PUT Base | PUT Rate | Source |
-|----------|------------|----------|----------|--------|
-| `s3` | 23ms | 30ms | 20 ms/MiB | YCSB/Durner |
-| `s3x` | 22ms | 10ms | 10 ms/MiB | YCSB/estimate |
-| `azure` | 87ms | 50ms | 25 ms/MiB | YCSB/estimate |
-| `azurex` | 64ms | 30ms | 15 ms/MiB | YCSB/estimate |
-| `gcp` | 170ms | 40ms | 17 ms/MiB | YCSB/Durner |
+| Provider | CAS Median | Append | PUT Base | PUT Rate | Source |
+|----------|------------|--------|----------|----------|--------|
+| `s3` | 61ms | N/A | 30ms | 20 ms/MiB | YCSB June 2025 |
+| `s3x` | 22ms | 21ms | 10ms | 10 ms/MiB | YCSB June 2025 |
+| `azure` | 93ms | 87ms | 50ms | 25 ms/MiB | YCSB June 2025 |
+| `azurex` | 64ms | 70ms | 30ms | 15 ms/MiB | YCSB estimate |
+| `gcp` | 170ms | N/A | 40ms | 17 ms/MiB | YCSB/Durner |
 
 ## Running Experiments
 
