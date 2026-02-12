@@ -23,7 +23,7 @@ import tomli
 from scipy import stats
 
 
-def find_experiment_dirs(base_dir: str = "experiments", pattern: str = "exp2_*") -> list:
+def find_experiment_dirs(base_dir: str = "experiments", pattern: str = "*-*") -> list:
     """Find all experiment directories matching pattern."""
     search_pattern = os.path.join(base_dir, pattern)
     return glob(search_pattern)
@@ -82,6 +82,10 @@ def load_seed_results(seed_dir: str, config: Dict) -> Optional[pd.DataFrame]:
 
     df = pd.read_parquet(parquet_path)
 
+    # Skip empty dataframes (can happen with failed simulations)
+    if len(df) == 0 or len(df.columns) == 0:
+        return None
+
     # Apply warmup and cooldown filters
     warmup_ms, cooldown_ms = compute_transient_period(config)
     sim_duration_ms = config.get('simulation', {}).get('duration_ms', 3600000)
@@ -115,11 +119,26 @@ def experiment_samples():
         if not config:
             continue
 
-        seed_dir = select_random_seed(exp_dir)
-        if not seed_dir:
+        # Try multiple seed directories until we find one with valid data
+        seed_dirs = []
+        for item in os.listdir(exp_dir):
+            item_path = os.path.join(exp_dir, item)
+            if os.path.isdir(item_path) and item.isdigit():
+                seed_dirs.append(item_path)
+
+        if not seed_dirs:
             continue
 
-        data = load_seed_results(seed_dir, config)
+        # Shuffle to get random selection, then try until we find valid data
+        random.shuffle(seed_dirs)
+        data = None
+        selected_seed_dir = None
+        for seed_dir in seed_dirs:
+            data = load_seed_results(seed_dir, config)
+            if data is not None and len(data) > 0:
+                selected_seed_dir = seed_dir
+                break
+
         if data is None or len(data) == 0:
             continue
 
@@ -128,7 +147,7 @@ def experiment_samples():
             'config': config,
             'data': data,
             'exp_dir': exp_dir,
-            'seed_dir': seed_dir
+            'seed_dir': selected_seed_dir
         }
 
     if not samples:
@@ -409,13 +428,18 @@ class TestCommitLatencyBehavior:
             # Sort by inter-arrival (descending) = load (ascending)
             entries_sorted = sorted(entries, key=lambda x: x[0], reverse=True)
 
-            # Extract latencies
+            # Extract inter-arrivals and latencies
+            inter_arrivals = [ia for ia, _, _ in entries_sorted]
             latencies = [lat for _, lat, _ in entries_sorted]
+
+            # Skip if all inter-arrivals are the same (can't compute correlation)
+            if len(set(inter_arrivals)) == 1:
+                continue
 
             # Check if latencies generally increase with load
             # Use Spearman rank correlation (robust to outliers)
             # Load increases as inter_arrival decreases, so negate
-            loads = [-ia for ia, _, _ in entries_sorted]
+            loads = [-ia for ia in inter_arrivals]
             correlation, p_value = stats.spearmanr(loads, latencies)
 
             # Expect positive correlation (higher load → higher latency)
