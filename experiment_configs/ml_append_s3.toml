@@ -1,0 +1,46 @@
+# Manifest List Append: S3 with ML+ mode
+#
+# Blog Question 3c: How does manifest list append mode affect performance?
+#
+# In ML+ (manifest list append) mode:
+# - Manifest list entries are appended instead of rewritten
+# - Entries are tagged with txn_id and filtered by committed transactions
+# - False conflicts resolved faster (no ML rewrite needed)
+# - Real conflicts still require merge and re-append
+#
+# Sweep inter_arrival.scale: [10, 20, 50, 100, 200, 500, 1000, 2000, 5000]
+
+[simulation]
+duration_ms = 3600000  # 1 hour
+output_path = "results.parquet"
+
+[experiment]
+label = "ml_append_s3"
+
+[catalog]
+num_tables = 1
+num_groups = 1
+table_metadata_inlined = true  # Keep baseline for isolation
+
+[transaction]
+retry = 10
+runtime.min = 30000
+runtime.mean = 180000
+runtime.sigma = 1.5
+
+inter_arrival.distribution = "exponential"
+inter_arrival.scale = 100.0  # SWEEP THIS
+
+real_conflict_probability = 0.0
+
+conflicting_manifests.distribution = "exponential"
+conflicting_manifests.mean = 3.0
+conflicting_manifests.min = 1
+conflicting_manifests.max = 10
+
+manifest_list_mode = "append"  # ML+ mode
+
+[storage]
+provider = "s3"
+max_parallel = 4
+min_latency = 1
