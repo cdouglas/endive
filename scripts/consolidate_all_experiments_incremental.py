@@ -77,16 +77,17 @@ def consolidate_incremental(
     print("-" * 80)
 
     experiments = []
-    for exp_dir in sorted(Path(base_dir).glob('exp*')):
+    # Match directories with hash suffix (e.g., baseline_s3-abc123, exp2_1-def456)
+    for exp_dir in sorted(Path(base_dir).glob('*-*')):
         if not exp_dir.is_dir():
             continue
 
         dir_name = exp_dir.name
-        if '-' in dir_name:
-            exp_name, exp_hash = dir_name.rsplit('-', 1)
-        else:
-            exp_name = dir_name
-            exp_hash = 'unknown'
+        # Split on last hyphen to separate name from hash
+        exp_name, exp_hash = dir_name.rsplit('-', 1)
+        # Skip if hash doesn't look like a hex string (at least 6 hex chars)
+        if not (len(exp_hash) >= 6 and all(c in '0123456789abcdef' for c in exp_hash)):
+            continue
 
         seed_dirs = [d for d in exp_dir.iterdir()
                      if d.is_dir() and (d / 'results.parquet').exists()]
