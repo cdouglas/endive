@@ -34,14 +34,14 @@ Compare baseline (no optimizations), metadata inlining, and manifest list append
 
 **Provider Coverage:**
 
-| Config | S3 | S3 Express | Azure |
-|--------|:--:|:----------:|:-----:|
-| baseline | ✓ | ✓ | ✓ |
-| metadata | ✓ | ✓ | ✓ |
-| ml_append | - | ✓ | ✓ |
-| combined | - | ✓ | ✓ |
+| Config | S3 | S3 Express | Azure | Azure Premium |
+|--------|:--:|:----------:|:-----:|:-------------:|
+| baseline | ✓ | ✓ | ✓ | ✓ |
+| metadata | ✓ | ✓ | ✓ | ✓ |
+| ml_append | - | ✓ | ✓ | ✓ |
+| combined | - | ✓ | ✓ | ✓ |
 
-*Note: S3 Standard doesn't support conditional append, so ml_append and combined only run on S3 Express and Azure.*
+*Note: S3 Standard doesn't support conditional append, so ml_append and combined only run on S3 Express, Azure, and Azure Premium.*
 
 ## Key Configuration Options
 

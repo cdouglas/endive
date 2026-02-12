@@ -73,20 +73,24 @@ EXPERIMENT_GROUPS = {
         "baseline_s3.toml",
         "baseline_s3x.toml",
         "baseline_azure.toml",
+        "baseline_azurex.toml",
     ],
     "metadata": [
         "metadata_s3.toml",
         "metadata_s3x.toml",
         "metadata_azure.toml",
+        "metadata_azurex.toml",
     ],
     # NOTE: S3 Standard doesn't support conditional append, so excluded from ml_append/combined
     "ml_append": [
         "ml_append_s3x.toml",
         "ml_append_azure.toml",
+        "ml_append_azurex.toml",
     ],
     "combined": [
         "combined_optimizations_s3x.toml",
         "combined_optimizations_azure.toml",
+        "combined_optimizations_azurex.toml",
     ],
 }
 
