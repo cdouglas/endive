@@ -1,13 +1,10 @@
-# Baseline: S3 with no optimizations
+# Metadata: S3 with table metadata inlining optimization
 #
-# Blog Question 3: Baseline performance without optimizations
+# Blog Question 3: How does metadata inlining improve performance?
 #
-# Configuration:
-# - Table metadata NOT inlined (separate I/O per commit)
-# - Manifest list rewrite mode (traditional Iceberg)
-#
-# This represents the unoptimized case where each commit requires
-# separate reads/writes for table metadata.
+# When table_metadata_inlined=true, table metadata is inlined in the
+# catalog pointer, eliminating separate read/write I/O per commit.
+# This is the "inlining optimization".
 #
 # Sweep inter_arrival.scale: [10, 20, 50, 100, 200, 500, 1000, 2000, 5000]
 
@@ -16,12 +13,12 @@ duration_ms = 3600000  # 1 hour
 output_path = "results.parquet"
 
 [experiment]
-label = "baseline_s3"
+label = "metadata_s3"
 
 [catalog]
 num_tables = 1
 num_groups = 1
-table_metadata_inlined = false  # No optimization: separate table metadata I/O
+table_metadata_inlined = true  # OPTIMIZATION: no separate table metadata I/O
 
 [transaction]
 retry = 10
@@ -39,7 +36,7 @@ conflicting_manifests.mean = 3.0
 conflicting_manifests.min = 1
 conflicting_manifests.max = 10
 
-manifest_list_mode = "rewrite"  # No optimization: traditional Iceberg
+manifest_list_mode = "rewrite"  # Still using traditional manifest list
 
 [storage]
 provider = "s3"

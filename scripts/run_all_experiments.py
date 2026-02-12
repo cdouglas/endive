@@ -75,9 +75,9 @@ EXPERIMENT_GROUPS = {
         "baseline_azure.toml",
     ],
     "metadata": [
-        "metadata_not_inlined_s3.toml",
-        "metadata_not_inlined_s3x.toml",
-        "metadata_not_inlined_azure.toml",
+        "metadata_s3.toml",
+        "metadata_s3x.toml",
+        "metadata_azure.toml",
     ],
     "ml_append": [
         "ml_append_s3.toml",

@@ -21,16 +21,16 @@ These experiments support the blog post on catalog and table conflicts.
 
 ### Question 3: Optimization Impact
 
-Compare baseline, metadata inlining, and manifest list append across providers.
+Compare baseline (no optimizations), metadata inlining, and manifest list append across providers.
 
-| Config | Optimization | Provider |
+| Config | Configuration | Provider |
 |--------|--------------|----------|
-| `baseline_s3.toml` | Baseline (inlined, rewrite) | S3 |
-| `baseline_s3x.toml` | Baseline | S3 Express |
-| `baseline_azure.toml` | Baseline | Azure Blob |
-| `metadata_not_inlined_s3.toml` | Separate table metadata | S3 |
-| `metadata_not_inlined_s3x.toml` | Separate table metadata | S3 Express |
-| `metadata_not_inlined_azure.toml` | Separate table metadata | Azure Blob |
+| `baseline_s3.toml` | Baseline (not inlined, rewrite) | S3 |
+| `baseline_s3x.toml` | Baseline (not inlined, rewrite) | S3 Express |
+| `baseline_azure.toml` | Baseline (not inlined, rewrite) | Azure Blob |
+| `metadata_s3.toml` | Metadata inlined (optimization) | S3 |
+| `metadata_s3x.toml` | Metadata inlined (optimization) | S3 Express |
+| `metadata_azure.toml` | Metadata inlined (optimization) | Azure Blob |
 | `ml_append_s3.toml` | ML+ append mode | S3 |
 | `ml_append_s3x.toml` | ML+ append mode | S3 Express |
 | `ml_append_azure.toml` | ML+ append mode | Azure Blob |
@@ -40,31 +40,31 @@ Compare baseline, metadata inlining, and manifest list append across providers.
 
 ## Key Configuration Options
 
-### Realistic Latencies
-
-All configs use provider-calibrated latencies:
-
-```toml
-[storage]
-provider = "s3"  # or "s3x", "azure", "azurex", "gcp"
-```
-
-### Table Metadata Inlining
+### Baseline (no optimizations)
 
 ```toml
 [catalog]
-table_metadata_inlined = false  # Model table metadata I/O separately
+table_metadata_inlined = false  # Separate I/O for table metadata
+
+[transaction]
+manifest_list_mode = "rewrite"  # Traditional Iceberg
 ```
 
-When `table_metadata_inlined = false`, each commit requires:
-- Read table metadata JSON (~10KB)
-- Write updated table metadata JSON
+### Metadata Inlining Optimization
 
-### Manifest List Mode
+```toml
+[catalog]
+table_metadata_inlined = true  # No separate table metadata I/O
+```
+
+When `table_metadata_inlined = true`, table metadata is inlined in the
+catalog pointer, eliminating separate read/write I/O per commit.
+
+### Manifest List Append Optimization (ML+)
 
 ```toml
 [transaction]
-manifest_list_mode = "append"  # ML+ mode (vs "rewrite")
+manifest_list_mode = "append"  # ML+ mode
 ```
 
 In ML+ (append) mode:
@@ -145,10 +145,10 @@ docker exec <container_id> ./scripts/run_all_experiments.sh --status
 | `trivial` | Single table trivial conflicts | 2 configs |
 | `mixed` | Single table mixed conflicts | 1 config |
 | `multi_table` | Multi-table experiments | 2 configs |
-| `baseline` | Baseline (3 providers) | 3 configs |
-| `metadata` | Metadata not inlined | 3 configs |
-| `ml_append` | Manifest list append | 3 configs |
-| `combined` | Combined optimizations | 3 configs |
+| `baseline` | Baseline - no optimizations | 3 configs |
+| `metadata` | Metadata inlined (optimization) | 3 configs |
+| `ml_append` | Manifest list append (optimization) | 3 configs |
+| `combined` | Both optimizations | 3 configs |
 
 ## Analysis
 
