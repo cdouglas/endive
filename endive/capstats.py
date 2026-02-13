@@ -49,10 +49,12 @@ class Stats:
         self.txn_aborted = 0
 
         # Conflict resolution statistics (CAS mode)
-        self.false_conflicts = 0  # Version changed, no data overlap
+        self.false_conflicts = 0  # Version changed, no data overlap (still requires ML update in rewrite mode)
         self.real_conflicts = 0   # Overlapping data changes requiring manifest file operations
         self.manifest_files_read = 0
         self.manifest_files_written = 0
+        self.manifest_list_reads = 0    # ML reads during conflict resolution
+        self.manifest_list_writes = 0   # ML writes during conflict resolution (rewrite mode only)
 
         # Append mode statistics (catalog)
         self.append_physical_success = 0   # Append landed at expected offset
@@ -177,6 +179,9 @@ class Stats:
             print(f"    Total conflicts: {total_conflicts}")
             print(f"    False conflicts: {self.false_conflicts} ({100*self.false_conflicts/total_conflicts:.1f}%)")
             print(f"    Real conflicts: {self.real_conflicts} ({100*self.real_conflicts/total_conflicts:.1f}%)")
+            if self.manifest_list_reads > 0 or self.manifest_list_writes > 0:
+                print(f"    Manifest list reads: {self.manifest_list_reads}")
+                print(f"    Manifest list writes: {self.manifest_list_writes}")
             if self.real_conflicts > 0:
                 print(f"    Manifest files read: {self.manifest_files_read} (avg {self.manifest_files_read/self.real_conflicts:.1f} per real conflict)")
                 print(f"    Manifest files written: {self.manifest_files_written} (avg {self.manifest_files_written/self.real_conflicts:.1f} per real conflict)")

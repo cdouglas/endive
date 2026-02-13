@@ -62,19 +62,35 @@ All strategies include $$\pm 10\%$$ jitter to prevent thundering herd.
 
 ## Key Cost Formulas
 
-**False conflict cost** (version changed, no data overlap):
+**False conflict cost** (same table modified, no data overlap):
 
+A false conflict occurs when another transaction committed changes to the same table, but to different partitions (no overlapping data). The transaction must still create a new snapshot that combines both sets of manifest file pointers.
+
+*Traditional (rewrite) mode:*
 $$
-E[T_{\text{false}}] = T_{\text{CAS}} + T_{\text{metadata-root-read}} \approx 2 \text{ ms}
+E[T_{\text{false}}] = T_{\text{CAS}} + T_{\text{metadata-root-read}} + T_{\text{ML-read}} + T_{\text{ML-write}} + T_{\text{table-metadata}}
 $$
+
+With defaults: $$E[T_{\text{false}}] \approx 1 + 1 + 50 + 50 + 10 = 112$$ ms
+
+*ML+ (append) mode:*
+$$
+E[T_{\text{false}}] = T_{\text{CAS}} + T_{\text{metadata-root-read}} + T_{\text{table-metadata}}
+$$
+
+With defaults: $$E[T_{\text{false}}] \approx 1 + 1 + 10 = 12$$ ms
+
+The ML+ mode saves ~100ms per false conflict because the tentative manifest list entry (appended before the CAS attempt) is still valid—readers filter it by committed transaction list until the CAS succeeds.
 
 **Real conflict cost** ($$n$$ conflicting manifests, parallelism=4):
 
 $$
-E[T_{\text{real}}] = T_{\text{CAS}} + T_{\text{metadata-root}} + T_{\text{manifest-list}} + \left\lceil \frac{n}{4} \right\rceil \times T_{\text{manifest-file}}
+E[T_{\text{real}}] = T_{\text{CAS}} + T_{\text{metadata-root}} + T_{\text{ML-read}} + \left\lceil \frac{n}{4} \right\rceil \times 2 \times T_{\text{manifest-file}} + T_{\text{ML-write}}
 $$
 
-With defaults ($$n=3$$): $$E[T_{\text{real}}] \approx 1 + 1 + 50 + \lceil 3/4 \rceil \times 50 = 102$$ ms ($$\approx$$**50$$\times$$ more expensive** than false conflicts).
+With defaults ($$n=3$$): $$E[T_{\text{real}}] \approx 1 + 1 + 50 + \lceil 3/4 \rceil \times 2 \times 50 + 50 = 202$$ ms
+
+Real conflicts are $$\approx$$**2$$\times$$ more expensive** than false conflicts in rewrite mode (due to manifest file I/O), and $$\approx$$**17$$\times$$ more expensive** than false conflicts in ML+ mode.
 
 **Multi-table real conflict probability** (Exp 3.3): Transaction touching $$k$$ tables with per-table conflict probability $$p$$:
 

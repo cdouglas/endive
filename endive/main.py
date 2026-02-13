@@ -1592,26 +1592,41 @@ class ConflictResolver:
                     yield from ConflictResolver.resolve_real_conflict(sim, txn, t, v_catalog, catalog)
                     STATS.real_conflicts += 1
                 else:
-                    # False conflict: In ML+ mode, the tentative ML entry is still valid
-                    # (different partition, no data overlap). No ML update needed.
-                    yield from ConflictResolver.resolve_false_conflict(sim, txn, t, v_catalog)
+                    # False conflict: Same table modified, but no data overlap (different partitions).
+                    # Still requires creating a new snapshot with merged manifest list pointers.
+                    # In ML+ mode: Tentative entry is still valid, no ML update needed.
+                    # In traditional mode: Must read ML and write new ML with combined pointers.
+                    yield from ConflictResolver.resolve_false_conflict(sim, txn, t, v_catalog, catalog)
                     STATS.false_conflicts += 1
 
     @staticmethod
-    def resolve_false_conflict(sim, txn, table_id: int, v_catalog: dict):
-        """Resolve false conflict (version changed, no data overlap).
+    def resolve_false_conflict(sim, txn, table_id: int, v_catalog: dict, catalog=None):
+        """Resolve false conflict (same table modified, no data overlap).
 
-        Manifest lists were already read in read_manifest_lists().
-        Must read table metadata (JSON) to understand the new snapshot state,
-        merge our changes, and write updated table metadata.
+        A false conflict occurs when another transaction committed changes to the
+        same table, but to different partitions (no overlapping data). The transaction
+        must still create a new snapshot that includes both sets of changes.
 
-        No manifest file operations required (data doesn't overlap).
+        Required operations:
+        - Read manifest list (to get committed snapshot's manifest file pointers)
+        - Write NEW manifest list (combining both transactions' manifest file pointers)
+        - Update table metadata (pointing to new manifest list)
+
+        No manifest FILE operations are required (data doesn't overlap).
+
+        In ML+ mode: The tentative ML entry (appended before CAS attempt) is still
+        valid because it references this transaction's manifest files. Readers filter
+        it until commit. No new ML write needed - just update table metadata pointer.
+
+        In traditional (rewrite) mode: Must read the committed snapshot's manifest
+        list and write a new one that includes both sets of manifest file pointers.
 
         Args:
             sim: SimPy environment
             txn: Transaction object
             table_id: Table with conflict
             v_catalog: Current catalog state
+            catalog: Catalog reference (needed for size-based latency)
         """
         logger.debug(f"{sim.now} TXN {txn.id} Resolving false conflict for table {table_id}")
 
@@ -1622,6 +1637,34 @@ class ConflictResolver:
         # This is required even for false conflicts to merge snapshot metadata
         if not TABLE_METADATA_INLINED:
             yield sim.timeout(get_table_metadata_latency('read'))
+
+        # Manifest list operations depend on mode
+        if MANIFEST_LIST_MODE == "append":
+            # ML+ mode: Tentative entry is still valid (different partition, no data overlap).
+            # Readers filter entries by committed transaction list.
+            # No ML update needed - the entry will become visible when CAS succeeds.
+            logger.debug(f"{sim.now} TXN {txn.id} ML+ mode: tentative entry still valid, no ML update")
+        else:
+            # Traditional (rewrite) mode: Must create new manifest list combining
+            # the committed snapshot's manifest file pointers with our own.
+
+            # Read manifest list (to get pointers to committed snapshot's manifest files)
+            if catalog is not None and T_PUT is not None:
+                ml_size = catalog.ml_offset[table_id]
+                yield sim.timeout(get_put_latency(ml_size))  # Read ~= PUT for small files
+            else:
+                yield sim.timeout(get_manifest_list_latency('read'))
+            STATS.manifest_list_reads += 1
+
+            # Write new manifest list (combined pointers from both transactions)
+            if catalog is not None and T_PUT is not None:
+                ml_size = catalog.ml_offset[table_id]
+                yield sim.timeout(get_manifest_list_write_latency(ml_size))
+            else:
+                yield sim.timeout(get_manifest_list_latency('write'))
+            STATS.manifest_list_writes += 1
+
+            logger.debug(f"{sim.now} TXN {txn.id} Rewrite mode: wrote new manifest list")
 
         # Write merged table metadata with our snapshot included
         if not TABLE_METADATA_INLINED:
@@ -1667,6 +1710,7 @@ class ConflictResolver:
             yield sim.timeout(get_put_latency(ml_size))  # Read ~= PUT for small files
         else:
             yield sim.timeout(get_manifest_list_latency('read'))
+        STATS.manifest_list_reads += 1
 
         # Read conflicting manifest files (respects MAX_PARALLEL)
         for batch_start in range(0, n_conflicting, MAX_PARALLEL):
@@ -1724,6 +1768,7 @@ class ConflictResolver:
                 yield sim.timeout(get_manifest_list_write_latency(ml_size))
             else:
                 yield sim.timeout(get_manifest_list_latency('write'))
+            STATS.manifest_list_writes += 1
 
         # Write merged table metadata (JSON blob) with updated manifest list pointer
         if not TABLE_METADATA_INLINED:

@@ -141,18 +141,22 @@ n_missed = catalog.seq - txn.v_catalog_seq
 
 **Critical invariant**: `catalog.seq` advances by exactly 1 on each successful commit. Never skip versions.
 
-#### 2. Conflict Types (main.py:627-719)
+#### 2. Conflict Types (main.py:1600-1777)
 ```python
-# False conflict: version changed, no data overlap
-# Cost: Read metadata root only (~1ms)
+# False conflict: same table modified, but different partitions (no data overlap)
+# In rewrite mode: Read ML + Write new ML (~100ms) - must merge ML pointers
+# In ML+ mode: No ML operations needed (~10ms) - tentative entry still valid
 yield from resolve_false_conflict(...)
 
-# Real conflict: overlapping data changes
-# Cost: Read manifest list + N manifest files (~400ms+)
+# Real conflict: overlapping data changes (same partition)
+# Cost: Read ML + Read/Write N manifest files + Write ML (~400ms+)
 yield from resolve_real_conflict(...)
 ```
 
-**Key distinction**: False conflicts read metadata only, real conflicts require expensive manifest file I/O.
+**Key distinction**:
+- False conflicts: No manifest FILE operations, but ML operations depend on mode
+- Real conflicts: Require expensive manifest file I/O in both modes
+- ML+ advantage: Saves ~100ms per false conflict by avoiding ML read/write on retry
 
 #### 3. Table Grouping (main.py:52-131)
 ```python

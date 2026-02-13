@@ -200,23 +200,46 @@ The critical insight is that ML entries are **tentative** until the catalog tran
    - Entry remains in ML but readers filter it out (txn not committed)
    - Conflict resolution determines if entry needs update
 
-### Conflict Resolution with ML+
+### Conflict Resolution by Mode
 
-On catalog conflict, the conflict type determines what happens to the ML entry:
+On catalog conflict, the ML mode determines what operations are required:
 
-**False Conflict** (different partition, no data overlap):
-- ML entry is still valid (same data files)
-- No ML update needed
+**Traditional (rewrite) mode:**
+
+*False Conflict* (different partition, no data overlap):
+- Must read committed snapshot's manifest list
+- Must write NEW manifest list combining both transactions' manifest file pointers
+- Update table metadata with new ML pointer
+- Retry catalog commit
+
+*Real Conflict* (same partition, overlapping data):
+- Read manifest list
+- Read/merge conflicting manifest files
+- Write merged manifest files
+- Write NEW manifest list
+- Update table metadata
+- Retry catalog commit
+
+**ML+ (append) mode:**
+
+*False Conflict* (different partition, no data overlap):
+- ML entry is still valid (same data files, different partition)
+- **No ML update needed** - readers filter tentative entries by committed txn list
 - Just retry catalog commit with updated intention record
+- ML entry becomes permanent when catalog commit succeeds
 
-**Real Conflict** (same partition, overlapping data):
-- ML entry may be invalid (data files need merging)
-- Resolve conflict: read/merge manifest files
+*Real Conflict* (same partition, overlapping data):
+- Original ML entry is invalid (data files need merging)
+- Read manifest list
+- Read/merge conflicting manifest files
+- Write merged manifest files
 - Append NEW entry with merged data
-- Original entry stays in ML but filtered by readers
+- Original entry stays in ML but filtered by readers (txn not committed)
+- Retry catalog commit
 
-This is why physical conflict rate (ML append failures) is low-cost, while logical
-conflicts (catalog validation failures) may require expensive manifest operations.
+**Key advantage of ML+:** Under high contention with false conflicts (common in
+multi-tenant workloads where transactions touch different partitions), ML+ avoids
+the manifest list read/write per retry, saving ~100ms of I/O per conflict.
 
 ### Simulation Model
 
@@ -365,13 +388,16 @@ manifest_append_sealed_rewrite     # Manifest list was sealed, had to rewrite
 **T1:** Update table A (v0 → v1)
 **T2:** Update table B (v0 → v1)
 
-### CAS Mode
+### CAS Mode (rewrite manifest list)
 ```
 T1: CAS succeeds → catalog.seq = 1
 T2: CAS fails (seq changed)
-T2: Read manifest list, resolve false conflict
+T2: Resolve false conflict:
+    - Read manifest list (to get T1's manifest file pointers)
+    - Write NEW manifest list (combining T1's and T2's pointers)
+    - Update table metadata
 T2: CAS succeeds → catalog.seq = 2
-Result: 1 CAS failure, 1 retry
+Result: 1 CAS failure, 1 retry, 1 ML read + 1 ML write
 ```
 
 ### Append Mode
