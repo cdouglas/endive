@@ -4,13 +4,16 @@
 # results via a mounted volume.
 #
 # Usage:
-#   docker build -t endive-sim .
+#   docker build --build-arg GIT_SHA=$(git rev-parse HEAD) -t endive-sim .
 #   docker run -v $(pwd)/experiments:/app/experiments endive-sim
 #
 # Or use docker-compose:
 #   docker-compose up
 
 FROM python:3.12-slim
+
+# Build argument for git SHA (passed at build time)
+ARG GIT_SHA=unknown
 
 # Set working directory
 WORKDIR /app
@@ -44,10 +47,16 @@ RUN mkdir -p /app/experiments /app/plots /app/experiment_logs
 # Set environment variables
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONPATH=/app
+ENV GIT_SHA=${GIT_SHA}
+
+# Record git SHA as label for easy inspection
+LABEL git.sha="${GIT_SHA}"
+LABEL org.opencontainers.image.revision="${GIT_SHA}"
 
 # Volume for experiment results
 VOLUME ["/app/experiments", "/app/plots", "/app/experiment_logs"]
 
 # Default command: run baseline experiments
 # Can be overridden with docker run command
-CMD ["bash", "-c", "scripts/run_baseline_experiments.sh 2>&1 | tee experiment_logs/run_$(date +%Y%m%d_%H%M%S).log"]
+# Prints git SHA at startup for traceability
+CMD ["bash", "-c", "echo \"Endive Simulator - git SHA: ${GIT_SHA}\" && scripts/run_baseline_experiments.sh 2>&1 | tee experiment_logs/run_$(date +%Y%m%d_%H%M%S).log"]

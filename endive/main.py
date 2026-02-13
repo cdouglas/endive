@@ -3,7 +3,9 @@
 import argparse
 import itertools
 import logging
+import os
 import simpy
+import subprocess
 import sys
 import tomllib
 import numpy as np
@@ -13,6 +15,41 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 
 logger = logging.getLogger(__name__)
+
+
+def get_git_sha() -> str:
+    """Get the current git SHA, or return 'unknown' if not in a git repo.
+
+    Checks in order:
+    1. GIT_SHA environment variable (set by Docker build)
+    2. Git command (if in a git repository)
+    3. Returns 'unknown' if neither available
+    """
+    # Check environment variable first (set by Docker)
+    env_sha = os.environ.get('GIT_SHA')
+    if env_sha:
+        return env_sha
+
+    # Try git command
+    try:
+        result = subprocess.run(
+            ['git', 'rev-parse', 'HEAD'],
+            capture_output=True,
+            text=True,
+            timeout=5
+        )
+        if result.returncode == 0:
+            return result.stdout.strip()
+    except (subprocess.SubprocessError, FileNotFoundError):
+        pass
+
+    return 'unknown'
+
+
+def get_git_sha_short() -> str:
+    """Get the short (7 char) git SHA."""
+    sha = get_git_sha()
+    return sha[:7] if sha != 'unknown' else 'unknown'
 
 # Simulation parameters
 SIM_DURATION_MS: int
@@ -2543,6 +2580,14 @@ def prepare_experiment_output(config: dict, config_file: str, actual_seed: int) 
     if not exp_config_path.exists():
         shutil.copy2(config_file, exp_config_path)
         logger.info(f"Wrote experiment config to {exp_config_path}")
+
+    # Write version info (git SHA) for reproducibility
+    version_path = exp_dir / "version.txt"
+    git_sha = get_git_sha()
+    if not version_path.exists():
+        with open(version_path, 'w') as f:
+            f.write(f"git_sha={git_sha}\n")
+        logger.info(f"Wrote version info to {version_path} (git_sha={git_sha[:7]})")
 
     logger.info(f"Experiment: {label}-{exp_hash}")
     logger.info(f"  Config hash: {exp_hash}")

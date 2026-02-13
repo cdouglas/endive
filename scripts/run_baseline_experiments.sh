@@ -493,7 +493,13 @@ fi
 # ============================================================================
 
 log_section "EXPERIMENT SUITE - PARALLEL EXECUTION"
+
+# Get git SHA for reproducibility tracking
+GIT_SHA="${GIT_SHA:-$(git rev-parse HEAD 2>/dev/null || echo 'unknown')}"
+GIT_SHA_SHORT="${GIT_SHA:0:7}"
+
 log "Configuration:"
+log "  Git SHA: $GIT_SHA_SHORT ($GIT_SHA)"
 log "  Number of seeds per config: $NUM_SEEDS"
 log "  Parallel jobs: $NUM_PARALLEL"
 log "  Quick mode: $QUICK_MODE"
