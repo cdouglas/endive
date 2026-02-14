@@ -1,0 +1,37 @@
+# Blog Post: Single Table, Trivial Conflicts
+#
+# "Impossibly fast catalog" (1ms CAS) with real S3 storage latencies.
+# Shows that table metadata (manifest list, table metadata JSON) is the bottleneck.
+#
+# Sweep inter_arrival.scale: [10, 20, 50, 100, 200, 500, 1000, 2000, 5000]
+
+[simulation]
+duration_ms = 3600000
+output_path = "results.parquet"
+
+[experiment]
+label = "blog_1tbl_trivial"
+
+[catalog]
+num_tables = 1
+num_groups = 1
+backend = "service"
+table_metadata_inlined = false
+
+[catalog.service]
+provider = "instant"  # 1ms CAS - "impossibly fast"
+
+[transaction]
+retry = 10
+runtime.min = 30000
+runtime.mean = 180000
+runtime.sigma = 1.5
+inter_arrival.distribution = "exponential"
+inter_arrival.scale = 100.0
+real_conflict_probability = 0.0
+manifest_list_mode = "rewrite"
+
+[storage]
+provider = "s3"
+max_parallel = 4
+min_latency = 1
