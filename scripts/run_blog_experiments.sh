@@ -50,6 +50,27 @@ echo ""
 TEMP_DIR=$(mktemp -d)
 trap "rm -rf $TEMP_DIR" EXIT
 
+# Get or create session nonce for deterministic seeds (matches run_all_experiments.py)
+NONCE_FILE="experiments/.nonce"
+mkdir -p experiments
+if [ -f "$NONCE_FILE" ]; then
+    NONCE=$(cat "$NONCE_FILE")
+else
+    NONCE=$(date +%s%N | sha256sum | cut -c1-32)
+    echo "$NONCE" > "$NONCE_FILE"
+    echo "Created new nonce: $NONCE"
+fi
+
+# Function to generate deterministic seed from parameters
+generate_seed() {
+    local label="$1"
+    local params="$2"
+    local seed_num="$3"
+    local hash_input="${NONCE}:${label}:${params}:${seed_num}"
+    # Take first 8 hex chars and convert to decimal
+    echo "$hash_input" | sha256sum | cut -c1-8 | xargs printf "%d\n" 0x
+}
+
 # Function to create config variant
 create_config() {
     local base_config="$1"
@@ -85,13 +106,7 @@ create_config() {
     done
 }
 
-# Generate seeds
-SEEDS=()
-for i in $(seq 1 $NUM_SEEDS); do
-    SEEDS+=($RANDOM$RANDOM)
-done
-
-echo "Seeds: ${SEEDS[*]}"
+echo "Nonce: $NONCE"
 echo ""
 
 # ============================================================================
@@ -102,7 +117,8 @@ SCALES=(10 20 50 100 200 500 1000 2000 5000)
 
 configs_1=()
 for scale in "${SCALES[@]}"; do
-    for seed in "${SEEDS[@]}"; do
+    for seed_num in $(seq 1 $NUM_SEEDS); do
+        seed=$(generate_seed "blog_1tbl_trivial" "scale=$scale" "$seed_num")
         config="$TEMP_DIR/blog_1tbl_trivial_s${scale}_seed${seed}.toml"
         create_config "experiment_configs/blog_1tbl_trivial.toml" "$config" \
             "inter_arrival.scale" "$scale" \
@@ -125,7 +141,8 @@ CONFLICT_PROBS=(0.0 0.1 0.3 0.5 1.0)
 configs_2=()
 for scale in "${SCALES[@]}"; do
     for prob in "${CONFLICT_PROBS[@]}"; do
-        for seed in "${SEEDS[@]}"; do
+        for seed_num in $(seq 1 $NUM_SEEDS); do
+            seed=$(generate_seed "blog_1tbl_nontrivial" "prob=$prob:scale=$scale" "$seed_num")
             config="$TEMP_DIR/blog_1tbl_nontrivial_s${scale}_p${prob}_seed${seed}.toml"
             create_config "experiment_configs/blog_1tbl_nontrivial.toml" "$config" \
                 "inter_arrival.scale" "$scale" \
@@ -150,7 +167,8 @@ NUM_TABLES=(1 2 5 10 20)
 configs_3=()
 for scale in "${SCALES[@]}"; do
     for ntbl in "${NUM_TABLES[@]}"; do
-        for seed in "${SEEDS[@]}"; do
+        for seed_num in $(seq 1 $NUM_SEEDS); do
+            seed=$(generate_seed "blog_ntbl_trivial" "scale=$scale:tables=$ntbl" "$seed_num")
             config="$TEMP_DIR/blog_ntbl_trivial_s${scale}_t${ntbl}_seed${seed}.toml"
             create_config "experiment_configs/blog_ntbl_trivial.toml" "$config" \
                 "inter_arrival.scale" "$scale" \
@@ -177,7 +195,8 @@ configs_4=()
 for scale in "${SCALES[@]}"; do
     for ntbl in "${NUM_TABLES_4[@]}"; do
         for prob in "${CONFLICT_PROBS_4[@]}"; do
-            for seed in "${SEEDS[@]}"; do
+            for seed_num in $(seq 1 $NUM_SEEDS); do
+                seed=$(generate_seed "blog_ntbl_nontrivial" "prob=$prob:scale=$scale:tables=$ntbl" "$seed_num")
                 config="$TEMP_DIR/blog_ntbl_nontrivial_s${scale}_t${ntbl}_p${prob}_seed${seed}.toml"
                 create_config "experiment_configs/blog_ntbl_nontrivial.toml" "$config" \
                     "inter_arrival.scale" "$scale" \
