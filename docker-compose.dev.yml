@@ -1,0 +1,38 @@
+# Development environment for endive with Claude Code
+# Usage:
+#   docker compose -f docker-compose.dev.yml build
+#   docker compose -f docker-compose.dev.yml run --rm dev
+#   # Inside container: claude --dangerously-skip-permissions
+
+services:
+  dev:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+      args:
+        USER_UID: ${USER_UID:-1000}
+        USER_GID: ${USER_GID:-1000}
+    volumes:
+      # Code directory (read-write for development)
+      - .:/app:rw
+      # Git configuration (read-only)
+      - ~/.gitconfig:/home/dev/.gitconfig:ro
+      # Claude Code config and API keys
+      - ~/.claude:/home/dev/.claude:rw
+      # Experiments data (separate mount for clarity)
+      - ./experiments:/app/experiments:rw
+    environment:
+      # Pass through API key if set in host environment
+      - ANTHROPIC_API_KEY
+      # Ensure Python output is unbuffered
+      - PYTHONUNBUFFERED=1
+      # Limit threads to avoid oversubscription
+      - OMP_NUM_THREADS=1
+    working_dir: /app
+    stdin_open: true
+    tty: true
+    # Resource limits (adjust as needed)
+    deploy:
+      resources:
+        limits:
+          memory: 8G
