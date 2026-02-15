@@ -1,0 +1,55 @@
+# Partition-Level Modeling with Zipf Distribution
+#
+# Models partitioned tables where:
+# - Each partition has its own manifest list (distributed ML load)
+# - Transactions span multiple partitions
+# - Conflicts detected per-partition (vector clock)
+# - Zipf distribution creates "hot" partitions (partition 0 is hottest)
+#
+# Useful for: Analyzing hot partition scenarios (time-series data, recent orders)
+#
+# Sweep inter_arrival.scale: [10, 20, 50, 100, 200, 500, 1000, 2000, 5000]
+
+[simulation]
+duration_ms = 3600000  # 1 hour
+output_path = "results.parquet"
+
+[experiment]
+label = "partition_zipf"
+
+[catalog]
+num_tables = 1
+num_groups = 1
+table_metadata_inlined = true
+
+[partition]
+enabled = true
+num_partitions = 100
+partitions_per_txn_mean = 3.0
+partitions_per_txn_max = 10
+
+[partition.selection]
+distribution = "zipf"
+zipf_alpha = 1.5  # Higher = more skewed (hotter partitions)
+
+[transaction]
+retry = 10
+runtime.min = 30000    # 30 seconds minimum
+runtime.mean = 180000  # 3 minutes mean
+runtime.sigma = 1.5
+
+inter_arrival.distribution = "exponential"
+inter_arrival.scale = 100.0  # SWEEP THIS: [10, 20, 50, 100, 200, 500, 1000, 2000, 5000]
+
+# Conflict types for overlapping partitions
+real_conflict_probability = 0.0  # Start with trivial conflicts only
+
+conflicting_manifests.distribution = "exponential"
+conflicting_manifests.mean = 3.0
+conflicting_manifests.min = 1
+conflicting_manifests.max = 10
+
+[storage]
+provider = "s3x"  # S3 Express for realistic latencies
+max_parallel = 4
+min_latency = 1
