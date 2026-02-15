@@ -16,6 +16,10 @@ This document describes simplifications made in the Endive discrete-event simula
 - **Simplification**: False vs real conflicts determined by `REAL_CONFLICT_PROBABILITY` parameter.
 - **Reality**: Conflict type depends on actual data file overlap; partition pruning, schema evolution, and delete files affect conflict detection.
 
+### Partition-Level Modeling
+- **Simplification**: Partitions are abstract; each has a version counter. Conflicts detected by comparing partition versions.
+- **Reality**: Partitions map to physical directory structures; conflict detection involves comparing manifest file lists and data file paths.
+
 ## Storage Model
 
 ### Latency Distributions

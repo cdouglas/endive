@@ -40,6 +40,32 @@
 
 **Implementation**: `endive/main.py:52-131` (partition), `460-497` (table selection), `369-384` (conflict detection)
 
+### Partition-Level Modeling (Optional)
+
+When `partition.enabled = true`, conflicts are detected at partition granularity:
+
+1. **Per-table partitions**: Each table has N_PARTITIONS partitions
+2. **Per-partition state**: `partition_seq[table_id][partition_id]` tracks versions
+3. **Multi-partition transactions**: Transactions CAN span multiple partitions (unlike table groups)
+4. **Vector clock CAS**: Only checks versions of touched partitions
+5. **Partition selection**: Zipf (hot partitions) or uniform distribution
+
+**Key difference from table groups**:
+- Table groups: Transactions confined to ONE group
+- Partitions: Transactions can span MULTIPLE partitions
+
+**Configuration**:
+```toml
+[partition]
+enabled = true
+num_partitions = 100
+partitions_per_txn_mean = 3.0
+selection.distribution = "zipf"  # or "uniform"
+selection.zipf_alpha = 1.5
+```
+
+**Implementation**: `endive/main.py` - `select_partitions()`, `_try_CAS_partition()`, `get_conflicting_partitions()`
+
 ### Conflict Resolution (NEW)
 
 **False Conflict** - Version changed, no data overlap:
@@ -121,6 +147,7 @@ All operations use normal distributions with mean ± stddev:
 ✅ Parallel I/O with configurable limits
 ✅ Retry logic with exponential backoff
 ✅ Multi-table transactions with table-level isolation
+✅ **Partition-level conflicts** (per-partition manifest lists, Zipf/uniform access)
 
 ### Simplified
 
