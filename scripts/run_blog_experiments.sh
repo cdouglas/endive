@@ -85,14 +85,6 @@ create_config() {
     done
 }
 
-# Function to run experiment
-run_experiment() {
-    local config="$1"
-    python -m endive.main "$config" --yes
-}
-
-export -f run_experiment
-
 # Generate seeds
 SEEDS=()
 for i in $(seq 1 $NUM_SEEDS); do
@@ -120,7 +112,7 @@ for scale in "${SCALES[@]}"; do
 done
 
 echo "Running ${#configs_1[@]} configurations..."
-printf '%s\n' "${configs_1[@]}" | xargs -P $NUM_PARALLEL -I {} bash -c 'run_experiment "$@"' _ {}
+printf '%s\n' "${configs_1[@]}" | xargs -P $NUM_PARALLEL -I {} python -m endive.main {} --yes
 echo "Experiment 1 complete!"
 echo ""
 
@@ -145,7 +137,7 @@ for scale in "${SCALES[@]}"; do
 done
 
 echo "Running ${#configs_2[@]} configurations..."
-printf '%s\n' "${configs_2[@]}" | xargs -P $NUM_PARALLEL -I {} bash -c 'run_experiment "$@"' _ {}
+printf '%s\n' "${configs_2[@]}" | xargs -P $NUM_PARALLEL -I {} python -m endive.main {} --yes
 echo "Experiment 2 complete!"
 echo ""
 
@@ -170,7 +162,7 @@ for scale in "${SCALES[@]}"; do
 done
 
 echo "Running ${#configs_3[@]} configurations..."
-printf '%s\n' "${configs_3[@]}" | xargs -P $NUM_PARALLEL -I {} bash -c 'run_experiment "$@"' _ {}
+printf '%s\n' "${configs_3[@]}" | xargs -P $NUM_PARALLEL -I {} python -m endive.main {} --yes
 echo "Experiment 3 complete!"
 echo ""
 
@@ -199,7 +191,7 @@ for scale in "${SCALES[@]}"; do
 done
 
 echo "Running ${#configs_4[@]} configurations..."
-printf '%s\n' "${configs_4[@]}" | xargs -P $NUM_PARALLEL -I {} bash -c 'run_experiment "$@"' _ {}
+printf '%s\n' "${configs_4[@]}" | xargs -P $NUM_PARALLEL -I {} python -m endive.main {} --yes
 echo "Experiment 4 complete!"
 echo ""
 
