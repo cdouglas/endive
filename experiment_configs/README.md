@@ -154,6 +154,7 @@ docker exec <container_id> ./scripts/run_all_experiments.sh --status
 | `metadata` | Metadata inlined (optimization) | 3 configs |
 | `ml_append` | Manifest list append (optimization) | 3 configs |
 | `combined` | Both optimizations | 3 configs |
+| `partition` | Partition-level modeling | 3 configs |
 
 ## Analysis
 
@@ -171,6 +172,47 @@ python -m endive.saturation_analysis \
     -o plots/s3_comparison \
     --group-by label
 ```
+
+## Partition-Level Modeling
+
+Partition experiments model tables with per-partition manifest lists, where transactions can span multiple partitions and conflicts are detected per-partition.
+
+### Partition Configs
+
+| Config | Distribution | Description |
+|--------|--------------|-------------|
+| `partition_zipf.toml` | Zipf | Hot partition scenario (partition 0 is hottest) |
+| `partition_uniform.toml` | Uniform | Baseline with no hot partitions |
+| `partition_scaling.toml` | Zipf | Scaling analysis: vary num_partitions |
+
+### Configuration Options
+
+```toml
+[partition]
+enabled = true
+num_partitions = 100          # Partitions per table
+partitions_per_txn_mean = 3.0 # Mean partitions per transaction
+partitions_per_txn_max = 10   # Maximum partitions per transaction
+
+[partition.selection]
+distribution = "zipf"   # "zipf" or "uniform"
+zipf_alpha = 1.5        # Higher = more skewed (hotter hot partitions)
+```
+
+### Key Differences from Table Groups
+
+| Feature | Table Groups | Partitions |
+|---------|--------------|------------|
+| Spans multiple | No | Yes |
+| Conflict boundary | Table | Partition |
+| ML distribution | Per-table | Per-partition |
+| Use case | Multi-tenant | Partitioned tables |
+
+With partitions enabled:
+- Each partition has its own manifest list (distributed ML load)
+- Transactions can span multiple partitions (unlike table groups)
+- Conflicts only occur when transactions touch the same partition
+- Higher partition count reduces conflict probability
 
 ## Archive
 

@@ -10,6 +10,7 @@ The simulator models:
 - **CAS-based commits**: Traditional catalog pointer updates
 - **Append-based commits**: Conditional append to catalog log (ML+)
 - **Conflict resolution**: False conflicts (no data overlap) vs real conflicts (manifest file I/O)
+- **Partition-level conflicts**: Per-partition manifest lists with Zipf/uniform access patterns
 - **Cloud storage latencies**: Provider-specific distributions from YCSB measurements
 
 Latency parameters are calibrated from:
@@ -86,6 +87,13 @@ manifest_list_mode = "rewrite"  # or "append" for ML+
 [storage]
 provider = "s3x"           # s3, s3x, azure, azurex, gcp
 max_parallel = 4
+
+[partition]                # Optional: partition-level modeling
+enabled = true
+num_partitions = 100
+partitions_per_txn_mean = 3.0
+selection.distribution = "zipf"  # or "uniform"
+selection.zipf_alpha = 1.5
 ```
 
 See `experiment_configs/` for complete examples.
