@@ -30,8 +30,11 @@ def create_partition_test_config(
     partitions_per_txn_mean: float = 3.0,
     partitions_per_txn_max: int = 10,
     real_conflict_probability: float = 0.0,
+    num_groups: int = None,  # Defaults to num_tables if None
 ) -> str:
     """Create a test configuration file for partition mode."""
+    if num_groups is None:
+        num_groups = 1  # Default to single group (catalog-level conflicts)
     config_content = f"""[simulation]
 duration_ms = {duration_ms}
 output_path = "{output_path}"
@@ -39,6 +42,7 @@ output_path = "{output_path}"
 
 [catalog]
 num_tables = {num_tables}
+num_groups = {num_groups}
 
 [partition]
 enabled = {str(partition_enabled).lower()}
@@ -267,6 +271,7 @@ class TestCatalogPartition:
                 seed=42,
                 partition_enabled=True,
                 num_partitions=50,
+                num_tables=3,  # Test with multiple tables
             )
             try:
                 configure_from_toml(config_path)
@@ -274,11 +279,14 @@ class TestCatalogPartition:
                 catalog = Catalog(sim)
 
                 assert hasattr(catalog, 'partition_seq')
-                assert len(catalog.partition_seq) == 50
-                assert all(v == 0 for v in catalog.partition_seq)
+                # partition_seq is now indexed by [table_id][partition_id]
+                assert len(catalog.partition_seq) == 3  # N_TABLES
+                assert len(catalog.partition_seq[0]) == 50  # N_PARTITIONS
+                assert all(v == 0 for v in catalog.partition_seq[0])
 
                 assert hasattr(catalog, 'partition_ml_offset')
-                assert len(catalog.partition_ml_offset) == 50
+                assert len(catalog.partition_ml_offset) == 3  # N_TABLES
+                assert len(catalog.partition_ml_offset[0]) == 50  # N_PARTITIONS
             finally:
                 os.unlink(config_path)
 
@@ -291,13 +299,15 @@ class TestCatalogPartition:
                 seed=42,
                 partition_enabled=True,
                 num_partitions=100,
+                num_tables=1,
             )
             try:
                 configure_from_toml(config_path)
                 sim = simpy.Environment()
                 catalog = Catalog(sim)
 
-                # Create transaction touching partitions 0, 1, 2
+                # Create transaction touching table 0, partitions 0, 1, 2
+                # Now indexed as {table_id: {partition_ids}}
                 txn1 = Txn(
                     id=1,
                     t_submit=0,
@@ -306,14 +316,14 @@ class TestCatalogPartition:
                     v_tblr={0: 0},
                     v_tblw={0: 1},
                 )
-                txn1.partitions_read = {0, 1, 2}
-                txn1.partitions_written = {0}
-                txn1.v_partition_seq = {0: 0, 1: 0, 2: 0}
+                txn1.partitions_read = {0: {0, 1, 2}}
+                txn1.partitions_written = {0: {0}}
+                txn1.v_partition_seq = {0: {0: 0, 1: 0, 2: 0}}
 
                 # Commit txn1
                 assert catalog.try_CAS(sim, txn1) == True
-                assert catalog.partition_seq[0] == 1  # Incremented
-                assert catalog.partition_seq[1] == 0  # Not written
+                assert catalog.partition_seq[0][0] == 1  # Table 0, partition 0 incremented
+                assert catalog.partition_seq[0][1] == 0  # Table 0, partition 1 not written
 
                 # Create transaction touching partitions 5, 6 (different)
                 txn2 = Txn(
@@ -324,9 +334,9 @@ class TestCatalogPartition:
                     v_tblr={0: 0},
                     v_tblw={0: 1},
                 )
-                txn2.partitions_read = {5, 6}
-                txn2.partitions_written = {5}
-                txn2.v_partition_seq = {5: 0, 6: 0}
+                txn2.partitions_read = {0: {5, 6}}
+                txn2.partitions_written = {0: {5}}
+                txn2.v_partition_seq = {0: {5: 0, 6: 0}}
 
                 # Should succeed - different partitions
                 assert catalog.try_CAS(sim, txn2) == True
@@ -342,13 +352,14 @@ class TestCatalogPartition:
                 seed=42,
                 partition_enabled=True,
                 num_partitions=100,
+                num_tables=1,
             )
             try:
                 configure_from_toml(config_path)
                 sim = simpy.Environment()
                 catalog = Catalog(sim)
 
-                # First transaction
+                # First transaction - table 0, partitions 0, 1
                 txn1 = Txn(
                     id=1,
                     t_submit=0,
@@ -357,9 +368,9 @@ class TestCatalogPartition:
                     v_tblr={0: 0},
                     v_tblw={0: 1},
                 )
-                txn1.partitions_read = {0, 1}
-                txn1.partitions_written = {0}
-                txn1.v_partition_seq = {0: 0, 1: 0}
+                txn1.partitions_read = {0: {0, 1}}
+                txn1.partitions_written = {0: {0}}
+                txn1.v_partition_seq = {0: {0: 0, 1: 0}}
 
                 # Commit txn1
                 assert catalog.try_CAS(sim, txn1) == True
@@ -373,9 +384,9 @@ class TestCatalogPartition:
                     v_tblr={0: 0},
                     v_tblw={0: 1},
                 )
-                txn2.partitions_read = {0, 2}
-                txn2.partitions_written = {0}
-                txn2.v_partition_seq = {0: 0, 2: 0}  # Stale version for partition 0
+                txn2.partitions_read = {0: {0, 2}}
+                txn2.partitions_written = {0: {0}}
+                txn2.v_partition_seq = {0: {0: 0, 2: 0}}  # Stale version for partition 0
 
                 # Should fail - partition 0 has been modified
                 assert catalog.try_CAS(sim, txn2) == False

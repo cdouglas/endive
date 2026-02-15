@@ -1878,8 +1878,8 @@ class ConflictResolver:
     def merge_partition_conflicts(sim, txn: 'Txn', catalog):
         """Merge conflicts for partitions that have changed.
 
-        In partition mode, conflicts are per-partition. Each conflicting partition
-        has its own manifest list that needs to be read/updated.
+        In partition mode, conflicts are per-(table, partition). Each conflicting
+        partition has its own manifest list that needs to be read/updated.
 
         Args:
             sim: SimPy environment
@@ -1889,44 +1889,48 @@ class ConflictResolver:
         if not PARTITION_ENABLED:
             return
 
+        # conflicting is dict[table_id, set[partition_id]]
         conflicting = catalog.get_conflicting_partitions(txn)
         if not conflicting:
             return
 
-        logger.debug(f"{sim.now} TXN {txn.id} Resolving conflicts for {len(conflicting)} partitions")
+        total_conflicts = sum(len(parts) for parts in conflicting.values())
+        logger.debug(f"{sim.now} TXN {txn.id} Resolving conflicts for {total_conflicts} partitions across {len(conflicting)} tables")
 
-        for p in conflicting:
-            # Determine if this is a real or false conflict
-            is_real_conflict = np.random.random() < REAL_CONFLICT_PROBABILITY
+        for tbl_id, partitions in conflicting.items():
+            for p in partitions:
+                # Determine if this is a real or false conflict
+                is_real_conflict = np.random.random() < REAL_CONFLICT_PROBABILITY
 
-            if is_real_conflict:
-                yield from ConflictResolver.resolve_partition_real_conflict(sim, txn, p, catalog)
-                STATS.real_conflicts += 1
-            else:
-                yield from ConflictResolver.resolve_partition_false_conflict(sim, txn, p, catalog)
-                STATS.false_conflicts += 1
+                if is_real_conflict:
+                    yield from ConflictResolver.resolve_partition_real_conflict(sim, txn, tbl_id, p, catalog)
+                    STATS.real_conflicts += 1
+                else:
+                    yield from ConflictResolver.resolve_partition_false_conflict(sim, txn, tbl_id, p, catalog)
+                    STATS.false_conflicts += 1
 
     @staticmethod
-    def resolve_partition_false_conflict(sim, txn, partition_id: int, catalog):
-        """Resolve false conflict for a partition (different data, no overlap).
+    def resolve_partition_false_conflict(sim, txn, table_id: int, partition_id: int, catalog):
+        """Resolve false conflict for a table's partition (different data, no overlap).
 
-        In partition mode with distributed MLs, each partition has its own ML.
+        In partition mode with distributed MLs, each (table, partition) has its own ML.
         False conflict: Different partition ranges modified, no manifest file ops needed.
 
         Args:
             sim: SimPy environment
             txn: Transaction object
+            table_id: Table with conflict
             partition_id: Partition with conflict
             catalog: Catalog reference
         """
-        logger.debug(f"{sim.now} TXN {txn.id} False conflict partition {partition_id}")
+        logger.debug(f"{sim.now} TXN {txn.id} False conflict table {table_id} partition {partition_id}")
 
         if MANIFEST_LIST_MODE == "append":
             # ML+ mode: Tentative entry is still valid, no ML update needed
-            logger.debug(f"{sim.now} TXN {txn.id} ML+ mode: partition {partition_id} entry still valid")
+            logger.debug(f"{sim.now} TXN {txn.id} ML+ mode: table {table_id} partition {partition_id} entry still valid")
         else:
             # Traditional mode: Read and rewrite partition's manifest list
-            ml_size = catalog.partition_ml_offset[partition_id]
+            ml_size = catalog.partition_ml_offset[table_id][partition_id]
             if T_PUT is not None:
                 yield sim.timeout(get_put_latency(ml_size))  # Read
                 yield sim.timeout(get_manifest_list_write_latency(ml_size))  # Write
@@ -1937,28 +1941,29 @@ class ConflictResolver:
             STATS.manifest_list_writes += 1
 
         # Update transaction's partition state
-        txn.v_partition_seq[partition_id] = catalog.partition_seq[partition_id]
-        txn.v_partition_ml_offset[partition_id] = catalog.partition_ml_offset[partition_id]
+        txn.v_partition_seq[table_id][partition_id] = catalog.partition_seq[table_id][partition_id]
+        txn.v_partition_ml_offset[table_id][partition_id] = catalog.partition_ml_offset[table_id][partition_id]
 
     @staticmethod
-    def resolve_partition_real_conflict(sim, txn, partition_id: int, catalog):
-        """Resolve real conflict for a partition (overlapping data).
+    def resolve_partition_real_conflict(sim, txn, table_id: int, partition_id: int, catalog):
+        """Resolve real conflict for a table's partition (overlapping data).
 
         Real conflict: Same partition range modified, must read/write manifest files.
 
         Args:
             sim: SimPy environment
             txn: Transaction object
+            table_id: Table with conflict
             partition_id: Partition with conflict
             catalog: Catalog reference
         """
         n_conflicting = sample_conflicting_manifests()
 
-        logger.debug(f"{sim.now} TXN {txn.id} Real conflict partition {partition_id} "
+        logger.debug(f"{sim.now} TXN {txn.id} Real conflict table {table_id} partition {partition_id} "
                     f"({n_conflicting} manifests)")
 
         # Read partition's manifest list
-        ml_size = catalog.partition_ml_offset[partition_id]
+        ml_size = catalog.partition_ml_offset[table_id][partition_id]
         if T_PUT is not None:
             yield sim.timeout(get_put_latency(ml_size))
         else:
@@ -1981,26 +1986,26 @@ class ConflictResolver:
 
         # Write updated partition ML
         if MANIFEST_LIST_MODE == "append" and hasattr(catalog, 'try_PARTITION_ML_APPEND'):
-            expected_offset = txn.v_partition_ml_offset.get(partition_id, 0)
+            expected_offset = txn.v_partition_ml_offset.get(table_id, {}).get(partition_id, 0)
             yield sim.timeout(get_append_latency())
-            success = catalog.try_PARTITION_ML_APPEND(sim, partition_id, expected_offset, txn.id)
+            success = catalog.try_PARTITION_ML_APPEND(sim, table_id, partition_id, expected_offset, txn.id)
 
             while not success:
                 STATS.manifest_append_physical_failure += 1
-                if catalog.partition_ml_sealed[partition_id]:
+                if catalog.partition_ml_sealed[table_id][partition_id]:
                     STATS.manifest_append_sealed_rewrite += 1
-                    ml_size = catalog.partition_ml_offset[partition_id]
+                    ml_size = catalog.partition_ml_offset[table_id][partition_id]
                     if T_PUT is not None:
                         yield sim.timeout(get_put_latency(ml_size))
                         yield sim.timeout(get_manifest_list_write_latency(ml_size))
                     else:
                         yield sim.timeout(get_manifest_list_latency('write'))
-                    catalog.rewrite_partition_manifest_list(partition_id)
-                    txn.v_partition_ml_offset[partition_id] = catalog.partition_ml_offset[partition_id]
+                    catalog.rewrite_partition_manifest_list(table_id, partition_id)
+                    txn.v_partition_ml_offset[table_id][partition_id] = catalog.partition_ml_offset[table_id][partition_id]
                     break
-                txn.v_partition_ml_offset[partition_id] = catalog.partition_ml_offset[partition_id]
+                txn.v_partition_ml_offset[table_id][partition_id] = catalog.partition_ml_offset[table_id][partition_id]
                 yield sim.timeout(get_append_latency())
-                success = catalog.try_PARTITION_ML_APPEND(sim, partition_id, txn.v_partition_ml_offset[partition_id], txn.id)
+                success = catalog.try_PARTITION_ML_APPEND(sim, table_id, partition_id, txn.v_partition_ml_offset[table_id][partition_id], txn.id)
 
             STATS.manifest_append_physical_success += 1
         else:
@@ -2012,8 +2017,8 @@ class ConflictResolver:
             STATS.manifest_list_writes += 1
 
         # Update transaction's partition state
-        txn.v_partition_seq[partition_id] = catalog.partition_seq[partition_id]
-        txn.v_partition_ml_offset[partition_id] = catalog.partition_ml_offset[partition_id]
+        txn.v_partition_seq[table_id][partition_id] = catalog.partition_seq[table_id][partition_id]
+        txn.v_partition_ml_offset[table_id][partition_id] = catalog.partition_ml_offset[table_id][partition_id]
 
     @staticmethod
     def update_partition_state(txn: 'Txn', catalog):
@@ -2024,9 +2029,23 @@ class ConflictResolver:
         if not PARTITION_ENABLED:
             return
 
-        for p in txn.partitions_read | txn.partitions_written:
-            txn.v_partition_seq[p] = catalog.partition_seq[p]
-            txn.v_partition_ml_offset[p] = catalog.partition_ml_offset[p]
+        for tbl_id, partitions in txn.partitions_read.items():
+            if tbl_id not in txn.v_partition_seq:
+                txn.v_partition_seq[tbl_id] = {}
+            if tbl_id not in txn.v_partition_ml_offset:
+                txn.v_partition_ml_offset[tbl_id] = {}
+            for p in partitions:
+                txn.v_partition_seq[tbl_id][p] = catalog.partition_seq[tbl_id][p]
+                txn.v_partition_ml_offset[tbl_id][p] = catalog.partition_ml_offset[tbl_id][p]
+
+        for tbl_id, partitions in txn.partitions_written.items():
+            if tbl_id not in txn.v_partition_seq:
+                txn.v_partition_seq[tbl_id] = {}
+            if tbl_id not in txn.v_partition_ml_offset:
+                txn.v_partition_ml_offset[tbl_id] = {}
+            for p in partitions:
+                txn.v_partition_seq[tbl_id][p] = catalog.partition_seq[tbl_id][p]
+                txn.v_partition_ml_offset[tbl_id][p] = catalog.partition_ml_offset[tbl_id][p]
 
 
 class Catalog:
@@ -2041,11 +2060,12 @@ class Catalog:
         self.ml_sealed = [False] * N_TABLES  # Whether manifest list is sealed (needs rewrite)
 
         # Partition-level state (when PARTITION_ENABLED)
-        # Each partition has its own version counter and manifest list
+        # Each TABLE has its own set of partitions with version counters and manifest lists
+        # Indexed as: partition_seq[table_id][partition_id]
         if PARTITION_ENABLED:
-            self.partition_seq = [0] * N_PARTITIONS  # Per-partition version (vector clock)
-            self.partition_ml_offset = [0] * N_PARTITIONS  # Per-partition manifest list offset
-            self.partition_ml_sealed = [False] * N_PARTITIONS  # Per-partition ML sealed flag
+            self.partition_seq = [[0] * N_PARTITIONS for _ in range(N_TABLES)]
+            self.partition_ml_offset = [[0] * N_PARTITIONS for _ in range(N_TABLES)]
+            self.partition_ml_sealed = [[False] * N_PARTITIONS for _ in range(N_TABLES)]
 
     def try_CAS(self, sim, txn):
         """Attempt compare-and-swap for transaction commit.
@@ -2092,76 +2112,100 @@ class Catalog:
     def _try_CAS_partition(self, sim, txn):
         """Partition-level CAS using vector clock comparison.
 
-        Only checks partitions that the transaction touched (read or wrote).
-        Conflict occurs if any touched partition has a different version.
+        Checks partitions PER TABLE that the transaction touched.
+        Conflict occurs if any (table, partition) has a different version.
         """
-        # Check if any touched partition has advanced
-        for p in txn.partitions_read | txn.partitions_written:
-            if self.partition_seq[p] != txn.v_partition_seq[p]:
-                logger.debug(f"{sim.now} TXN {txn.id} CAS FAIL - partition {p} at v{self.partition_seq[p]}, "
-                            f"txn expected v{txn.v_partition_seq[p]}")
-                return False
+        # Check if any touched (table, partition) has advanced
+        # txn.partitions_read is dict[table_id, set[partition_id]]
+        for tbl_id, partitions in txn.partitions_read.items():
+            for p in partitions:
+                if self.partition_seq[tbl_id][p] != txn.v_partition_seq[tbl_id][p]:
+                    logger.debug(f"{sim.now} TXN {txn.id} CAS FAIL - table {tbl_id} partition {p} "
+                                f"at v{self.partition_seq[tbl_id][p]}, expected v{txn.v_partition_seq[tbl_id][p]}")
+                    return False
+
+        for tbl_id, partitions in txn.partitions_written.items():
+            for p in partitions:
+                if self.partition_seq[tbl_id][p] != txn.v_partition_seq[tbl_id][p]:
+                    logger.debug(f"{sim.now} TXN {txn.id} CAS FAIL - table {tbl_id} partition {p} "
+                                f"at v{self.partition_seq[tbl_id][p]}, expected v{txn.v_partition_seq[tbl_id][p]}")
+                    return False
 
         # No conflicts - commit: increment only written partitions
-        for p in txn.partitions_written:
-            self.partition_seq[p] += 1
+        for tbl_id, partitions in txn.partitions_written.items():
+            for p in partitions:
+                self.partition_seq[tbl_id][p] += 1
         self.seq += 1  # Global seq for total ordering/stats
         logger.debug(f"{sim.now} TXN {txn.id} CASOK (partition-level)")
         return True
 
-    def get_conflicting_partitions(self, txn) -> set[int]:
-        """Get the set of partitions that have conflicts.
+    def get_conflicting_partitions(self, txn) -> dict[int, set[int]]:
+        """Get the set of partitions per table that have conflicts.
 
-        Used during conflict resolution to determine which partition MLs to update.
+        Returns:
+            dict[table_id, set[partition_id]]: Conflicting partitions per table
         """
         if not PARTITION_ENABLED:
-            return set()
+            return {}
 
-        conflicting = set()
-        for p in txn.partitions_read | txn.partitions_written:
-            if self.partition_seq[p] != txn.v_partition_seq[p]:
-                conflicting.add(p)
+        conflicting = {}
+        # Check read partitions
+        for tbl_id, partitions in txn.partitions_read.items():
+            for p in partitions:
+                if self.partition_seq[tbl_id][p] != txn.v_partition_seq[tbl_id][p]:
+                    if tbl_id not in conflicting:
+                        conflicting[tbl_id] = set()
+                    conflicting[tbl_id].add(p)
+
+        # Check written partitions
+        for tbl_id, partitions in txn.partitions_written.items():
+            for p in partitions:
+                if self.partition_seq[tbl_id][p] != txn.v_partition_seq[tbl_id][p]:
+                    if tbl_id not in conflicting:
+                        conflicting[tbl_id] = set()
+                    conflicting[tbl_id].add(p)
+
         return conflicting
 
-    def try_PARTITION_ML_APPEND(self, sim, partition_id: int, expected_offset: int, txn_id: int) -> bool:
-        """Attempt physical append to a partition's manifest list.
+    def try_PARTITION_ML_APPEND(self, sim, table_id: int, partition_id: int, expected_offset: int, txn_id: int) -> bool:
+        """Attempt physical append to a table's partition manifest list.
 
-        Similar to try_ML_APPEND but operates on per-partition manifest lists.
+        Similar to try_ML_APPEND but operates on per-(table, partition) manifest lists.
         """
         if not PARTITION_ENABLED:
             return False
 
         # Check if partition ML is sealed
-        if self.partition_ml_sealed[partition_id]:
-            logger.debug(f"{sim.now} PARTITION_ML_APPEND partition {partition_id} SEALED")
+        if self.partition_ml_sealed[table_id][partition_id]:
+            logger.debug(f"{sim.now} PARTITION_ML_APPEND table {table_id} partition {partition_id} SEALED")
             return False
 
         # Physical check: Does offset match?
-        if self.partition_ml_offset[partition_id] != expected_offset:
-            logger.debug(f"{sim.now} PARTITION_ML_APPEND partition {partition_id} PHYSICAL_FAIL - "
-                        f"offset {self.partition_ml_offset[partition_id]} != expected {expected_offset}")
+        if self.partition_ml_offset[table_id][partition_id] != expected_offset:
+            logger.debug(f"{sim.now} PARTITION_ML_APPEND table {table_id} partition {partition_id} PHYSICAL_FAIL - "
+                        f"offset {self.partition_ml_offset[table_id][partition_id]} != expected {expected_offset}")
             return False
 
         # Physical success
-        self.partition_ml_offset[partition_id] += MANIFEST_LIST_ENTRY_SIZE
-        self._check_partition_ml_seal_threshold(partition_id)
-        logger.debug(f"{sim.now} PARTITION_ML_APPEND partition {partition_id} txn {txn_id} OK")
+        self.partition_ml_offset[table_id][partition_id] += MANIFEST_LIST_ENTRY_SIZE
+        self._check_partition_ml_seal_threshold(table_id, partition_id)
+        logger.debug(f"{sim.now} PARTITION_ML_APPEND table {table_id} partition {partition_id} txn {txn_id} OK")
         return True
 
-    def _check_partition_ml_seal_threshold(self, partition_id: int):
+    def _check_partition_ml_seal_threshold(self, table_id: int, partition_id: int):
         """Check if partition ML threshold reached and seal if needed."""
         if (MANIFEST_LIST_SEAL_THRESHOLD > 0 and
-            self.partition_ml_offset[partition_id] >= MANIFEST_LIST_SEAL_THRESHOLD):
-            self.partition_ml_sealed[partition_id] = True
-            logger.debug(f"Partition {partition_id} ML SEALED - threshold reached")
+            self.partition_ml_offset[table_id][partition_id] >= MANIFEST_LIST_SEAL_THRESHOLD):
+            self.partition_ml_sealed[table_id][partition_id] = True
+            logger.debug(f"Table {table_id} partition {partition_id} ML SEALED - threshold reached")
 
-    def rewrite_partition_manifest_list(self, partition_id: int):
+    def rewrite_partition_manifest_list(self, table_id: int, partition_id: int):
         """Rewrite partition manifest list (unseals it)."""
         if not PARTITION_ENABLED:
             return
-        self.partition_ml_sealed[partition_id] = False
-        self.partition_ml_offset[partition_id] = MANIFEST_LIST_ENTRY_SIZE
-        logger.debug(f"Partition {partition_id} ML REWRITTEN")
+        self.partition_ml_sealed[table_id][partition_id] = False
+        self.partition_ml_offset[table_id][partition_id] = MANIFEST_LIST_ENTRY_SIZE
+        logger.debug(f"Table {table_id} partition {partition_id} ML REWRITTEN")
 
     def try_ML_APPEND(self, sim, tbl_id: int, expected_offset: int, txn_id: int) -> bool:
         """Attempt physical append to a table's manifest list.
@@ -2228,10 +2272,11 @@ class Txn:
     v_log_offset: int = 0  # Log offset when snapshot was taken (for append mode)
     v_ml_offset: dict[int, int] = field(default_factory=dict)  # Per-table manifest list offsets
     # Partition mode fields (when PARTITION_ENABLED)
-    partitions_read: set[int] = field(default_factory=set)  # Partitions read by this transaction
-    partitions_written: set[int] = field(default_factory=set)  # Partitions written by this transaction
-    v_partition_seq: dict[int, int] = field(default_factory=dict)  # Per-partition versions at snapshot
-    v_partition_ml_offset: dict[int, int] = field(default_factory=dict)  # Per-partition ML offsets at snapshot
+    # Indexed by table_id -> set of partition_ids or table_id -> partition_id -> value
+    partitions_read: dict[int, set[int]] = field(default_factory=dict)  # table_id -> partition_ids read
+    partitions_written: dict[int, set[int]] = field(default_factory=dict)  # table_id -> partition_ids written
+    v_partition_seq: dict[int, dict[int, int]] = field(default_factory=dict)  # table_id -> partition_id -> version
+    v_partition_ml_offset: dict[int, dict[int, int]] = field(default_factory=dict)  # table_id -> partition_id -> offset
 
 
 @dataclass
@@ -2280,10 +2325,11 @@ class AppendCatalog:
         self.ml_sealed = [False] * N_TABLES  # Whether manifest list is sealed (needs rewrite)
 
         # Partition-level state (when PARTITION_ENABLED)
+        # Each TABLE has its own set of partitions
         if PARTITION_ENABLED:
-            self.partition_seq = [0] * N_PARTITIONS
-            self.partition_ml_offset = [0] * N_PARTITIONS
-            self.partition_ml_sealed = [False] * N_PARTITIONS
+            self.partition_seq = [[0] * N_PARTITIONS for _ in range(N_TABLES)]
+            self.partition_ml_offset = [[0] * N_PARTITIONS for _ in range(N_TABLES)]
+            self.partition_ml_sealed = [[False] * N_PARTITIONS for _ in range(N_TABLES)]
 
     def try_APPEND(self, sim, txn, entry: LogEntry) -> tuple[bool, bool]:
         """Attempt conditional append with table-level validation.
@@ -2424,36 +2470,45 @@ class AppendCatalog:
         logger.debug(f"ML table {tbl_id} REWRITTEN - offset reset")
 
     # Partition-level methods (delegate to Catalog pattern)
-    def get_conflicting_partitions(self, txn) -> set[int]:
-        """Get the set of partitions that have conflicts."""
+    def get_conflicting_partitions(self, txn) -> dict[int, set[int]]:
+        """Get the set of partitions per table that have conflicts."""
         if not PARTITION_ENABLED:
-            return set()
-        conflicting = set()
-        for p in txn.partitions_read | txn.partitions_written:
-            if self.partition_seq[p] != txn.v_partition_seq[p]:
-                conflicting.add(p)
+            return {}
+        conflicting = {}
+        for tbl_id, partitions in txn.partitions_read.items():
+            for p in partitions:
+                if self.partition_seq[tbl_id][p] != txn.v_partition_seq[tbl_id][p]:
+                    if tbl_id not in conflicting:
+                        conflicting[tbl_id] = set()
+                    conflicting[tbl_id].add(p)
+        for tbl_id, partitions in txn.partitions_written.items():
+            for p in partitions:
+                if self.partition_seq[tbl_id][p] != txn.v_partition_seq[tbl_id][p]:
+                    if tbl_id not in conflicting:
+                        conflicting[tbl_id] = set()
+                    conflicting[tbl_id].add(p)
         return conflicting
 
-    def try_PARTITION_ML_APPEND(self, sim, partition_id: int, expected_offset: int, txn_id: int) -> bool:
-        """Attempt physical append to a partition's manifest list."""
+    def try_PARTITION_ML_APPEND(self, sim, table_id: int, partition_id: int, expected_offset: int, txn_id: int) -> bool:
+        """Attempt physical append to a table's partition manifest list."""
         if not PARTITION_ENABLED:
             return False
-        if self.partition_ml_sealed[partition_id]:
+        if self.partition_ml_sealed[table_id][partition_id]:
             return False
-        if self.partition_ml_offset[partition_id] != expected_offset:
+        if self.partition_ml_offset[table_id][partition_id] != expected_offset:
             return False
-        self.partition_ml_offset[partition_id] += MANIFEST_LIST_ENTRY_SIZE
+        self.partition_ml_offset[table_id][partition_id] += MANIFEST_LIST_ENTRY_SIZE
         if (MANIFEST_LIST_SEAL_THRESHOLD > 0 and
-            self.partition_ml_offset[partition_id] >= MANIFEST_LIST_SEAL_THRESHOLD):
-            self.partition_ml_sealed[partition_id] = True
+            self.partition_ml_offset[table_id][partition_id] >= MANIFEST_LIST_SEAL_THRESHOLD):
+            self.partition_ml_sealed[table_id][partition_id] = True
         return True
 
-    def rewrite_partition_manifest_list(self, partition_id: int):
+    def rewrite_partition_manifest_list(self, table_id: int, partition_id: int):
         """Rewrite partition manifest list (unseals it)."""
         if not PARTITION_ENABLED:
             return
-        self.partition_ml_sealed[partition_id] = False
-        self.partition_ml_offset[partition_id] = MANIFEST_LIST_ENTRY_SIZE
+        self.partition_ml_sealed[table_id][partition_id] = False
+        self.partition_ml_offset[table_id][partition_id] = MANIFEST_LIST_ENTRY_SIZE
 
 
 def txn_ml_w(sim, txn, catalog=None):
@@ -2811,16 +2866,28 @@ def txn_gen(sim, txn_id, catalog):
         for tbl_id in list(tblr.keys()) + list(tblw.keys()):
             txn.v_ml_offset[tbl_id] = catalog.ml_offset[tbl_id]
 
-    # Partition mode: select partitions and capture per-partition state
+    # Partition mode: select partitions for EACH table and capture per-partition state
     if PARTITION_ENABLED:
-        partitions_read, partitions_written = select_partitions(N_PARTITIONS)
-        txn.partitions_read = partitions_read
-        txn.partitions_written = partitions_written
-        # Capture per-partition versions (vector clock snapshot)
-        for p in partitions_read | partitions_written:
-            txn.v_partition_seq[p] = catalog.partition_seq[p]
-            txn.v_partition_ml_offset[p] = catalog.partition_ml_offset[p]
-        logger.debug(f"{sim.now} TXN {txn_id} partitions r={partitions_read} w={partitions_written}")
+        # For each table read, select partitions
+        txn.partitions_read = {}
+        txn.partitions_written = {}
+        txn.v_partition_seq = {}
+        txn.v_partition_ml_offset = {}
+
+        for tbl_id in tblr.keys():
+            parts_r, parts_w = select_partitions(N_PARTITIONS)
+            txn.partitions_read[tbl_id] = parts_r
+            # Only include in written if table is being written
+            if tbl_id in tblw:
+                txn.partitions_written[tbl_id] = parts_w
+            # Capture per-partition versions (vector clock snapshot)
+            txn.v_partition_seq[tbl_id] = {}
+            txn.v_partition_ml_offset[tbl_id] = {}
+            for p in parts_r:
+                txn.v_partition_seq[tbl_id][p] = catalog.partition_seq[tbl_id][p]
+                txn.v_partition_ml_offset[tbl_id][p] = catalog.partition_ml_offset[tbl_id][p]
+
+        logger.debug(f"{sim.now} TXN {txn_id} partitions r={txn.partitions_read} w={txn.partitions_written}")
 
     # If table metadata is NOT inlined, read it separately
     if not TABLE_METADATA_INLINED:
