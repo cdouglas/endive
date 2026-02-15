@@ -1061,13 +1061,15 @@ def configure_from_toml(config_file: str):
     # NOTE: Table partitioning is done in CLI after seed is set for determinism
 
 
-def validate_config(config: dict) -> list[str]:
-    """Validate configuration and return list of errors.
+def validate_config(config: dict) -> tuple[list[str], list[str]]:
+    """Validate configuration and return errors and warnings.
 
     Returns:
-        List of validation error messages. Empty list if configuration is valid.
+        Tuple of (errors, warnings). Empty error list if configuration is valid.
+        Warnings are informational and don't block execution.
     """
     errors = []
+    warnings = []
 
     # Validate catalog configuration
     num_tables = config.get('catalog', {}).get('num_tables', 0)
@@ -1226,7 +1228,18 @@ def validate_config(config: dict) -> list[str]:
         if parts_max > n_partitions:
             errors.append(f"partition.partitions_per_txn_max ({parts_max}) cannot exceed num_partitions ({n_partitions})")
 
-    return errors
+        # Warn about meaningless configurations
+        if n_partitions == 1:
+            warnings.append("partition.num_partitions = 1 is meaningless (no partition distribution); consider disabling partition mode or increasing num_partitions")
+
+        if parts_mean >= n_partitions:
+            warnings.append(f"partition.partitions_per_txn_mean ({parts_mean}) >= num_partitions ({n_partitions}); transactions will touch all partitions, defeating partition isolation")
+
+        # Warn about complex interactions
+        if num_groups > 1:
+            warnings.append(f"partition.enabled=true with num_groups={num_groups} > 1 creates nested isolation (table groups + partitions); this is valid but may be unintended")
+
+    return errors, warnings
 
 
 def generate_inter_arrival_time():
@@ -3114,7 +3127,11 @@ def cli():
         config = tomllib.load(f)
 
     # Validate configuration
-    validation_errors = validate_config(config)
+    validation_errors, validation_warnings = validate_config(config)
+    if validation_warnings:
+        print("Configuration warnings:")
+        for warning in validation_warnings:
+            print(f"  ⚠ {warning}")
     if validation_errors:
         print("Configuration validation failed:")
         for error in validation_errors:
