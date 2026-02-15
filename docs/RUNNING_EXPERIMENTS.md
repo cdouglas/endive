@@ -41,6 +41,7 @@ Quick reference guide for running optimization experiments.
 | `metadata` | 4 | Metadata inlining only |
 | `ml_append` | 3 | ML+ append only (S3x, Azure, Azurex) |
 | `combined` | 3 | Both optimizations |
+| `partition` | 3 | Partition-level modeling (Zipf, uniform, scaling) |
 
 ## Factorial Design
 
