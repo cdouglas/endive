@@ -31,13 +31,15 @@
 #           tee experiment_logs/run_\$(date +%Y%m%d_%H%M%S).log"
 #
 # Available groups:
-#   trivial      - Single table trivial conflicts (Q1a)
-#   mixed        - Single table mixed conflicts (Q1b)
-#   multi_table  - Multi-table experiments (Q2a/2b)
-#   baseline     - Baseline configs for S3/S3x/Azure
-#   metadata     - Metadata not inlined experiments
-#   ml_append    - Manifest list append experiments
-#   combined     - Combined optimizations
+#   trivial          - Single table trivial conflicts
+#   mixed            - Single table mixed conflicts
+#   multi_table      - Multi-table experiments
+#   baseline         - Baseline configs for S3/S3x/Azure/AzureX
+#   metadata         - Metadata not inlined experiments
+#   ml_append        - Manifest list append experiments
+#   combined         - Combined optimizations
+#   instant_trivial  - Instant catalog (1ms CAS), trivial conflicts
+#   instant_nontrivial - Instant catalog, non-trivial conflicts
 #
 # All groups if not specified.
 
@@ -48,7 +50,7 @@ set -e
 # ============================================================================
 PARALLEL=4
 SEEDS=3
-GROUPS=""
+EXP_GROUPS=""
 QUICK=false
 DRY_RUN=false
 STATUS=false
@@ -69,7 +71,7 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         --groups|-g)
-            GROUPS="$2"
+            EXP_GROUPS="$2"
             shift 2
             ;;
         --quick|-q)
@@ -139,8 +141,8 @@ CMD="python scripts/run_all_experiments.py"
 CMD="$CMD --parallel $PARALLEL"
 CMD="$CMD --seeds $SEEDS"
 
-if [ -n "$GROUPS" ]; then
-    CMD="$CMD --groups $GROUPS"
+if [ -n "$EXP_GROUPS" ]; then
+    CMD="$CMD --groups $EXP_GROUPS"
 fi
 
 if [ "$QUICK" = true ]; then

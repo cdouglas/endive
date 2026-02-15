@@ -1,4 +1,4 @@
-# Blog Post: Multi-Table, Non-Trivial Conflicts
+# Instant Catalog: Multi-Table, Non-Trivial Conflicts
 #
 # "Impossibly fast catalog" (1ms CAS) with real S3 storage latencies.
 # Shows multi-table transactions with non-trivial conflicts.
@@ -12,7 +12,7 @@ duration_ms = 3600000
 output_path = "results.parquet"
 
 [experiment]
-label = "blog_ntbl_nontrivial"
+label = "instant_ntbl_nontrivial"
 
 [catalog]
 num_tables = 5  # Sweep: [2, 5, 10]

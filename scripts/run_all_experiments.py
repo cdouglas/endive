@@ -92,6 +92,16 @@ EXPERIMENT_GROUPS = {
         "combined_optimizations_azure.toml",
         "combined_optimizations_azurex.toml",
     ],
+    # Instant catalog experiments (1ms CAS, real S3 storage)
+    # Shows table metadata is the bottleneck, not catalog
+    "instant_trivial": [
+        "instant_1tbl_trivial.toml",
+        "instant_ntbl_trivial.toml",
+    ],
+    "instant_nontrivial": [
+        "instant_1tbl_nontrivial.toml",
+        "instant_ntbl_nontrivial.toml",
+    ],
 }
 
 # Parameter sweeps
@@ -326,6 +336,62 @@ def generate_all_runs(groups: list, num_seeds: int, quick: bool = False) -> list
                                 seed=seed,
                                 params={"num_tables": nt, "real_conflict_probability": prob}
                             ))
+
+            elif "instant_1tbl_trivial" in config_name:
+                # Instant catalog, single table, trivial: sweep load only
+                for load in loads:
+                    for seed_num in range(1, num_seeds + 1):
+                        seed = generate_seed(nonce, base_name, {"load": load}, seed_num)
+                        runs.append(ExperimentRun(
+                            config_path=config_name,
+                            label=base_name,
+                            seed=seed,
+                            params={"inter_arrival.scale": float(load)}
+                        ))
+
+            elif "instant_1tbl_nontrivial" in config_name:
+                # Instant catalog, single table, non-trivial: sweep load x prob
+                probs = [0.0, 0.3, 1.0] if quick else [0.0, 0.1, 0.3, 0.5, 1.0]
+                for load in loads:
+                    for prob in probs:
+                        for seed_num in range(1, num_seeds + 1):
+                            seed = generate_seed(nonce, base_name, {"load": load, "prob": prob}, seed_num)
+                            runs.append(ExperimentRun(
+                                config_path=config_name,
+                                label=base_name,
+                                seed=seed,
+                                params={"inter_arrival.scale": float(load), "real_conflict_probability": prob}
+                            ))
+
+            elif "instant_ntbl_trivial" in config_name:
+                # Instant catalog, multi-table, trivial: sweep load x tables
+                tables = [1, 5, 20] if quick else [1, 2, 5, 10, 20]
+                for load in loads:
+                    for nt in tables:
+                        for seed_num in range(1, num_seeds + 1):
+                            seed = generate_seed(nonce, base_name, {"load": load, "tables": nt}, seed_num)
+                            runs.append(ExperimentRun(
+                                config_path=config_name,
+                                label=base_name,
+                                seed=seed,
+                                params={"inter_arrival.scale": float(load), "num_tables": nt}
+                            ))
+
+            elif "instant_ntbl_nontrivial" in config_name:
+                # Instant catalog, multi-table, non-trivial: sweep load x tables x prob
+                tables = [2, 10] if quick else [2, 5, 10]
+                probs = [0.0, 0.5] if quick else [0.0, 0.3, 0.5]
+                for load in loads:
+                    for nt in tables:
+                        for prob in probs:
+                            for seed_num in range(1, num_seeds + 1):
+                                seed = generate_seed(nonce, base_name, {"load": load, "tables": nt, "prob": prob}, seed_num)
+                                runs.append(ExperimentRun(
+                                    config_path=config_name,
+                                    label=base_name,
+                                    seed=seed,
+                                    params={"inter_arrival.scale": float(load), "num_tables": nt, "real_conflict_probability": prob}
+                                ))
 
             else:
                 # Optimization experiments: sweep load only
