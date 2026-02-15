@@ -46,14 +46,17 @@ python -m endive.main experiment_configs/exp2_1_single_table_false_conflicts.tom
 # With specific seed
 python -m endive.main my_config.toml --seed 42 --yes
 
-# Quick test mode (2 minutes, 1 seed, 10s duration)
-./scripts/run_baseline_experiments.sh --quick --seeds 1
+# Quick test mode (1 minute duration, fewer params)
+./scripts/run_all_experiments.sh --quick --seeds 1
 
-# Run specific experiment set (24 hours with default parallelism)
-./scripts/run_baseline_experiments.sh --exp2.1 --exp2.2 --seeds 3
+# Run specific experiment groups
+./scripts/run_all_experiments.sh --groups trivial,mixed --seeds 3
+
+# Run instant catalog experiments (1ms CAS, real S3 storage)
+./scripts/run_all_experiments.sh --groups instant_trivial,instant_nontrivial --seeds 5
 
 # Background with logging
-nohup ./scripts/run_baseline_experiments.sh --seeds 3 > baseline.log 2>&1 &
+nohup ./scripts/run_all_experiments.sh --seeds 3 > experiments.log 2>&1 &
 ```
 
 ### Analysis
@@ -83,13 +86,12 @@ docker build -t cdouglas/endive-sim:latest .
 
 # Run experiments in container
 docker run -d \
-    -e EXP_ARGS="--exp2.1 --seeds 5 --parallel 8" \
     -e DOCKER_CONTAINER=1 \
     -e OMP_NUM_THREADS=1 \
     -v $(pwd)/experiments:/app/experiments \
     -v $(pwd)/plots:/app/plots \
     cdouglas/endive-sim:latest \
-    bash -c "scripts/run_baseline_experiments.sh \${EXP_ARGS}"
+    bash -c "./scripts/run_all_experiments.sh --groups baseline,metadata --seeds 5 --parallel 8"
 
 # See docs/DOCKER.md for full details
 ```
@@ -114,10 +116,13 @@ docker run -d \
 
 **`endive/capstats.py`** - Statistics collection during simulation
 
-**`scripts/run_baseline_experiments.sh`** - Parallel experiment runner
-- Supports experiment selection (--exp2.1, --exp3.1, etc.)
-- Parameter sweeps (load levels, table counts, conflict probabilities)
+**`scripts/run_all_experiments.py`** - Unified experiment runner
+- Supports experiment groups (trivial, mixed, multi_table, baseline, metadata, ml_append, combined, instant_trivial, instant_nontrivial)
+- Parameter sweeps with deterministic seed generation (nonce-based)
+- Progress tracking, resume capability, status checking
 - Parallel execution with configurable concurrency
+
+**`scripts/run_all_experiments.sh`** - Shell wrapper for run_all_experiments.py
 
 **`scripts/regenerate_all_plots.sh`** - Batch analysis with parallel execution
 - Generates composite plots for exp3.1, exp3.3, exp3.4 (multi-line plots grouped by parameter)
@@ -192,7 +197,7 @@ python -m endive.main config.toml --seed 42  # FAILS
 seed = 42
 ```
 
-For batch experiments, use `create_config_variant()` in run_baseline_experiments.sh to generate per-seed configs.
+For batch experiments, use `run_all_experiments.py` which handles config variants and deterministic seed generation via nonce.
 
 #### 6. Consolidated Format (v2.0+)
 - Single parquet file with all experiments: `experiments/consolidated.parquet`
@@ -272,7 +277,7 @@ inter_arrival.scale = 100.0
 real_conflict_probability = 0.0
 ```
 
-2. Add to `scripts/run_baseline_experiments.sh` if doing parameter sweeps
+2. Add to `EXPERIMENT_GROUPS` in `scripts/run_all_experiments.py` if doing parameter sweeps
 
 3. Update `scripts/regenerate_all_plots.sh` to include new experiment pattern
 
@@ -352,16 +357,18 @@ python -c "import pyarrow.parquet as pq; meta = pq.read_metadata('experiments/co
 
 ## Current Experiment Coverage
 
-**Implemented Experiments:**
-- **exp2.1**: Single-table false conflicts (baseline saturation)
-- **exp2.2**: Multi-table false conflicts (scaling analysis)
-- **exp3.1**: Single-table real conflicts (conflict cost impact)
-- **exp3.2**: Manifest distribution variance (conflict resolution variance)
-- **exp3.3**: Multi-table real conflicts (interaction effects)
-- **exp3.4**: Exponential backoff with real conflicts
-- **exp4.1**: Backoff strategy comparison
+**Experiment Groups (run via `--groups`):**
+- **trivial**: Single-table trivial conflicts (baseline saturation)
+- **mixed**: Single-table with real conflicts (conflict cost impact)
+- **multi_table**: Multi-table experiments (scaling analysis)
+- **baseline**: Provider comparison (S3, S3X, Azure, AzureX)
+- **metadata**: Metadata not inlined experiments
+- **ml_append**: Manifest list append mode (ML+)
+- **combined**: All optimizations combined
+- **instant_trivial**: Instant catalog (1ms CAS), trivial conflicts
+- **instant_nontrivial**: Instant catalog, non-trivial conflicts
 
 **Plotting Approach:**
-- Composite plots with `--group-by` for parameter variations (exp2.2, exp3.1, exp3.3, exp3.4)
+- Composite plots with `--group-by` for parameter variations
 - Filtered views for multi-dimensional sweeps using separate `--filter` arguments
 - Automatic generation via `./scripts/regenerate_all_plots.sh`
