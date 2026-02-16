@@ -174,15 +174,17 @@ class TestPartitionValidation:
         assert len(errors) == 0
         assert len(warnings) == 0
 
-    def test_validation_error_on_partitions_exceeding_max(self):
-        """Test that partitions_per_txn_max > num_partitions is an error."""
+    def test_validation_warns_on_partitions_exceeding_max(self):
+        """Test that partitions_per_txn_max > num_partitions is a warning (clamped at runtime)."""
         config = {
             'catalog': {'num_tables': 1, 'num_groups': 1},
             'partition': {'enabled': True, 'num_partitions': 5, 'partitions_per_txn_max': 10},
             'simulation': {'duration_ms': 1000}
         }
         errors, warnings = validate_config(config)
-        assert any('cannot exceed num_partitions' in e for e in errors)
+        # Should be a warning, not an error (select_partitions clamps to n_partitions)
+        assert len(errors) == 0
+        assert any('will be clamped' in w for w in warnings)
 
 
 class TestPartitionConfig:

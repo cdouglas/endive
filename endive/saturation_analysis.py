@@ -353,6 +353,16 @@ def extract_key_parameters(config: Dict) -> Dict:
     if 'transaction' in config:
         params['manifest_list_mode'] = config['transaction'].get('manifest_list_mode', 'rewrite')
 
+    # Extract partition parameters
+    if 'partition' in config:
+        params['partition_enabled'] = config['partition'].get('enabled', False)
+        params['num_partitions'] = config['partition'].get('num_partitions', None)
+        if 'partitions_per_txn' in config['partition']:
+            ppt = config['partition']['partitions_per_txn']
+            if isinstance(ppt, dict):
+                params['partitions_per_txn_mean'] = ppt.get('mean', None)
+                params['partitions_per_txn_max'] = ppt.get('max', None)
+
     return params
 
 

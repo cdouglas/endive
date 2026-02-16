@@ -582,7 +582,7 @@ def validate_config(config: dict) -> tuple[list[str], list[str]]:
         if parts_max <= 0:
             errors.append(f"partition.partitions_per_txn_max must be > 0, got {parts_max}")
         if parts_max > n_partitions:
-            errors.append(f"partition.partitions_per_txn_max ({parts_max}) cannot exceed num_partitions ({n_partitions})")
+            warnings.append(f"partition.partitions_per_txn_max ({parts_max}) > num_partitions ({n_partitions}); will be clamped to {n_partitions}")
 
         # Warn about meaningless configurations
         if n_partitions == 1:
