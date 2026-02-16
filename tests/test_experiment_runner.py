@@ -488,3 +488,184 @@ num_tables = 1
             assert "num_tables = 50" in content
         finally:
             os.unlink(variant_path)
+
+
+class TestNestedTomlKeySubstitution:
+    """Test substitution of nested TOML keys like partition.num_partitions.
+
+    These are keys where the param name includes a section prefix (e.g., 'partition.num_partitions')
+    but the TOML has the key inside a section block:
+
+        [partition]
+        num_partitions = 10
+
+    NOT as a flat dotted key like inter_arrival.scale.
+    """
+
+    def test_nested_section_key_substitution(self, tmp_path):
+        """Keys with section prefix should substitute within the section block."""
+        base_config = tmp_path / "test.toml"
+        base_config.write_text("""
+[simulation]
+duration_ms = 3600000
+
+[partition]
+enabled = true
+num_partitions = 10
+
+[transaction]
+retry = 5
+""")
+
+        variant_path = create_config_variant(
+            base_config,
+            params={"partition.num_partitions": 100},
+            seed=42
+        )
+
+        try:
+            content = Path(variant_path).read_text()
+            # Should have new value
+            assert "num_partitions = 100" in content
+            # Should NOT have old value (check for exact match with newline)
+            assert "num_partitions = 10\n" not in content
+            # Other sections should be unchanged
+            assert "enabled = true" in content
+            assert "retry = 5" in content
+        finally:
+            os.unlink(variant_path)
+
+    def test_nested_key_with_flat_key_in_same_config(self, tmp_path):
+        """Both nested section keys and flat dotted keys should work together."""
+        base_config = tmp_path / "test.toml"
+        base_config.write_text("""
+[simulation]
+duration_ms = 3600000
+
+[partition]
+enabled = true
+num_partitions = 10
+
+[transaction]
+inter_arrival.distribution = "exponential"
+inter_arrival.scale = 100.0
+""")
+
+        variant_path = create_config_variant(
+            base_config,
+            params={
+                "partition.num_partitions": 50,  # Nested section key
+                "inter_arrival.scale": 200.0,    # Flat dotted key
+            },
+            seed=123
+        )
+
+        try:
+            content = Path(variant_path).read_text()
+            # Nested key substituted
+            assert "num_partitions = 50" in content
+            assert "num_partitions = 10" not in content
+            # Flat key substituted
+            assert "inter_arrival.scale = 200.0" in content
+            assert "inter_arrival.scale = 100.0" not in content
+        finally:
+            os.unlink(variant_path)
+
+    def test_multiple_nested_section_keys(self, tmp_path):
+        """Multiple keys in same section should all be substitutable."""
+        base_config = tmp_path / "test.toml"
+        base_config.write_text("""
+[partition]
+enabled = true
+num_partitions = 10
+
+[partition.selection]
+distribution = "uniform"
+
+[partition.partitions_per_txn]
+mean = 3.0
+max = 10
+""")
+
+        variant_path = create_config_variant(
+            base_config,
+            params={
+                "partition.num_partitions": 100,
+            },
+            seed=1
+        )
+
+        try:
+            content = Path(variant_path).read_text()
+            assert "num_partitions = 100" in content
+            # Other partition settings unchanged
+            assert "enabled = true" in content
+        finally:
+            os.unlink(variant_path)
+
+    def test_nested_key_preserves_section_structure(self, tmp_path):
+        """Substitution should preserve TOML section structure."""
+        base_config = tmp_path / "test.toml"
+        base_config.write_text("""
+[simulation]
+duration_ms = 1000
+
+[partition]
+enabled = true
+num_partitions = 5
+# Comment about partitions
+
+[storage]
+provider = "s3"
+""")
+
+        variant_path = create_config_variant(
+            base_config,
+            params={"partition.num_partitions": 25},
+            seed=1
+        )
+
+        try:
+            content = Path(variant_path).read_text()
+            # Should have new value
+            assert "num_partitions = 25" in content
+            # Comment should be preserved
+            assert "# Comment about partitions" in content
+            # Sections should be in order
+            sim_pos = content.find("[simulation]")
+            part_pos = content.find("[partition]")
+            stor_pos = content.find("[storage]")
+            assert sim_pos < part_pos < stor_pos
+        finally:
+            os.unlink(variant_path)
+
+    def test_real_partition_scaling_config(self):
+        """Test with real partition scaling config if it exists."""
+        config_path = CONFIG_DIR / "instant_partition_scaling.toml"
+        if not config_path.exists():
+            pytest.skip("Partition scaling config not found")
+
+        variant_path = create_config_variant(
+            config_path,
+            params={
+                "partition.num_partitions": 42,
+                "inter_arrival.scale": 999.0,
+            },
+            seed=12345
+        )
+
+        try:
+            import tomli
+            with open(variant_path, "rb") as f:
+                data = tomli.load(f)
+
+            # Check partition.num_partitions was substituted
+            assert data["partition"]["num_partitions"] == 42
+
+            # Check inter_arrival.scale was substituted
+            assert data["transaction"]["inter_arrival"]["scale"] == 999.0
+
+            # Check seed was injected
+            assert data["simulation"]["seed"] == 12345
+        finally:
+            os.unlink(variant_path)
