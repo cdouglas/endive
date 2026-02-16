@@ -204,7 +204,15 @@ def get_or_create_nonce() -> str:
 
 def create_config_variant(base_config: Path, params: dict, seed: int,
                           duration_ms: Optional[int] = None) -> Path:
-    """Create a temporary config file with modified parameters."""
+    """Create a temporary config file with modified parameters.
+
+    Supports both flat keys (inter_arrival.scale) and nested keys (partition.num_partitions).
+    For nested keys like 'partition.num_partitions', looks for 'num_partitions' within
+    the [partition] section.
+    """
+    import re
+    import tomllib
+
     content = base_config.read_text()
 
     # Add seed after [simulation]
@@ -213,17 +221,40 @@ def create_config_variant(base_config: Path, params: dict, seed: int,
 
     # Override duration if specified
     if duration_ms:
-        import re
         content = re.sub(r'duration_ms\s*=\s*\d+', f'duration_ms = {duration_ms}', content)
 
     # Apply parameter overrides
-    import re
     for key, value in params.items():
-        # Escape key for regex (handles dots in key names like inter_arrival.scale)
-        escaped_key = re.escape(key)
-        pattern = rf'^{escaped_key}\s*=\s*.*$'
-        replacement = f'{key} = {value}'
-        content = re.sub(pattern, replacement, content, flags=re.MULTILINE)
+        if '.' in key:
+            # Handle nested keys like "partition.num_partitions"
+            parts = key.split('.')
+            if len(parts) == 2:
+                section, param = parts
+                # Look for param within [section] block
+                # Match: [section] ... param = value (before next section or EOF)
+                section_pattern = rf'(\[{re.escape(section)}\][^\[]*?)({re.escape(param)}\s*=\s*)[^\n]+'
+                replacement = rf'\g<1>\g<2>{value}'
+                new_content = re.sub(section_pattern, replacement, content, flags=re.DOTALL)
+                if new_content != content:
+                    content = new_content
+                else:
+                    # Fallback: try flat key pattern
+                    escaped_key = re.escape(key)
+                    pattern = rf'^{escaped_key}\s*=\s*.*$'
+                    replacement = f'{key} = {value}'
+                    content = re.sub(pattern, replacement, content, flags=re.MULTILINE)
+            else:
+                # More than 2 levels not supported, try flat
+                escaped_key = re.escape(key)
+                pattern = rf'^{escaped_key}\s*=\s*.*$'
+                replacement = f'{key} = {value}'
+                content = re.sub(pattern, replacement, content, flags=re.MULTILINE)
+        else:
+            # Flat key
+            escaped_key = re.escape(key)
+            pattern = rf'^{escaped_key}\s*=\s*.*$'
+            replacement = f'{key} = {value}'
+            content = re.sub(pattern, replacement, content, flags=re.MULTILINE)
 
     # Write to temp file
     fd, path = tempfile.mkstemp(suffix='.toml')
