@@ -13,6 +13,9 @@ from endive.main import (
     Txn,
     select_partitions,
     validate_config,
+    get_table_metadata_size,
+    get_table_metadata_latency,
+    ConflictResolver,
 )
 from endive.capstats import Stats, truncated_zipf_pmf
 import endive.main
@@ -569,5 +572,327 @@ class TestPartitionSimulation:
                 assert len(df) > 0
                 committed = df[df['status'] == 'committed']
                 assert len(committed) > 0
+            finally:
+                os.unlink(config_path)
+
+
+class TestTableMetadataScaling:
+    """Test that table metadata size/latency scales with partition count."""
+
+    def test_metadata_size_scales_with_partitions(self):
+        """Test that get_table_metadata_size() returns larger size with more partitions."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Configure with partitions enabled
+            output_path = os.path.join(tmpdir, "results.parquet")
+            config_path = create_partition_test_config(
+                output_path,
+                seed=42,
+                partition_enabled=True,
+                num_partitions=100,
+            )
+            try:
+                configure_from_toml(config_path)
+
+                # Get size with 100 partitions
+                size_100 = get_table_metadata_size()
+
+                # Change to 1000 partitions
+                endive.main.N_PARTITIONS = 1000
+                size_1000 = get_table_metadata_size()
+
+                # Size should scale with partition count
+                # With 100 bytes per partition entry:
+                # 1000 partitions adds 100KB vs 100 partitions adds 10KB
+                assert size_1000 > size_100, (
+                    f"Size with 1000 partitions ({size_1000}) should be larger than "
+                    f"size with 100 partitions ({size_100})"
+                )
+
+                # The difference should be approximately 900 * PARTITION_METADATA_ENTRY_SIZE
+                expected_diff = 900 * endive.main.PARTITION_METADATA_ENTRY_SIZE
+                actual_diff = size_1000 - size_100
+                assert abs(actual_diff - expected_diff) < 100, (
+                    f"Size difference ({actual_diff}) should be ~{expected_diff}"
+                )
+            finally:
+                os.unlink(config_path)
+
+    def test_metadata_size_unchanged_when_partitions_disabled(self):
+        """Test that metadata size is base size when partitions disabled."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = os.path.join(tmpdir, "results.parquet")
+            config_path = create_partition_test_config(
+                output_path,
+                seed=42,
+                partition_enabled=False,
+            )
+            try:
+                configure_from_toml(config_path)
+
+                size = get_table_metadata_size()
+
+                # Should equal base size (no partition overhead)
+                assert size == endive.main.TABLE_METADATA_SIZE_BYTES, (
+                    f"Size ({size}) should equal base size "
+                    f"({endive.main.TABLE_METADATA_SIZE_BYTES}) when partitions disabled"
+                )
+            finally:
+                os.unlink(config_path)
+
+    def test_metadata_latency_increases_with_partitions(self):
+        """Test that metadata latency increases with more partitions when using size-based PUT."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = os.path.join(tmpdir, "results.parquet")
+            config_path = create_partition_test_config(
+                output_path,
+                seed=42,
+                partition_enabled=True,
+                num_partitions=10,
+            )
+            try:
+                configure_from_toml(config_path)
+
+                # Enable size-based PUT latency model (required for size-dependent latency)
+                endive.main.T_PUT = {
+                    'base_latency_ms': 30.0,
+                    'latency_per_mib_ms': 20.0,
+                    'sigma': 0.0,  # No variance for deterministic comparison
+                }
+                np.random.seed(42)
+
+                # Sample latencies with 10 partitions
+                latencies_10 = [get_table_metadata_latency('read') for _ in range(100)]
+                mean_10 = np.mean(latencies_10)
+
+                # Change to 1000 partitions (100x more)
+                endive.main.N_PARTITIONS = 1000
+                np.random.seed(42)
+
+                latencies_1000 = [get_table_metadata_latency('read') for _ in range(100)]
+                mean_1000 = np.mean(latencies_1000)
+
+                # Mean latency should be higher with more partitions
+                # 1000 partitions adds ~100KB, 10 partitions adds ~1KB
+                # With 20ms per MiB, difference should be noticeable
+                assert mean_1000 > mean_10, (
+                    f"Mean latency with 1000 partitions ({mean_1000:.2f}ms) should be "
+                    f"greater than with 10 partitions ({mean_10:.2f}ms)"
+                )
+            finally:
+                os.unlink(config_path)
+
+
+class TestPartitionConflictResolution:
+    """Test that conflict resolution only touches conflicting partitions."""
+
+    def test_get_conflicting_partitions_returns_only_changed(self):
+        """Test that get_conflicting_partitions returns only modified partitions."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = os.path.join(tmpdir, "results.parquet")
+            config_path = create_partition_test_config(
+                output_path,
+                seed=42,
+                partition_enabled=True,
+                num_partitions=100,
+                num_tables=1,
+            )
+            try:
+                configure_from_toml(config_path)
+                sim = simpy.Environment()
+                catalog = Catalog(sim)
+
+                # Commit a transaction that modifies partition 5
+                txn1 = Txn(
+                    id=1,
+                    t_submit=0,
+                    t_runtime=100,
+                    v_catalog_seq=0,
+                    v_tblr={0: 0},
+                    v_tblw={0: 1},
+                )
+                txn1.partitions_read = {0: {5, 6, 7}}
+                txn1.partitions_written = {0: {5}}
+                txn1.v_partition_seq = {0: {5: 0, 6: 0, 7: 0}}
+                catalog.try_CAS(sim, txn1)
+
+                # Transaction that read partition 5 with stale version
+                txn2 = Txn(
+                    id=2,
+                    t_submit=50,
+                    t_runtime=100,
+                    v_catalog_seq=0,
+                    v_tblr={0: 0},
+                    v_tblw={0: 1},
+                )
+                txn2.partitions_read = {0: {5, 10, 20}}  # Partition 5 is stale
+                txn2.partitions_written = {0: {10}}
+                txn2.v_partition_seq = {0: {5: 0, 10: 0, 20: 0}}  # Stale version for 5
+
+                # Get conflicting partitions
+                conflicting = catalog.get_conflicting_partitions(txn2)
+
+                # Only partition 5 should be in conflict (table 0)
+                assert 0 in conflicting, "Table 0 should have conflicts"
+                assert 5 in conflicting[0], "Partition 5 should be in conflict"
+                assert 10 not in conflicting[0], "Partition 10 should NOT be in conflict"
+                assert 20 not in conflicting[0], "Partition 20 should NOT be in conflict"
+                assert len(conflicting[0]) == 1, "Only 1 partition should be in conflict"
+            finally:
+                os.unlink(config_path)
+
+    def test_conflict_resolution_stats_track_partition_conflicts(self):
+        """Test that conflict resolution updates stats correctly for partitions."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = os.path.join(tmpdir, "results.parquet")
+            config_path = create_partition_test_config(
+                output_path,
+                seed=42,
+                duration_ms=10000,
+                partition_enabled=True,
+                num_partitions=10,  # Few partitions = more conflicts
+                inter_arrival_scale=100.0,  # High load
+                real_conflict_probability=0.0,  # All false conflicts
+            )
+            try:
+                # Reset stats
+                endive.main.STATS = Stats()
+
+                df = run_simulation_from_config(config_path)
+
+                # Should have recorded some conflicts
+                stats = endive.main.STATS
+                total_conflicts = stats.false_conflicts + stats.real_conflicts
+
+                assert total_conflicts > 0, "Should have some conflicts with high load"
+                assert stats.real_conflicts == 0, "All conflicts should be false (prob=0)"
+            finally:
+                os.unlink(config_path)
+
+    def test_multi_partition_conflict_resolves_each_independently(self):
+        """Test that conflicts on multiple partitions are each resolved."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = os.path.join(tmpdir, "results.parquet")
+            config_path = create_partition_test_config(
+                output_path,
+                seed=42,
+                partition_enabled=True,
+                num_partitions=100,
+                num_tables=1,
+            )
+            try:
+                configure_from_toml(config_path)
+                sim = simpy.Environment()
+                catalog = Catalog(sim)
+
+                # Commit transactions that modify partitions 1, 2, 3
+                for p in [1, 2, 3]:
+                    txn = Txn(
+                        id=p,
+                        t_submit=0,
+                        t_runtime=100,
+                        v_catalog_seq=catalog.seq,
+                        v_tblr={0: 0},
+                        v_tblw={0: 1},
+                    )
+                    txn.partitions_read = {0: {p}}
+                    txn.partitions_written = {0: {p}}
+                    txn.v_partition_seq = {0: {p: catalog.partition_seq[0][p]}}
+                    assert catalog.try_CAS(sim, txn), f"Txn for partition {p} should succeed"
+
+                # Transaction that has stale versions for all three partitions
+                txn_stale = Txn(
+                    id=100,
+                    t_submit=0,
+                    t_runtime=100,
+                    v_catalog_seq=0,
+                    v_tblr={0: 0},
+                    v_tblw={0: 1},
+                )
+                txn_stale.partitions_read = {0: {1, 2, 3, 50}}  # 50 is not in conflict
+                txn_stale.partitions_written = {0: {1}}
+                txn_stale.v_partition_seq = {0: {1: 0, 2: 0, 3: 0, 50: 0}}  # All stale
+
+                conflicting = catalog.get_conflicting_partitions(txn_stale)
+
+                # Should have 3 conflicting partitions
+                assert len(conflicting[0]) == 3, (
+                    f"Expected 3 conflicting partitions, got {len(conflicting[0])}"
+                )
+                assert conflicting[0] == {1, 2, 3}, (
+                    f"Expected partitions {{1, 2, 3}}, got {conflicting[0]}"
+                )
+            finally:
+                os.unlink(config_path)
+
+
+class TestPartitionMetadataOverhead:
+    """Test the O(N) metadata overhead at high partition counts."""
+
+    def test_high_partition_count_increases_overhead(self):
+        """Test that very high partition counts add measurable overhead."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = os.path.join(tmpdir, "results.parquet")
+
+            # Test with low partition count
+            config_path_low = create_partition_test_config(
+                output_path,
+                seed=42,
+                partition_enabled=True,
+                num_partitions=10,
+            )
+            configure_from_toml(config_path_low)
+            size_low = get_table_metadata_size()
+            os.unlink(config_path_low)
+
+            # Test with high partition count
+            config_path_high = create_partition_test_config(
+                output_path,
+                seed=42,
+                partition_enabled=True,
+                num_partitions=10000,  # Very high
+                partitions_per_txn_mean=2.0,
+                partitions_per_txn_max=5,
+            )
+            configure_from_toml(config_path_high)
+            size_high = get_table_metadata_size()
+            os.unlink(config_path_high)
+
+            # High partition count should add significant overhead
+            # 10000 partitions * 100 bytes = 1MB overhead
+            # 10 partitions * 100 bytes = 1KB overhead
+            # But base size (10KB) is included, so ratio is:
+            # (10KB + 1MB) / (10KB + 1KB) = ~90x
+            ratio = size_high / size_low
+            assert ratio > 50, (
+                f"Size ratio ({ratio:.1f}x) should be >50x for 1000x more partitions"
+            )
+
+            # Also verify the absolute overhead is correct
+            # 10000 partitions = 1MB overhead
+            partition_overhead = size_high - endive.main.TABLE_METADATA_SIZE_BYTES
+            expected_overhead = 10000 * endive.main.PARTITION_METADATA_ENTRY_SIZE
+            assert partition_overhead == expected_overhead, (
+                f"Partition overhead ({partition_overhead}) should equal "
+                f"10000 * {endive.main.PARTITION_METADATA_ENTRY_SIZE} = {expected_overhead}"
+            )
+
+    def test_partition_overhead_documented_in_config(self):
+        """Test that PARTITION_METADATA_ENTRY_SIZE is configurable."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = os.path.join(tmpdir, "results.parquet")
+            config_path = create_partition_test_config(
+                output_path,
+                seed=42,
+                partition_enabled=True,
+                num_partitions=100,
+            )
+            try:
+                configure_from_toml(config_path)
+
+                # Default should be 100 bytes
+                assert endive.main.PARTITION_METADATA_ENTRY_SIZE == 100, (
+                    f"Default PARTITION_METADATA_ENTRY_SIZE should be 100, "
+                    f"got {endive.main.PARTITION_METADATA_ENTRY_SIZE}"
+                )
             finally:
                 os.unlink(config_path)
