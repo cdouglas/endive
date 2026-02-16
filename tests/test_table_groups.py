@@ -7,7 +7,8 @@ import pandas as pd
 import numpy as np
 from pathlib import Path
 
-from endive.main import configure_from_toml, partition_tables_into_groups
+from endive.main import configure_from_toml
+from endive.utils import partition_tables_into_groups
 import endive.main
 from endive.capstats import Stats
 import simpy

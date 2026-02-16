@@ -14,7 +14,8 @@ import shutil
 from pathlib import Path
 import tomllib
 
-from endive.main import check_existing_experiment, compute_experiment_hash, prepare_experiment_output
+from endive.main import check_existing_experiment, prepare_experiment_output
+from endive.config import compute_experiment_hash
 from endive.test_utils import create_test_config
 
 

@@ -12,11 +12,11 @@ from endive.main import (
     Catalog,
     Txn,
     select_partitions,
-    validate_config,
     get_table_metadata_size,
     get_table_metadata_latency,
     ConflictResolver,
 )
+from endive.config import validate_config
 from endive.capstats import Stats, truncated_zipf_pmf
 import endive.main
 
