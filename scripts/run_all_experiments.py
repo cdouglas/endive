@@ -105,7 +105,8 @@ EXPERIMENT_GROUPS = {
 }
 
 # Parameter sweeps
-LOAD_SWEEP = [10, 20, 50, 100, 200, 500, 1000, 2000, 5000]
+# Note: scale=10ms excluded - system saturates completely and can't make progress
+LOAD_SWEEP = [20, 50, 100, 200, 500, 1000, 2000, 5000]
 CONFLICT_PROB_SWEEP = [0.0, 0.1, 0.2, 0.3, 0.5, 0.7, 1.0]
 NUM_TABLES_SWEEP = [1, 2, 5, 10, 20, 50]
 NUM_TABLES_MIXED_SWEEP = [2, 5, 10, 20]
