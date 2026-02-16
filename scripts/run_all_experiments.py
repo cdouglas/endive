@@ -102,6 +102,14 @@ EXPERIMENT_GROUPS = {
         "instant_1tbl_nontrivial.toml",
         "instant_ntbl_nontrivial.toml",
     ],
+    # Partition scaling experiments
+    # Shows how partitioning breaks single-table bottleneck
+    "partition_scaling": [
+        "instant_partition_scaling.toml",
+    ],
+    "partition_vs_tables": [
+        "instant_partition_vs_tables.toml",
+    ],
 }
 
 # Parameter sweeps
@@ -111,6 +119,8 @@ CONFLICT_PROB_SWEEP = [0.0, 0.1, 0.2, 0.3, 0.5, 0.7, 1.0]
 NUM_TABLES_SWEEP = [1, 2, 5, 10, 20, 50]
 NUM_TABLES_MIXED_SWEEP = [2, 5, 10, 20]
 CONFLICT_PROB_MIXED_SWEEP = [0.0, 0.1, 0.3, 0.5]
+NUM_PARTITIONS_SWEEP = [1, 5, 10, 25, 50, 100]
+NUM_PARTITIONS_COMPARE_SWEEP = [2, 5, 10, 20]  # Match num_tables for comparison
 
 # Quick mode parameters
 QUICK_LOADS = [100, 500, 2000]
@@ -393,6 +403,34 @@ def generate_all_runs(groups: list, num_seeds: int, quick: bool = False) -> list
                                     seed=seed,
                                     params={"inter_arrival.scale": float(load), "num_tables": nt, "real_conflict_probability": prob}
                                 ))
+
+            elif "instant_partition_scaling" in config_name:
+                # Partition scaling: sweep load x num_partitions
+                partitions = [1, 10, 100] if quick else NUM_PARTITIONS_SWEEP
+                for load in loads:
+                    for np in partitions:
+                        for seed_num in range(1, num_seeds + 1):
+                            seed = generate_seed(nonce, base_name, {"load": load, "partitions": np}, seed_num)
+                            runs.append(ExperimentRun(
+                                config_path=config_name,
+                                label=base_name,
+                                seed=seed,
+                                params={"inter_arrival.scale": float(load), "partition.num_partitions": np}
+                            ))
+
+            elif "instant_partition_vs_tables" in config_name:
+                # Partition vs tables comparison: sweep load x num_partitions (matching table counts)
+                partitions = [2, 10] if quick else NUM_PARTITIONS_COMPARE_SWEEP
+                for load in loads:
+                    for np in partitions:
+                        for seed_num in range(1, num_seeds + 1):
+                            seed = generate_seed(nonce, base_name, {"load": load, "partitions": np}, seed_num)
+                            runs.append(ExperimentRun(
+                                config_path=config_name,
+                                label=base_name,
+                                seed=seed,
+                                params={"inter_arrival.scale": float(load), "partition.num_partitions": np}
+                            ))
 
             else:
                 # Optimization experiments: sweep load only

@@ -135,6 +135,7 @@ PARTITIONS_PER_TXN_MAX: int  # Maximum partitions per transaction
 # latency = base_latency + size_mib * latency_per_mib + lognormal_noise
 T_PUT: dict  # {'base_latency_ms': float, 'latency_per_mib_ms': float, 'sigma': float}
 TABLE_METADATA_SIZE_BYTES: int  # Size of table metadata JSON file (~1-10 KB)
+PARTITION_METADATA_ENTRY_SIZE: int  # Bytes per partition in table metadata (~100 bytes)
 
 STATS = Stats()
 
@@ -761,7 +762,7 @@ def configure_from_toml(config_file: str):
     global LATENCY_DISTRIBUTION
     global STORAGE_PROVIDER, CATALOG_BACKEND
     global CONTENTION_SCALING_ENABLED, CATALOG_CONTENTION_SCALING
-    global T_PUT, TABLE_METADATA_SIZE_BYTES
+    global T_PUT, TABLE_METADATA_SIZE_BYTES, PARTITION_METADATA_ENTRY_SIZE
     global PARTITION_ENABLED, N_PARTITIONS, PARTITION_SELECTION_DIST, PARTITION_ZIPF_ALPHA
     global PARTITIONS_PER_TXN_MEAN, PARTITIONS_PER_TXN_MAX
 
@@ -1057,6 +1058,11 @@ def configure_from_toml(config_file: str):
     # TABLE_METADATA_SIZE_BYTES: Size of table metadata JSON file
     # Typical sizes: 1-10 KB for simple tables, up to 100 KB for complex schemas
     TABLE_METADATA_SIZE_BYTES = storage_cfg.get('table_metadata_size_bytes', 10 * 1024)  # Default 10 KB
+
+    # PARTITION_METADATA_ENTRY_SIZE: Additional bytes per partition in table metadata
+    # When partition.enabled=true, table metadata tracks N partition ML pointers
+    # Typical: ~100-200 bytes per partition (pointer, offset, stats)
+    PARTITION_METADATA_ENTRY_SIZE = storage_cfg.get('partition_metadata_entry_size', 100)
 
     # NOTE: Table partitioning is done in CLI after seed is set for determinism
 
@@ -1397,11 +1403,31 @@ def get_put_latency(size_bytes: int) -> float:
     return max(latency, MIN_LATENCY)
 
 
+def get_table_metadata_size() -> int:
+    """Get table metadata size in bytes, accounting for partitions.
+
+    When partition mode is enabled, table metadata must track N partition
+    manifest list pointers, adding O(N) overhead to metadata size.
+
+    Returns:
+        Size in bytes.
+    """
+    base_size = TABLE_METADATA_SIZE_BYTES
+    if PARTITION_ENABLED:
+        # Each partition adds an entry (ML pointer, offset, stats)
+        partition_overhead = N_PARTITIONS * PARTITION_METADATA_ENTRY_SIZE
+        return base_size + partition_overhead
+    return base_size
+
+
 def get_table_metadata_latency(operation: str) -> float:
     """Get table metadata read/write latency based on file size.
 
     For writes, uses the size-based PUT latency model.
     For reads, uses the same model (GET latency similar to PUT for small files).
+
+    When partition mode is enabled, metadata size scales with N_PARTITIONS,
+    creating an O(N) bottleneck even when only M partitions conflict.
 
     Args:
         operation: "read" or "write"
@@ -1409,11 +1435,13 @@ def get_table_metadata_latency(operation: str) -> float:
     Returns:
         Latency in milliseconds.
     """
+    metadata_size = get_table_metadata_size()
+
     if T_PUT is not None:
         # Use size-based PUT latency
-        return get_put_latency(TABLE_METADATA_SIZE_BYTES)
+        return get_put_latency(metadata_size)
     else:
-        # Fallback to legacy config
+        # Fallback to legacy config (doesn't account for partition scaling)
         if operation == 'read':
             return generate_latency_from_config(T_TABLE_METADATA_R)
         else:
@@ -2664,6 +2692,11 @@ def txn_commit(sim, txn, catalog):
             v_catalog = dict()
             for t in txn.v_dirty.keys():
                 v_catalog[t] = catalog.tbl[t]
+
+            # Read table metadata to discover partition states
+            # Cost scales with N_PARTITIONS (O(N) bottleneck even for M conflicts)
+            if not TABLE_METADATA_INLINED:
+                yield sim.timeout(get_table_metadata_latency('read'))
 
             # Resolve per-partition conflicts (handles reading partition MLs)
             yield from resolver.merge_partition_conflicts(sim, txn, catalog)
