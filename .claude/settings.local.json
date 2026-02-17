@@ -59,7 +59,14 @@
       "Bash(/home/chris/work/endive/bin/pytest:*)",
       "Bash(/home/chris/work/endive/bin/python -m pytest:*)",
       "Bash(git add:*)",
-      "Bash(git commit:*)"
+      "Bash(git commit:*)",
+      "Bash(for d in /home/chris/work/catalog/endive/experiments/instant_partition_scaling-*/)",
+      "Bash(do grep 'num_partitions' \"$d/cfg.toml\")",
+      "Bash(do grep 'inter_arrival.scale' \"$d/cfg.toml\")",
+      "Bash(do ls \"$d\")",
+      "Bash(do grep '^num_partitions' \"$d/cfg.toml\")",
+      "Bash(do grep '^inter_arrival.scale' \"$d/cfg.toml\")",
+      "Bash(for:*)"
     ],
     "deny": [],
     "ask": []
