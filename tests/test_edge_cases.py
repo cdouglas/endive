@@ -198,9 +198,10 @@ class TestExtremeLoad:
 
                 abort_rate = len(aborted) / len(df) * 100
 
-                # Expect very high abort rate (>40%)
-                # Note: Actual observed rates around 45% with these parameters
-                assert abort_rate > 40, \
+                # Expect high abort rate (>30%)
+                # Note: With proper catalog read latency after conflict resolution,
+                # transactions are more spread out, reducing abort rate slightly
+                assert abort_rate > 30, \
                     f"Extreme load should cause high abort rate, got {abort_rate:.1f}%"
 
                 # Committed transactions should have some retries

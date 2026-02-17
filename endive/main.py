@@ -1970,6 +1970,16 @@ def txn_commit(sim, txn, catalog):
             # Resolve per-partition conflicts (handles reading partition MLs)
             yield from resolver.merge_partition_conflicts(sim, txn, catalog)
 
+            # Read current catalog state for retry
+            # This is a separate round-trip to get the latest partition versions
+            # Without this latency, information would "teleport" from catalog to client
+            yield sim.timeout(get_cas_latency())
+
+            # Now capture the current state (after the read completes)
+            txn.v_catalog_seq = catalog.seq
+            for t in txn.v_dirty.keys():
+                v_catalog[t] = catalog.tbl[t]
+
             # Update partition state for retry
             resolver.update_partition_state(txn, catalog)
             resolver.update_write_set(txn, v_catalog)
@@ -1992,6 +2002,16 @@ def txn_commit(sim, txn, catalog):
             # Merge conflicts for affected tables
             # In ML+ mode, catalog is needed to re-append on real conflicts
             yield from resolver.merge_table_conflicts(sim, txn, v_catalog, catalog)
+
+            # Read current catalog state for retry
+            # This is a separate round-trip to get the latest table versions
+            # Without this latency, information would "teleport" from catalog to client
+            yield sim.timeout(get_cas_latency())
+
+            # Re-capture catalog state after the read completes
+            txn.v_catalog_seq = catalog.seq
+            for t in txn.v_dirty.keys():
+                v_catalog[t] = catalog.tbl[t]
 
             # Update write set to the next available version per table
             resolver.update_write_set(txn, v_catalog)
@@ -2080,6 +2100,15 @@ def txn_commit_append(sim, txn, catalog: AppendCatalog):
         # - False conflict: ML entry still valid, no ML update needed
         # - Real conflict: ML entry needs update, re-append with merged data
         yield from resolver.merge_table_conflicts(sim, txn, v_catalog, catalog)
+
+        # Read current catalog state for retry
+        # This is a separate round-trip to get the latest table versions
+        yield sim.timeout(get_cas_latency())
+
+        # Re-capture catalog state after the read completes
+        txn.v_log_offset = catalog.log_offset
+        for t in txn.v_dirty.keys():
+            v_catalog[t] = catalog.tbl[t]
 
         # Update write set to next version
         resolver.update_write_set(txn, v_catalog)
