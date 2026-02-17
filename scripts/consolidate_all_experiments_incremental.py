@@ -4,9 +4,12 @@ Memory-efficient consolidation using incremental PyArrow writing.
 
 This version processes experiments in batches and appends to the Parquet file
 incrementally, avoiding memory exhaustion.
+
+Includes optional verification to validate consolidated data matches originals.
 """
 
 import argparse
+import random
 import sys
 from pathlib import Path
 from typing import List, Tuple
@@ -209,6 +212,132 @@ def consolidate_incremental(
         return False
 
 
+def verify_dataframes_match(original_df: pd.DataFrame, consolidated_df: pd.DataFrame,
+                            exp_name: str, exp_hash: str, seed: int) -> bool:
+    """Compare two dataframes and return True if they match."""
+    # Compare shapes
+    if original_df.shape != consolidated_df.shape:
+        print(f"  ❌ {exp_name}-{exp_hash}/{seed}: Shape mismatch: "
+              f"original {original_df.shape} vs consolidated {consolidated_df.shape}")
+        return False
+
+    # Compare values column by column
+    for col in original_df.columns:
+        if col not in consolidated_df.columns:
+            print(f"  ❌ {exp_name}-{exp_hash}/{seed}: Column '{col}' missing in consolidated")
+            return False
+
+        if not original_df[col].equals(consolidated_df[col]):
+            if pd.api.types.is_numeric_dtype(original_df[col]):
+                if not (original_df[col] == consolidated_df[col]).all():
+                    diffs = (original_df[col] != consolidated_df[col]).sum()
+                    print(f"  ❌ {exp_name}-{exp_hash}/{seed}: Column '{col}' has {diffs} differences")
+                    return False
+            else:
+                print(f"  ❌ {exp_name}-{exp_hash}/{seed}: Column '{col}' values don't match")
+                return False
+
+    return True
+
+
+def verify_consolidation(
+    consolidated_path: str,
+    base_dir: str = 'experiments',
+    sample_size: int = 20
+) -> Tuple[int, int]:
+    """
+    Verify consolidated data matches original files.
+
+    Uses predicate pushdown to efficiently seek within consolidated file.
+
+    Returns:
+        Tuple of (passed, failed) counts
+    """
+    print("\n" + "-" * 80)
+    print("PHASE 3: Verification")
+    print("-" * 80)
+
+    # Find all results.parquet files
+    all_files = list(Path(base_dir).glob('*-*/[0-9]*/results.parquet'))
+    if not all_files:
+        print("No result files found to verify")
+        return 0, 0
+
+    # Sample files to verify
+    files_to_verify = random.sample(all_files, min(sample_size, len(all_files)))
+    print(f"\nVerifying random sample of {len(files_to_verify)} / {len(all_files)} files...")
+
+    passed = 0
+    failed = 0
+
+    for file_path in tqdm(files_to_verify, desc="Verifying", unit="file"):
+        # Extract metadata from path
+        seed_dir = file_path.parent
+        exp_dir = seed_dir.parent
+        seed = int(seed_dir.name)
+        dir_name = exp_dir.name
+
+        if '-' not in dir_name:
+            continue
+
+        exp_name, exp_hash = dir_name.rsplit('-', 1)
+
+        try:
+            # Load original and sort by t_submit
+            original_df = pd.read_parquet(file_path)
+            original_df = original_df.sort_values('t_submit').reset_index(drop=True)
+
+            # Normalize schema to match consolidated
+            time_cols = ['t_commit', 'commit_latency', 'total_latency']
+            for col in time_cols:
+                if col in original_df.columns and original_df[col].dtype == 'float64':
+                    original_df[col] = original_df[col].round().astype('int64')
+
+            count_cols = ['n_retries', 'n_tables_read', 'n_tables_written']
+            for col in count_cols:
+                if col in original_df.columns and original_df[col].dtype == 'int64':
+                    if original_df[col].min() >= -128 and original_df[col].max() <= 127:
+                        original_df[col] = original_df[col].astype('int8')
+
+            # Load matching slice from consolidated using predicate pushdown
+            consolidated_df = pd.read_parquet(
+                consolidated_path,
+                filters=[
+                    ('exp_name', '==', exp_name),
+                    ('exp_hash', '==', exp_hash),
+                    ('seed', '==', seed)
+                ]
+            )
+
+            if len(consolidated_df) == 0:
+                tqdm.write(f"  ❌ {exp_name}-{exp_hash}/{seed}: Not found in consolidated")
+                failed += 1
+                continue
+
+            # Drop metadata columns and reset index
+            consolidated_df = consolidated_df.drop(columns=['exp_name', 'exp_hash', 'seed', 'config'])
+            consolidated_df = consolidated_df.reset_index(drop=True)
+
+            # Compare
+            if verify_dataframes_match(original_df, consolidated_df, exp_name, exp_hash, seed):
+                passed += 1
+            else:
+                failed += 1
+
+        except Exception as e:
+            tqdm.write(f"  ❌ {exp_name}-{exp_hash}/{seed}: Error - {e}")
+            failed += 1
+
+    # Summary
+    print(f"\nVerification: {passed} passed, {failed} failed")
+    if failed == 0:
+        print("✓ All sampled files match consolidated data")
+    else:
+        print("❌ Some files failed verification")
+
+    return passed, failed
+
+
 def main():
     parser = argparse.ArgumentParser(description='Memory-efficient consolidation')
     parser.add_argument('--base-dir', default='experiments')
@@ -216,9 +345,25 @@ def main():
     parser.add_argument('--batch-size', type=int, default=50)
     parser.add_argument('--compression', default='zstd', choices=['zstd', 'snappy'])
     parser.add_argument('--compression-level', type=int, default=3)
+    parser.add_argument('--verify', action='store_true',
+                        help='Verify consolidated data matches originals after writing')
+    parser.add_argument('--verify-sample', type=int, default=20,
+                        help='Number of random files to verify (default: 20)')
+    parser.add_argument('--verify-only', action='store_true',
+                        help='Only run verification (skip consolidation)')
 
     args = parser.parse_args()
 
+    # Verify-only mode
+    if args.verify_only:
+        passed, failed = verify_consolidation(
+            args.output,
+            args.base_dir,
+            args.verify_sample
+        )
+        sys.exit(0 if failed == 0 else 1)
+
+    # Normal consolidation
     success = consolidate_incremental(
         base_dir=args.base_dir,
         output_path=args.output,
@@ -227,7 +372,20 @@ def main():
         compression_level=args.compression_level
     )
 
-    sys.exit(0 if success else 1)
+    if not success:
+        sys.exit(1)
+
+    # Optional verification after consolidation
+    if args.verify:
+        passed, failed = verify_consolidation(
+            args.output,
+            args.base_dir,
+            args.verify_sample
+        )
+        if failed > 0:
+            sys.exit(1)
+
+    sys.exit(0)
 
 
 if __name__ == '__main__':
