@@ -1601,6 +1601,8 @@ def save_experiment_index(index_df: pd.DataFrame, output_path: str):
         'label', 'hash', 'num_seeds',
         'inter_arrival_scale', 'num_tables', 'num_groups',
         'real_conflict_probability',
+        'partition_enabled', 'num_partitions',
+        'partitions_per_txn_mean', 'partitions_per_txn_max',
         'total_txns', 'committed', 'success_rate',
         'throughput',
         'mean_commit_latency', 'p50_commit_latency',
