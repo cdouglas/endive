@@ -34,13 +34,13 @@ pytest tests/ -v
 
 ```bash
 # Run all experiments (parallel, with progress bar)
-./scripts/run_all_experiments.sh --parallel 4 --seeds 3
+python scripts/run_all_experiments.py --parallel 4 --seeds 3
 
 # Quick test mode (1 minute simulations)
-./scripts/run_all_experiments.sh --quick --parallel 4
+python scripts/run_all_experiments.py --quick --parallel 4
 
 # Run specific groups
-./scripts/run_all_experiments.sh --groups baseline,metadata --seeds 3
+python scripts/run_all_experiments.py --groups baseline,metadata --seeds 3
 ```
 
 ## Analysis

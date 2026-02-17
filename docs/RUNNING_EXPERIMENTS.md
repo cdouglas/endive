@@ -8,26 +8,26 @@ Quick reference guide for running optimization experiments.
 
 ```bash
 # Full experiment suite with 3 seeds per configuration
-./scripts/run_all_experiments.sh --parallel 4 --seeds 3
+python scripts/run_all_experiments.py --parallel 4 --seeds 3
 
 # Quick test mode (1 minute simulations, 3 load levels)
-./scripts/run_all_experiments.sh --quick --parallel 4
+python scripts/run_all_experiments.py --quick --parallel 4
 
 # Dry run to see what would execute
-./scripts/run_all_experiments.sh --dry-run --seeds 3
+python scripts/run_all_experiments.py --dry-run --seeds 3
 ```
 
 ### Run Specific Groups
 
 ```bash
 # Only baseline experiments (no optimizations)
-./scripts/run_all_experiments.sh --groups baseline --seeds 3
+python scripts/run_all_experiments.py --groups baseline --seeds 3
 
 # Only optimization experiments
-./scripts/run_all_experiments.sh --groups metadata,ml_append,combined --seeds 3
+python scripts/run_all_experiments.py --groups metadata,ml_append,combined --seeds 3
 
 # Compare standard vs premium tiers
-./scripts/run_all_experiments.sh --groups baseline,metadata --seeds 3
+python scripts/run_all_experiments.py --groups baseline,metadata --seeds 3
 ```
 
 ## Experiment Groups
@@ -71,11 +71,11 @@ The optimization experiments use a 2×2 factorial design:
 
 ```bash
 # Run in background with logging
-nohup ./scripts/run_all_experiments.sh --parallel 8 --seeds 3 2>&1 | \
+nohup python scripts/run_all_experiments.py --parallel 8 --seeds 3 2>&1 | \
     tee experiment_logs/run_$(date +%Y%m%d_%H%M%S).log &
 
 # Check progress
-./scripts/run_all_experiments.sh --status
+python scripts/run_all_experiments.py --status
 
 # Or tail the log
 tail -f experiment_logs/run_*.log
@@ -94,7 +94,7 @@ docker run -d \
     -v $(pwd)/experiments:/app/experiments \
     -v $(pwd)/experiment_logs:/app/experiment_logs \
     cdouglas/endive-sim:latest \
-    bash -c "scripts/run_all_experiments.sh --parallel 8 --seeds 3 2>&1 | \
+    bash -c "python scripts/run_all_experiments.py --parallel 8 --seeds 3 2>&1 | \
         tee experiment_logs/run_\$(date +%Y%m%d_%H%M%S).log"
 
 # Check container logs
@@ -160,10 +160,10 @@ The runner supports resume after interruption:
 
 ```bash
 # Check status of interrupted run
-./scripts/run_all_experiments.sh --status
+python scripts/run_all_experiments.py --status
 
 # Resume automatically picks up where it left off
-./scripts/run_all_experiments.sh --parallel 4 --seeds 3
+python scripts/run_all_experiments.py --parallel 4 --seeds 3
 ```
 
 State is saved in `experiments/.runner_state.json`.
@@ -172,7 +172,7 @@ State is saved in `experiments/.runner_state.json`.
 
 ```bash
 # Basic usage
-./scripts/run_all_experiments.sh [OPTIONS]
+python scripts/run_all_experiments.py [OPTIONS]
 
 # Options
 --groups GROUP1,GROUP2    # Run specific groups (default: all)
@@ -183,9 +183,9 @@ State is saved in `experiments/.runner_state.json`.
 --status                  # Show progress of current/last run
 
 # Examples
-./scripts/run_all_experiments.sh --quick --parallel 4
-./scripts/run_all_experiments.sh --groups baseline,metadata --seeds 5
-./scripts/run_all_experiments.sh --dry-run --seeds 3
+python scripts/run_all_experiments.py --quick --parallel 4
+python scripts/run_all_experiments.py --groups baseline,metadata --seeds 5
+python scripts/run_all_experiments.py --dry-run --seeds 3
 ```
 
 ## Tips

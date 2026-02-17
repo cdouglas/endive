@@ -47,16 +47,16 @@ python -m endive.main experiment_configs/exp2_1_single_table_false_conflicts.tom
 python -m endive.main my_config.toml --seed 42 --yes
 
 # Quick test mode (1 minute duration, fewer params)
-./scripts/run_all_experiments.sh --quick --seeds 1
+python scripts/run_all_experiments.py --quick --seeds 1
 
 # Run specific experiment groups
-./scripts/run_all_experiments.sh --groups trivial,mixed --seeds 3
+python scripts/run_all_experiments.py --groups trivial,mixed --seeds 3
 
 # Run instant catalog experiments (1ms CAS, real S3 storage)
-./scripts/run_all_experiments.sh --groups instant_trivial,instant_nontrivial --seeds 5
+python scripts/run_all_experiments.py --groups instant_trivial,instant_nontrivial --seeds 5
 
 # Background with logging
-nohup ./scripts/run_all_experiments.sh --seeds 3 > experiments.log 2>&1 &
+nohup python scripts/run_all_experiments.py --seeds 3 > experiments.log 2>&1 &
 ```
 
 ### Analysis
@@ -91,7 +91,7 @@ docker run -d \
     -v $(pwd)/experiments:/app/experiments \
     -v $(pwd)/plots:/app/plots \
     cdouglas/endive-sim:latest \
-    bash -c "./scripts/run_all_experiments.sh --groups baseline,metadata --seeds 5 --parallel 8"
+    bash -c "python scripts/run_all_experiments.py --groups baseline,metadata --seeds 5 --parallel 8"
 
 # See docs/DOCKER.md for full details
 ```
@@ -121,8 +121,6 @@ docker run -d \
 - Parameter sweeps with deterministic seed generation (nonce-based)
 - Progress tracking, resume capability, status checking
 - Parallel execution with configurable concurrency
-
-**`scripts/run_all_experiments.sh`** - Shell wrapper for run_all_experiments.py
 
 **`scripts/regenerate_all_plots.sh`** - Batch analysis with parallel execution
 - Generates composite plots for exp3.1, exp3.3, exp3.4 (multi-line plots grouped by parameter)

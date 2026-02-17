@@ -93,27 +93,27 @@ In ML+ (append) mode:
 
 ```bash
 # Run all experiments (may take several hours)
-./scripts/run_all_experiments.sh --parallel 4 --seeds 3
+python scripts/run_all_experiments.py --parallel 4 --seeds 3
 
 # Run specific groups
-./scripts/run_all_experiments.sh --groups baseline,metadata --seeds 3
+python scripts/run_all_experiments.py --groups baseline,metadata --seeds 3
 
 # Quick test mode (1 minute duration)
-./scripts/run_all_experiments.sh --quick --parallel 4
+python scripts/run_all_experiments.py --quick --parallel 4
 
 # Check progress
-./scripts/run_all_experiments.sh --status
+python scripts/run_all_experiments.py --status
 ```
 
 ### Background Execution (detachable)
 
 ```bash
 # Run in background with logging
-nohup ./scripts/run_all_experiments.sh --parallel 8 --seeds 3 2>&1 | \
+nohup python scripts/run_all_experiments.py --parallel 8 --seeds 3 2>&1 | \
     tee experiment_logs/run_$(date +%Y%m%d_%H%M%S).log &
 
 # Check progress
-./scripts/run_all_experiments.sh --status
+python scripts/run_all_experiments.py --status
 
 # Or tail the log
 tail -f experiment_logs/run_*.log
@@ -133,14 +133,14 @@ docker run -d \
     -v $(pwd)/experiments:/app/experiments \
     -v $(pwd)/experiment_logs:/app/experiment_logs \
     cdouglas/endive-sim:latest \
-    bash -c "scripts/run_all_experiments.sh \${EXP_ARGS} 2>&1 | \
+    bash -c "python scripts/run_all_experiments.py \${EXP_ARGS} 2>&1 | \
         tee experiment_logs/run_\$(date +%Y%m%d_%H%M%S).log"
 
 # Check container logs
 docker logs -f <container_id>
 
 # Check progress
-docker exec <container_id> ./scripts/run_all_experiments.sh --status
+docker exec <container_id> python scripts/run_all_experiments.py --status
 ```
 
 ### Available Experiment Groups
