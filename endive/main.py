@@ -1239,7 +1239,7 @@ class ConflictResolver:
         STATS.manifest_list_reads += n_snapshots
 
     @staticmethod
-    def merge_partition_conflicts(sim, txn: 'Txn', catalog):
+    def merge_partition_conflicts(sim, txn: 'Txn', catalog, partition_seq_snapshot: dict = None):
         """Merge conflicts for partitions that have changed.
 
         In partition mode, conflicts are per-(table, partition). Like Iceberg's
@@ -1250,12 +1250,36 @@ class ConflictResolver:
             sim: SimPy environment
             txn: Transaction object
             catalog: Catalog with current partition state
+            partition_seq_snapshot: Partition versions at server time (from CAS failure response).
+                                   If None, reads from catalog directly (legacy behavior).
         """
         if not PARTITION_ENABLED:
             return
 
-        # conflicting is dict[table_id, set[partition_id]]
-        conflicting = catalog.get_conflicting_partitions(txn)
+        # Use snapshot if provided, otherwise read from catalog
+        if partition_seq_snapshot is not None:
+            # Calculate conflicts using the snapshot (correct message-passing semantics)
+            conflicting = {}
+            for tbl_id, partitions in txn.partitions_read.items():
+                for p in partitions:
+                    snapshot_v = partition_seq_snapshot.get(tbl_id, {}).get(p, 0)
+                    txn_v = txn.v_partition_seq.get(tbl_id, {}).get(p, 0)
+                    if snapshot_v != txn_v:
+                        if tbl_id not in conflicting:
+                            conflicting[tbl_id] = set()
+                        conflicting[tbl_id].add(p)
+            for tbl_id, partitions in txn.partitions_written.items():
+                for p in partitions:
+                    snapshot_v = partition_seq_snapshot.get(tbl_id, {}).get(p, 0)
+                    txn_v = txn.v_partition_seq.get(tbl_id, {}).get(p, 0)
+                    if snapshot_v != txn_v:
+                        if tbl_id not in conflicting:
+                            conflicting[tbl_id] = set()
+                        conflicting[tbl_id].add(p)
+        else:
+            # Legacy: read from catalog directly
+            conflicting = catalog.get_conflicting_partitions(txn)
+
         if not conflicting:
             return
 
@@ -1265,7 +1289,12 @@ class ConflictResolver:
         for tbl_id, partitions in conflicting.items():
             for p in partitions:
                 # Calculate how many snapshots behind for this partition
-                n_behind = ConflictResolver.calculate_partition_snapshots_behind(txn, catalog, tbl_id, p)
+                if partition_seq_snapshot is not None:
+                    snapshot_v = partition_seq_snapshot.get(tbl_id, {}).get(p, 0)
+                    txn_v = txn.v_partition_seq.get(tbl_id, {}).get(p, 0)
+                    n_behind = snapshot_v - txn_v
+                else:
+                    n_behind = ConflictResolver.calculate_partition_snapshots_behind(txn, catalog, tbl_id, p)
 
                 # Read manifest lists for all intermediate snapshots (like table mode)
                 # This is required by Iceberg's validationHistory which traverses
@@ -1998,10 +2027,38 @@ def txn_commit(sim, txn, catalog):
        - Or resolve per-partition conflicts (partition mode)
        - Update transaction state for retry
     """
-    # Attempt CAS operation
-    yield sim.timeout(get_cas_latency())
+    # Model CAS as message-passing:
+    # 1. Request travels to server: get_cas_latency() / 2
+    # 2. Server processes CAS (instantaneous, but reads current state)
+    # 3. Response travels back: get_cas_latency() / 2
+    #
+    # We split the latency to capture state at server-processing time.
 
-    if catalog.try_CAS(sim, txn):
+    # Request travels to server
+    yield sim.timeout(get_cas_latency() / 2)
+
+    # Server processes CAS - capture state at this moment (server time)
+    # This is the state that determines success/failure and is returned on failure
+    cas_seq_at_server = catalog.seq
+    cas_tbl_at_server = {t: catalog.tbl[t] for t in txn.v_dirty.keys()}
+    if PARTITION_ENABLED:
+        cas_partition_seq_at_server = {
+            tbl_id: {p: catalog.partition_seq[tbl_id][p] for p in parts}
+            for tbl_id, parts in txn.partitions_read.items()
+        }
+        for tbl_id, parts in txn.partitions_written.items():
+            if tbl_id not in cas_partition_seq_at_server:
+                cas_partition_seq_at_server[tbl_id] = {}
+            for p in parts:
+                cas_partition_seq_at_server[tbl_id][p] = catalog.partition_seq[tbl_id][p]
+
+    # Perform the actual CAS comparison and update (instantaneous at server)
+    cas_success = catalog.try_CAS(sim, txn)
+
+    # Response travels back to client
+    yield sim.timeout(get_cas_latency() / 2)
+
+    if cas_success:
         # Success - transaction committed
         logger.debug(f"{sim.now} TXN {txn.id} commit")
         txn.t_commit = sim.now
@@ -2015,18 +2072,17 @@ def txn_commit(sim, txn, catalog):
             STATS.abort(txn)
             return
 
-        # Read catalog to get current sequence number
-        yield sim.timeout(get_cas_latency() / 2)
+        # CAS failure response contains catalog state at server-processing time.
+        # This is cas_seq_at_server and cas_tbl_at_server (already received above).
+        # No additional round-trip needed - we have all the info from the failure response.
 
         if PARTITION_ENABLED:
             # Partition mode: Resolve per-partition conflicts
             logger.debug(f"{sim.now} TXN {txn.id} CAS Fail - resolving partition conflicts")
 
-            # Update catalog seq and table state
-            txn.v_catalog_seq = catalog.seq
-            v_catalog = dict()
-            for t in txn.v_dirty.keys():
-                v_catalog[t] = catalog.tbl[t]
+            # Use catalog state from CAS failure response (no additional round-trip)
+            txn.v_catalog_seq = cas_seq_at_server
+            v_catalog = dict(cas_tbl_at_server)
 
             # Read table metadata to discover partition states
             # Cost scales with N_PARTITIONS (O(N) bottleneck even for M conflicts)
@@ -2034,7 +2090,8 @@ def txn_commit(sim, txn, catalog):
                 yield sim.timeout(get_table_metadata_latency('read'))
 
             # Resolve per-partition conflicts (handles reading partition MLs)
-            yield from resolver.merge_partition_conflicts(sim, txn, catalog)
+            # Pass the partition state from CAS failure response for correct message-passing
+            yield from resolver.merge_partition_conflicts(sim, txn, catalog, cas_partition_seq_at_server)
 
             # Read current catalog state for retry
             # This is a separate round-trip to get the latest partition versions
@@ -2051,14 +2108,13 @@ def txn_commit(sim, txn, catalog):
             resolver.update_write_set(txn, v_catalog)
         else:
             # Table mode: Original behavior
-            n_snapshots_behind = resolver.calculate_snapshots_behind(txn, catalog)
+            # Calculate snapshots behind using state from CAS failure response
+            n_snapshots_behind = cas_seq_at_server - txn.v_catalog_seq
             logger.debug(f"{sim.now} TXN {txn.id} CAS Fail - {n_snapshots_behind} snapshots behind")
 
-            # Update to current catalog state
-            v_catalog = dict()
-            txn.v_catalog_seq = catalog.seq
-            for t in txn.v_dirty.keys():
-                v_catalog[t] = catalog.tbl[t]
+            # Use catalog state from CAS failure response (no additional round-trip)
+            txn.v_catalog_seq = cas_seq_at_server
+            v_catalog = dict(cas_tbl_at_server)
 
             # Read manifest lists for all snapshots between our read and current
             # Use average manifest list size for size-based latency estimation
