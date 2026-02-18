@@ -1185,11 +1185,62 @@ class ConflictResolver:
     # === Partition-level conflict resolution ===
 
     @staticmethod
+    def calculate_partition_snapshots_behind(txn: 'Txn', catalog, table_id: int, partition_id: int) -> int:
+        """Calculate how many snapshots a partition is behind.
+
+        Like table mode, Iceberg validates conflicts by traversing all snapshots
+        between the transaction's read and the current state. For partition mode,
+        this is per-partition: each partition has its own version counter.
+
+        Returns: n where current partition is at version n and transaction read version m,
+                 so transaction is (n - m) snapshots behind for this partition.
+        """
+        current_version = catalog.partition_seq[table_id][partition_id]
+        txn_version = txn.v_partition_seq.get(table_id, {}).get(partition_id, 0)
+        return current_version - txn_version
+
+    @staticmethod
+    def read_partition_manifest_lists(sim, n_snapshots: int, txn_id: int, table_id: int,
+                                       partition_id: int, avg_ml_size: int = None):
+        """Read n manifest lists for a partition's snapshot history.
+
+        Like table mode's read_manifest_lists, but scoped to a single partition.
+        Iceberg's validationHistory traverses all snapshots between starting and
+        current, reading manifests from each to detect conflicts.
+
+        Args:
+            sim: SimPy environment
+            n_snapshots: Number of manifest lists to read
+            txn_id: Transaction ID for logging
+            table_id: Table ID
+            partition_id: Partition ID
+            avg_ml_size: Optional average manifest list size for size-based latency
+        """
+        if n_snapshots <= 0:
+            return
+
+        logger.debug(f"{sim.now} TXN {txn_id} Reading {n_snapshots} partition MLs "
+                    f"for table {table_id} partition {partition_id}")
+
+        # Process in batches of MAX_PARALLEL
+        for batch_start in range(0, n_snapshots, MAX_PARALLEL):
+            batch_size = min(MAX_PARALLEL, n_snapshots - batch_start)
+            # All reads in this batch happen in parallel, take max time
+            if T_PUT is not None and avg_ml_size is not None:
+                batch_latencies = [get_put_latency(avg_ml_size) for _ in range(batch_size)]
+            else:
+                batch_latencies = [get_manifest_list_latency('read') for _ in range(batch_size)]
+            yield sim.timeout(max(batch_latencies))
+
+        STATS.manifest_list_reads += n_snapshots
+
+    @staticmethod
     def merge_partition_conflicts(sim, txn: 'Txn', catalog):
         """Merge conflicts for partitions that have changed.
 
-        In partition mode, conflicts are per-(table, partition). Each conflicting
-        partition has its own manifest list that needs to be read/updated.
+        In partition mode, conflicts are per-(table, partition). Like Iceberg's
+        validationHistory, we must read manifest lists from ALL snapshots between
+        the transaction's read and current state to properly detect conflicts.
 
         Args:
             sim: SimPy environment
@@ -1209,6 +1260,17 @@ class ConflictResolver:
 
         for tbl_id, partitions in conflicting.items():
             for p in partitions:
+                # Calculate how many snapshots behind for this partition
+                n_behind = ConflictResolver.calculate_partition_snapshots_behind(txn, catalog, tbl_id, p)
+
+                # Read manifest lists for all intermediate snapshots (like table mode)
+                # This is required by Iceberg's validationHistory which traverses
+                # all snapshots between starting and parent
+                avg_ml_size = catalog.partition_ml_offset[tbl_id][p] if hasattr(catalog, 'partition_ml_offset') else None
+                yield from ConflictResolver.read_partition_manifest_lists(
+                    sim, n_behind, txn.id, tbl_id, p, avg_ml_size
+                )
+
                 # Determine if this is a real or false conflict
                 is_real_conflict = np.random.random() < REAL_CONFLICT_PROBABILITY
 

@@ -398,6 +398,8 @@ class TestCommitLatencyBehavior:
         Higher load (lower inter-arrival) should produce higher commit latencies.
         """
         # Group experiments by configuration (same runtime, different inter-arrival)
+        # Also group by partition mode since partition-enabled and non-partition
+        # experiments have very different latency characteristics
         by_base_config = {}
 
         for label, sample in experiment_samples.items():
@@ -406,8 +408,11 @@ class TestCommitLatencyBehavior:
             # Create key from non-load parameters
             num_tables = config.get('catalog', {}).get('num_tables', 1)
             runtime_mean = config.get('transaction', {}).get('runtime', {}).get('mean', 10000)
+            partition_enabled = config.get('partition', {}).get('enabled', False)
+            num_partitions = config.get('partition', {}).get('num_partitions', 1) if partition_enabled else 0
 
-            key = (num_tables, runtime_mean)
+            # Group by partition mode to compare like with like
+            key = (num_tables, runtime_mean, partition_enabled, num_partitions)
 
             if key not in by_base_config:
                 by_base_config[key] = []

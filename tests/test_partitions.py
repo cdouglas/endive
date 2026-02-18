@@ -898,3 +898,157 @@ class TestPartitionMetadataOverhead:
                 )
             finally:
                 os.unlink(config_path)
+
+
+class TestPartitionHistoryReads:
+    """Test that partition mode reads manifest list history like Iceberg does.
+
+    Iceberg's validationHistory traverses all snapshots between the transaction's
+    read and current state. This ensures conflict detection is comprehensive.
+    """
+
+    def test_calculate_partition_snapshots_behind(self):
+        """Test that calculate_partition_snapshots_behind returns correct gap."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = os.path.join(tmpdir, "results.parquet")
+            config_path = create_partition_test_config(
+                output_path,
+                seed=42,
+                partition_enabled=True,
+                num_partitions=10,
+                num_tables=1,
+            )
+            try:
+                configure_from_toml(config_path)
+                sim = simpy.Environment()
+                catalog = Catalog(sim)
+
+                # Commit 5 transactions to partition 3
+                for i in range(5):
+                    txn = Txn(
+                        id=i + 1,
+                        t_submit=0,
+                        t_runtime=100,
+                        v_catalog_seq=catalog.seq,
+                        v_tblr={0: 0},
+                        v_tblw={0: 1},
+                    )
+                    txn.partitions_read = {0: {3}}
+                    txn.partitions_written = {0: {3}}
+                    txn.v_partition_seq = {0: {3: catalog.partition_seq[0][3]}}
+                    assert catalog.try_CAS(sim, txn) == True
+
+                # Partition 3 should now be at version 5
+                assert catalog.partition_seq[0][3] == 5
+
+                # Create a transaction that read partition 3 at version 0
+                stale_txn = Txn(
+                    id=100,
+                    t_submit=0,
+                    t_runtime=100,
+                    v_catalog_seq=0,
+                    v_tblr={0: 0},
+                    v_tblw={0: 1},
+                )
+                stale_txn.v_partition_seq = {0: {3: 0}}  # Read at version 0
+
+                # Should be 5 snapshots behind
+                n_behind = ConflictResolver.calculate_partition_snapshots_behind(
+                    stale_txn, catalog, table_id=0, partition_id=3
+                )
+                assert n_behind == 5, f"Expected 5 snapshots behind, got {n_behind}"
+
+                # Partition 7 was never modified, so version is 0
+                stale_txn.v_partition_seq[0][7] = 0
+                n_behind_7 = ConflictResolver.calculate_partition_snapshots_behind(
+                    stale_txn, catalog, table_id=0, partition_id=7
+                )
+                assert n_behind_7 == 0, f"Unmodified partition should be 0 behind, got {n_behind_7}"
+            finally:
+                os.unlink(config_path)
+
+    def test_partition_conflict_reads_history_mls(self):
+        """Test that partition conflict resolution reads MLs for all snapshots behind.
+
+        This matches Iceberg's validationHistory behavior: traverse all snapshots
+        between starting and current to detect conflicts comprehensively.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = os.path.join(tmpdir, "results.parquet")
+            config_path = create_partition_test_config(
+                output_path,
+                seed=42,
+                duration_ms=30000,
+                partition_enabled=True,
+                num_partitions=1,  # Single partition = all conflicts
+                partitions_per_txn_mean=1.0,
+                partitions_per_txn_max=1,
+                inter_arrival_scale=100.0,  # Moderate-high load
+                real_conflict_probability=0.0,
+            )
+            try:
+                endive.main.STATS = Stats()
+                df = run_simulation_from_config(config_path)
+
+                # Should have some transactions with retries
+                committed = df[df['status'] == 'committed']
+                assert len(committed) > 0, "Should have committed transactions"
+
+                # With single partition and high load, transactions should fall behind
+                # and read multiple MLs during conflict resolution
+                stats = endive.main.STATS
+                ml_reads = stats.manifest_list_reads
+
+                # The number of ML reads should be greater than the number of conflicts
+                # because we read one ML per snapshot behind, not just one per conflict
+                n_conflicts = stats.false_conflicts + stats.real_conflicts
+                if n_conflicts > 0:
+                    ml_reads_per_conflict = ml_reads / n_conflicts
+                    # Should read at least 1 ML per conflict (history read)
+                    # plus conflict resolution reads
+                    assert ml_reads_per_conflict >= 1.0, (
+                        f"Expected >= 1 ML read per conflict, got {ml_reads_per_conflict:.2f}"
+                    )
+            finally:
+                os.unlink(config_path)
+
+    def test_single_partition_saturates_like_single_table(self):
+        """Test that 1 partition behaves similarly to single-table mode under load.
+
+        With the history-based ML reads, single partition should show similar
+        saturation behavior to single-table mode (high retry count, falling success rate).
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = os.path.join(tmpdir, "results.parquet")
+            config_path = create_partition_test_config(
+                output_path,
+                seed=42,
+                duration_ms=30000,
+                partition_enabled=True,
+                num_partitions=1,
+                partitions_per_txn_mean=1.0,
+                partitions_per_txn_max=1,
+                inter_arrival_scale=50.0,  # High load
+                real_conflict_probability=0.0,
+            )
+            try:
+                df = run_simulation_from_config(config_path)
+                committed = df[df['status'] == 'committed']
+
+                if len(committed) > 10:
+                    # Under high load with single partition, should see:
+                    # 1. Multiple retries (transactions falling behind)
+                    mean_retries = committed['n_retries'].mean()
+                    assert mean_retries > 1.5, (
+                        f"Expected mean retries > 1.5 under high load, got {mean_retries:.2f}"
+                    )
+
+                    # 2. Increased latency due to history reads
+                    mean_latency = committed['commit_latency'].mean()
+                    # With S3 latencies (~30ms per ML read) and multiple history reads,
+                    # latency should be substantial
+                    assert mean_latency > 100, (
+                        f"Expected mean latency > 100ms with history reads, got {mean_latency:.1f}ms"
+                    )
+            finally:
+                os.unlink(config_path)
