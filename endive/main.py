@@ -911,6 +911,20 @@ def confirm_run() -> bool:
     return response in ['', 'y', 'yes']
 
 
+# =============================================================================
+# CONFLICT RESOLUTION MODULE
+# =============================================================================
+# Handles conflict resolution when CAS operations fail.
+# Uses snapshots from CASResult to determine conflicts and read manifest history.
+#
+# Key methods (snapshot-based):
+# - calculate_snapshots_behind_from_snapshot(): Uses snapshot, not live catalog
+# - merge_table_conflicts(): Accepts optional snapshot for read-only operations
+# - update_partition_state_from_snapshot(): Updates txn state from snapshot
+#
+# Note: Some methods still need catalog reference for mutations (ML append).
+# =============================================================================
+
 class ConflictResolver:
     """Handles conflict resolution for failed CAS operations.
 
@@ -925,9 +939,21 @@ class ConflictResolver:
     def calculate_snapshots_behind(txn: 'Txn', catalog: 'Catalog') -> int:
         """Calculate how many snapshots the transaction is behind.
 
+        DEPRECATED: Use calculate_snapshots_behind_from_snapshot() instead.
+
         Returns: n where current catalog is at S_{i+n} and transaction is at S_i
         """
         return catalog.seq - txn.v_catalog_seq
+
+    @staticmethod
+    def calculate_snapshots_behind_from_snapshot(txn: 'Txn', snapshot: 'CatalogSnapshot') -> int:
+        """Calculate how many snapshots the transaction is behind using snapshot.
+
+        This is the snapshot-based version that enforces message-passing semantics.
+
+        Returns: n where snapshot is at S_{i+n} and transaction is at S_i
+        """
+        return snapshot.seq - txn.v_catalog_seq
 
     @staticmethod
     def read_manifest_lists(sim, n_snapshots: int, txn_id: int, avg_ml_size: int = None):
@@ -963,7 +989,7 @@ class ConflictResolver:
         STATS.manifest_list_reads += n_snapshots
 
     @staticmethod
-    def merge_table_conflicts(sim, txn: 'Txn', v_catalog: dict, catalog=None):
+    def merge_table_conflicts(sim, txn: 'Txn', v_catalog: dict, catalog=None, snapshot: 'CatalogSnapshot' = None):
         """Merge conflicts for tables that have changed.
 
         For each dirty table that has a different version in the catalog,
@@ -977,8 +1003,9 @@ class ConflictResolver:
         Args:
             sim: SimPy environment
             txn: Transaction object
-            v_catalog: Current catalog state
-            catalog: Catalog reference (needed for ML+ mode)
+            v_catalog: Current catalog state (dict of table versions)
+            catalog: Catalog reference (needed for ML+ mode mutations)
+            snapshot: Optional CatalogSnapshot for read-only state (size-based latency)
 
         Yields timeout events for each I/O operation.
         """
@@ -988,18 +1015,18 @@ class ConflictResolver:
                 is_real_conflict = np.random.random() < REAL_CONFLICT_PROBABILITY
 
                 if is_real_conflict:
-                    yield from ConflictResolver.resolve_real_conflict(sim, txn, t, v_catalog, catalog)
+                    yield from ConflictResolver.resolve_real_conflict(sim, txn, t, v_catalog, catalog, snapshot)
                     STATS.real_conflicts += 1
                 else:
                     # False conflict: Same table modified, but no data overlap (different partitions).
                     # Still requires creating a new snapshot with merged manifest list pointers.
                     # In ML+ mode: Tentative entry is still valid, no ML update needed.
                     # In traditional mode: Must read ML and write new ML with combined pointers.
-                    yield from ConflictResolver.resolve_false_conflict(sim, txn, t, v_catalog, catalog)
+                    yield from ConflictResolver.resolve_false_conflict(sim, txn, t, v_catalog, catalog, snapshot)
                     STATS.false_conflicts += 1
 
     @staticmethod
-    def resolve_false_conflict(sim, txn, table_id: int, v_catalog: dict, catalog=None):
+    def resolve_false_conflict(sim, txn, table_id: int, v_catalog: dict, catalog=None, snapshot: 'CatalogSnapshot' = None):
         """Resolve false conflict (same table modified, no data overlap).
 
         A false conflict occurs when another transaction committed changes to the
@@ -1025,7 +1052,8 @@ class ConflictResolver:
             txn: Transaction object
             table_id: Table with conflict
             v_catalog: Current catalog state
-            catalog: Catalog reference (needed for size-based latency)
+            catalog: Catalog reference (needed for ML+ mode mutations)
+            snapshot: Optional CatalogSnapshot for read-only state (size-based latency)
         """
         logger.debug(f"{sim.now} TXN {txn.id} Resolving false conflict for table {table_id}")
 
@@ -1047,17 +1075,22 @@ class ConflictResolver:
             # Traditional (rewrite) mode: Must create new manifest list combining
             # the committed snapshot's manifest file pointers with our own.
 
-            # Read manifest list (to get pointers to committed snapshot's manifest files)
-            if catalog is not None and T_PUT is not None:
+            # Get ml_size from snapshot (preferred) or catalog (fallback)
+            ml_size = None
+            if snapshot is not None and T_PUT is not None:
+                ml_size = snapshot.ml_offset[table_id]
+            elif catalog is not None and T_PUT is not None:
                 ml_size = catalog.ml_offset[table_id]
+
+            # Read manifest list (to get pointers to committed snapshot's manifest files)
+            if ml_size is not None:
                 yield sim.timeout(get_put_latency(ml_size))  # Read ~= PUT for small files
             else:
                 yield sim.timeout(get_manifest_list_latency('read'))
             STATS.manifest_list_reads += 1
 
             # Write new manifest list (combined pointers from both transactions)
-            if catalog is not None and T_PUT is not None:
-                ml_size = catalog.ml_offset[table_id]
+            if ml_size is not None:
                 yield sim.timeout(get_manifest_list_write_latency(ml_size))
             else:
                 yield sim.timeout(get_manifest_list_latency('write'))
@@ -1073,7 +1106,7 @@ class ConflictResolver:
         txn.v_dirty[table_id] = v_catalog[table_id]
 
     @staticmethod
-    def resolve_real_conflict(sim, txn, table_id: int, v_catalog: dict, catalog=None):
+    def resolve_real_conflict(sim, txn, table_id: int, v_catalog: dict, catalog=None, snapshot: 'CatalogSnapshot' = None):
         """Resolve real conflict (overlapping data changes).
 
         Must read and rewrite manifest files to merge conflicting changes.
@@ -1087,7 +1120,8 @@ class ConflictResolver:
             txn: Transaction object
             table_id: Table with conflict
             v_catalog: Current catalog state
-            catalog: Catalog reference (needed for ML+ mode)
+            catalog: Catalog reference (needed for ML+ mode mutations)
+            snapshot: Optional CatalogSnapshot for read-only state (size-based latency)
         """
         # Determine number of conflicting manifest files
         n_conflicting = sample_conflicting_manifests()
@@ -1102,10 +1136,15 @@ class ConflictResolver:
         if not TABLE_METADATA_INLINED:
             yield sim.timeout(get_table_metadata_latency('read'))
 
-        # Read manifest list (to get pointers to manifest files)
-        # Use size-based latency if catalog and T_PUT available
-        if catalog is not None and T_PUT is not None:
+        # Get ml_size from snapshot (preferred) or catalog (fallback) for read latency
+        ml_size = None
+        if snapshot is not None and T_PUT is not None:
+            ml_size = snapshot.ml_offset[table_id]
+        elif catalog is not None and T_PUT is not None:
             ml_size = catalog.ml_offset[table_id]
+
+        # Read manifest list (to get pointers to manifest files)
+        if ml_size is not None:
             yield sim.timeout(get_put_latency(ml_size))  # Read ~= PUT for small files
         else:
             yield sim.timeout(get_manifest_list_latency('read'))
@@ -1139,13 +1178,13 @@ class ConflictResolver:
             yield sim.timeout(get_append_latency())
             physical_success = catalog.try_ML_APPEND(sim, table_id, expected_offset, txn.id)
 
-            # Physical retry if offset moved
+            # Physical retry if offset moved - need live catalog for these mutations
             while not physical_success:
                 STATS.manifest_append_physical_failure += 1
                 if catalog.ml_sealed[table_id]:
                     # Sealed - rewrite (size-based latency)
                     STATS.manifest_append_sealed_rewrite += 1
-                    ml_size = catalog.ml_offset[table_id]
+                    ml_size = catalog.ml_offset[table_id]  # Must use live catalog for current size
                     if T_PUT is not None:
                         yield sim.timeout(get_put_latency(ml_size))  # Read
                         yield sim.timeout(get_manifest_list_write_latency(ml_size))  # Write
@@ -1161,9 +1200,8 @@ class ConflictResolver:
             STATS.manifest_append_physical_success += 1
             logger.debug(f"{sim.now} TXN {txn.id} ML_APPEND table {table_id} after real conflict")
         else:
-            # Traditional mode: Write updated manifest list (size-based latency)
-            if catalog is not None and T_PUT is not None:
-                ml_size = catalog.ml_offset[table_id]
+            # Traditional mode: Write updated manifest list (use snapshot for size if available)
+            if ml_size is not None:
                 yield sim.timeout(get_manifest_list_write_latency(ml_size))
             else:
                 yield sim.timeout(get_manifest_list_latency('write'))
@@ -1192,6 +1230,8 @@ class ConflictResolver:
     def calculate_partition_snapshots_behind(txn: 'Txn', catalog, table_id: int, partition_id: int) -> int:
         """Calculate how many snapshots a partition is behind.
 
+        DEPRECATED: Use calculate_partition_snapshots_behind_from_snapshot() instead.
+
         Like table mode, Iceberg validates conflicts by traversing all snapshots
         between the transaction's read and the current state. For partition mode,
         this is per-partition: each partition has its own version counter.
@@ -1200,6 +1240,21 @@ class ConflictResolver:
                  so transaction is (n - m) snapshots behind for this partition.
         """
         current_version = catalog.partition_seq[table_id][partition_id]
+        txn_version = txn.v_partition_seq.get(table_id, {}).get(partition_id, 0)
+        return current_version - txn_version
+
+    @staticmethod
+    def calculate_partition_snapshots_behind_from_snapshot(
+        txn: 'Txn', snapshot: 'CatalogSnapshot', table_id: int, partition_id: int
+    ) -> int:
+        """Calculate how many snapshots a partition is behind using snapshot.
+
+        This is the snapshot-based version that enforces message-passing semantics.
+
+        Returns: n where current partition is at version n and transaction read version m,
+                 so transaction is (n - m) snapshots behind for this partition.
+        """
+        current_version = snapshot.partition_seq[table_id][partition_id]
         txn_version = txn.v_partition_seq.get(table_id, {}).get(partition_id, 0)
         return current_version - txn_version
 
@@ -1452,6 +1507,76 @@ class ConflictResolver:
                 txn.v_partition_seq[tbl_id][p] = catalog.partition_seq[tbl_id][p]
                 txn.v_partition_ml_offset[tbl_id][p] = catalog.partition_ml_offset[tbl_id][p]
 
+    @staticmethod
+    def update_partition_state_from_snapshot(txn: 'Txn', snapshot: 'CatalogSnapshot'):
+        """Update transaction's partition state from snapshot after conflict resolution.
+
+        This is the snapshot-based version of update_partition_state.
+        Uses immutable snapshot data instead of direct catalog access.
+        """
+        if not PARTITION_ENABLED:
+            return
+
+        for tbl_id, partitions in txn.partitions_read.items():
+            if tbl_id not in txn.v_partition_seq:
+                txn.v_partition_seq[tbl_id] = {}
+            if tbl_id not in txn.v_partition_ml_offset:
+                txn.v_partition_ml_offset[tbl_id] = {}
+            for p in partitions:
+                txn.v_partition_seq[tbl_id][p] = snapshot.partition_seq[tbl_id][p]
+                txn.v_partition_ml_offset[tbl_id][p] = snapshot.partition_ml_offset[tbl_id][p]
+
+        for tbl_id, partitions in txn.partitions_written.items():
+            if tbl_id not in txn.v_partition_seq:
+                txn.v_partition_seq[tbl_id] = {}
+            if tbl_id not in txn.v_partition_ml_offset:
+                txn.v_partition_ml_offset[tbl_id] = {}
+            for p in partitions:
+                txn.v_partition_seq[tbl_id][p] = snapshot.partition_seq[tbl_id][p]
+                txn.v_partition_ml_offset[tbl_id][p] = snapshot.partition_ml_offset[tbl_id][p]
+
+
+# =============================================================================
+# CATALOG MODULE: Snapshot types and Catalog class
+# =============================================================================
+# This section implements the "server" side of the simulation:
+# - CatalogSnapshot: Immutable state returned to clients via message-passing
+# - CASResult: Result of CAS operations including server-time snapshot
+# - Catalog: The catalog server with read(), try_cas(), and internal state
+#
+# Design principle: Transactions NEVER access Catalog state directly.
+# All state is obtained via read() or try_cas() which return immutable snapshots.
+# =============================================================================
+
+@dataclass(frozen=True)
+class CatalogSnapshot:
+    """Immutable snapshot of catalog state at a specific time.
+
+    Transactions receive snapshots via message-passing (catalog.read() or CASResult).
+    All catalog state access goes through snapshots, ensuring proper distributed semantics:
+    - State is captured at a specific point in time
+    - Cannot accidentally read stale or future state
+    - All reads have explicit latency costs
+    """
+    seq: int
+    tbl: tuple[int, ...]                              # Frozen table versions
+    partition_seq: tuple[tuple[int, ...], ...] | None  # Frozen partition versions (or None if disabled)
+    ml_offset: tuple[int, ...]                        # Frozen ML offsets per table
+    partition_ml_offset: tuple[tuple[int, ...], ...] | None  # Frozen partition ML offsets (or None)
+    timestamp: int  # Simulation time when snapshot was taken
+
+
+@dataclass(frozen=True)
+class CASResult:
+    """Result of a CAS operation.
+
+    Contains the success/failure status and a snapshot of catalog state
+    at server-processing time. On failure, this snapshot is used for
+    conflict resolution without additional round-trips.
+    """
+    success: bool
+    snapshot: CatalogSnapshot  # State at server processing time
+
 
 class Catalog:
     def __init__(self, sim):
@@ -1471,6 +1596,77 @@ class Catalog:
             self.partition_seq = [[0] * N_PARTITIONS for _ in range(N_TABLES)]
             self.partition_ml_offset = [[0] * N_PARTITIONS for _ in range(N_TABLES)]
             self.partition_ml_sealed = [[False] * N_PARTITIONS for _ in range(N_TABLES)]
+
+    def _create_snapshot(self) -> CatalogSnapshot:
+        """Create an immutable snapshot of current catalog state.
+
+        Returns a frozen dataclass containing all catalog state at this moment.
+        Used internally by read() and try_cas() to capture server-time state.
+        """
+        partition_seq = None
+        partition_ml_offset = None
+        if PARTITION_ENABLED:
+            partition_seq = tuple(tuple(row) for row in self.partition_seq)
+            partition_ml_offset = tuple(tuple(row) for row in self.partition_ml_offset)
+
+        return CatalogSnapshot(
+            seq=self.seq,
+            tbl=tuple(self.tbl),
+            partition_seq=partition_seq,
+            ml_offset=tuple(self.ml_offset),
+            partition_ml_offset=partition_ml_offset,
+            timestamp=self.sim.now,
+        )
+
+    def read(self):
+        """Read catalog state via message-passing (pays full round-trip latency).
+
+        This is the proper way for transactions to obtain catalog state.
+        The returned snapshot is immutable and represents state at server time.
+
+        Yields:
+            SimPy timeout for network latency
+
+        Returns:
+            CatalogSnapshot: Immutable snapshot of catalog state
+        """
+        yield self.sim.timeout(get_cas_latency())
+        return self._create_snapshot()
+
+    def try_cas(self, txn, expected_snapshot: CatalogSnapshot):
+        """Attempt CAS with proper message-passing semantics.
+
+        Models the full request-response cycle:
+        1. Request travels to server (half RTT)
+        2. Server captures state and performs CAS (instantaneous)
+        3. Response travels back (half RTT)
+
+        The snapshot in CASResult is captured at server-processing time,
+        allowing conflict resolution without additional round-trips.
+
+        Args:
+            txn: Transaction attempting to commit
+            expected_snapshot: Snapshot the transaction expects (for CAS comparison)
+
+        Yields:
+            SimPy timeout events for network latency
+
+        Returns:
+            CASResult: Contains success status and server-time snapshot
+        """
+        # Request travels to server
+        yield self.sim.timeout(get_cas_latency() / 2)
+
+        # Server captures state at processing time
+        snapshot = self._create_snapshot()
+
+        # Server performs the actual CAS
+        success = self.try_CAS(self.sim, txn)
+
+        # Response travels back to client
+        yield self.sim.timeout(get_cas_latency() / 2)
+
+        return CASResult(success=success, snapshot=snapshot)
 
     def try_CAS(self, sim, txn):
         """Attempt compare-and-swap for transaction commit.
@@ -1661,6 +1857,18 @@ class Catalog:
         logger.debug(f"ML table {tbl_id} REWRITTEN - offset reset")
 
 
+# =============================================================================
+# TRANSACTION MODULE: Transaction state and lifecycle
+# =============================================================================
+# This section implements the "client" side of the simulation:
+# - Txn: Transaction state including snapshots from catalog reads
+# - txn_gen: Transaction lifecycle (read -> execute -> commit loop)
+# - txn_commit: Commit with conflict resolution via message-passing
+#
+# Design principle: Transactions hold CatalogSnapshots obtained via read() or
+# try_cas(). All catalog state access uses these snapshots, not direct refs.
+# =============================================================================
+
 @dataclass
 class Txn:
     id: int
@@ -1682,6 +1890,9 @@ class Txn:
     partitions_written: dict[int, set[int]] = field(default_factory=dict)  # table_id -> partition_ids written
     v_partition_seq: dict[int, dict[int, int]] = field(default_factory=dict)  # table_id -> partition_id -> version
     v_partition_ml_offset: dict[int, dict[int, int]] = field(default_factory=dict)  # table_id -> partition_id -> offset
+    # Snapshot-based fields (for message-passing semantics)
+    start_snapshot: 'CatalogSnapshot | None' = None  # Initial catalog state from read()
+    current_snapshot: 'CatalogSnapshot | None' = None  # Latest snapshot (updated on CAS failure)
 
 
 @dataclass
@@ -1735,6 +1946,56 @@ class AppendCatalog:
             self.partition_seq = [[0] * N_PARTITIONS for _ in range(N_TABLES)]
             self.partition_ml_offset = [[0] * N_PARTITIONS for _ in range(N_TABLES)]
             self.partition_ml_sealed = [[False] * N_PARTITIONS for _ in range(N_TABLES)]
+
+    def _create_snapshot(self) -> CatalogSnapshot:
+        """Create an immutable snapshot of current catalog state.
+
+        Same as Catalog._create_snapshot() for API compatibility.
+        """
+        partition_seq = None
+        partition_ml_offset = None
+        if PARTITION_ENABLED:
+            partition_seq = tuple(tuple(row) for row in self.partition_seq)
+            partition_ml_offset = tuple(tuple(row) for row in self.partition_ml_offset)
+
+        return CatalogSnapshot(
+            seq=self.seq,
+            tbl=tuple(self.tbl),
+            partition_seq=partition_seq,
+            ml_offset=tuple(self.ml_offset),
+            partition_ml_offset=partition_ml_offset,
+            timestamp=self.sim.now,
+        )
+
+    def read(self):
+        """Read catalog state via message-passing.
+
+        Same API as Catalog.read() for compatibility.
+        """
+        yield self.sim.timeout(get_cas_latency())
+        return self._create_snapshot()
+
+    def try_cas(self, txn, expected_snapshot: CatalogSnapshot):
+        """Attempt CAS with message-passing semantics.
+
+        Same API as Catalog.try_cas() for compatibility.
+        Note: AppendCatalog typically uses try_APPEND, but this is
+        needed for initial transaction setup and compatibility.
+        """
+        # Request travels to server
+        yield self.sim.timeout(get_cas_latency() / 2)
+
+        # Server captures state at processing time
+        snapshot = self._create_snapshot()
+
+        # For AppendCatalog, we don't have a try_CAS method - return failure
+        # to force use of append protocol
+        success = False
+
+        # Response travels back to client
+        yield self.sim.timeout(get_cas_latency() / 2)
+
+        return CASResult(success=success, snapshot=snapshot)
 
     def try_APPEND(self, sim, txn, entry: LogEntry) -> tuple[bool, bool]:
         """Attempt conditional append with table-level validation.
@@ -2020,45 +2281,23 @@ def txn_commit(sim, txn, catalog):
     """Attempt to commit transaction with conflict resolution.
 
     This function orchestrates the commit process:
-    1. Attempts CAS operation
+    1. Attempts CAS operation via catalog.try_cas() (message-passing API)
     2. On success, commits the transaction
-    3. On failure, uses ConflictResolver to:
+    3. On failure, uses CASResult.snapshot for conflict resolution:
        - Read manifest lists for missed snapshots (table mode)
        - Or resolve per-partition conflicts (partition mode)
        - Update transaction state for retry
+
+    The try_cas() call handles latency modeling internally:
+    - Request travels to server (half RTT)
+    - Server captures snapshot and performs CAS
+    - Response returns with snapshot (half RTT)
     """
-    # Model CAS as message-passing:
-    # 1. Request travels to server: get_cas_latency() / 2
-    # 2. Server processes CAS (instantaneous, but reads current state)
-    # 3. Response travels back: get_cas_latency() / 2
-    #
-    # We split the latency to capture state at server-processing time.
+    # Use message-passing API - handles latency internally and returns snapshot
+    cas_result = yield from catalog.try_cas(txn, txn.current_snapshot)
+    server_snapshot = cas_result.snapshot
 
-    # Request travels to server
-    yield sim.timeout(get_cas_latency() / 2)
-
-    # Server processes CAS - capture state at this moment (server time)
-    # This is the state that determines success/failure and is returned on failure
-    cas_seq_at_server = catalog.seq
-    cas_tbl_at_server = {t: catalog.tbl[t] for t in txn.v_dirty.keys()}
-    if PARTITION_ENABLED:
-        cas_partition_seq_at_server = {
-            tbl_id: {p: catalog.partition_seq[tbl_id][p] for p in parts}
-            for tbl_id, parts in txn.partitions_read.items()
-        }
-        for tbl_id, parts in txn.partitions_written.items():
-            if tbl_id not in cas_partition_seq_at_server:
-                cas_partition_seq_at_server[tbl_id] = {}
-            for p in parts:
-                cas_partition_seq_at_server[tbl_id][p] = catalog.partition_seq[tbl_id][p]
-
-    # Perform the actual CAS comparison and update (instantaneous at server)
-    cas_success = catalog.try_CAS(sim, txn)
-
-    # Response travels back to client
-    yield sim.timeout(get_cas_latency() / 2)
-
-    if cas_success:
+    if cas_result.success:
         # Success - transaction committed
         logger.debug(f"{sim.now} TXN {txn.id} commit")
         txn.t_commit = sim.now
@@ -2073,16 +2312,27 @@ def txn_commit(sim, txn, catalog):
             return
 
         # CAS failure response contains catalog state at server-processing time.
-        # This is cas_seq_at_server and cas_tbl_at_server (already received above).
-        # No additional round-trip needed - we have all the info from the failure response.
+        # Use server_snapshot from CASResult (no additional round-trip needed).
 
         if PARTITION_ENABLED:
             # Partition mode: Resolve per-partition conflicts
             logger.debug(f"{sim.now} TXN {txn.id} CAS Fail - resolving partition conflicts")
 
-            # Use catalog state from CAS failure response (no additional round-trip)
-            txn.v_catalog_seq = cas_seq_at_server
-            v_catalog = dict(cas_tbl_at_server)
+            # Extract state from server snapshot
+            txn.v_catalog_seq = server_snapshot.seq
+            v_catalog = {t: server_snapshot.tbl[t] for t in txn.v_dirty.keys()}
+
+            # Build partition_seq snapshot dict from frozen tuples
+            cas_partition_seq_at_server = {}
+            for tbl_id, parts in txn.partitions_read.items():
+                cas_partition_seq_at_server[tbl_id] = {
+                    p: server_snapshot.partition_seq[tbl_id][p] for p in parts
+                }
+            for tbl_id, parts in txn.partitions_written.items():
+                if tbl_id not in cas_partition_seq_at_server:
+                    cas_partition_seq_at_server[tbl_id] = {}
+                for p in parts:
+                    cas_partition_seq_at_server[tbl_id][p] = server_snapshot.partition_seq[tbl_id][p]
 
             # Read table metadata to discover partition states
             # Cost scales with N_PARTITIONS (O(N) bottleneck even for M conflicts)
@@ -2093,49 +2343,47 @@ def txn_commit(sim, txn, catalog):
             # Pass the partition state from CAS failure response for correct message-passing
             yield from resolver.merge_partition_conflicts(sim, txn, catalog, cas_partition_seq_at_server)
 
-            # Read current catalog state for retry
-            # This is a separate round-trip to get the latest partition versions
-            # Without this latency, information would "teleport" from catalog to client
-            yield sim.timeout(get_cas_latency())
+            # Read current catalog state for retry via message-passing API
+            retry_snapshot = yield from catalog.read()
+            txn.current_snapshot = retry_snapshot
 
-            # Now capture the current state (after the read completes)
-            txn.v_catalog_seq = catalog.seq
+            # Update transaction state from fresh snapshot
+            txn.v_catalog_seq = retry_snapshot.seq
             for t in txn.v_dirty.keys():
-                v_catalog[t] = catalog.tbl[t]
+                v_catalog[t] = retry_snapshot.tbl[t]
 
-            # Update partition state for retry
-            resolver.update_partition_state(txn, catalog)
+            # Update partition state for retry using snapshot
+            resolver.update_partition_state_from_snapshot(txn, retry_snapshot)
             resolver.update_write_set(txn, v_catalog)
         else:
-            # Table mode: Original behavior
+            # Table mode: Use snapshot data
             # Calculate snapshots behind using state from CAS failure response
-            n_snapshots_behind = cas_seq_at_server - txn.v_catalog_seq
+            n_snapshots_behind = server_snapshot.seq - txn.v_catalog_seq
             logger.debug(f"{sim.now} TXN {txn.id} CAS Fail - {n_snapshots_behind} snapshots behind")
 
-            # Use catalog state from CAS failure response (no additional round-trip)
-            txn.v_catalog_seq = cas_seq_at_server
-            v_catalog = dict(cas_tbl_at_server)
+            # Use catalog state from server snapshot
+            txn.v_catalog_seq = server_snapshot.seq
+            v_catalog = {t: server_snapshot.tbl[t] for t in txn.v_dirty.keys()}
 
             # Read manifest lists for all snapshots between our read and current
-            # Use average manifest list size for size-based latency estimation
-            avg_ml_size = sum(catalog.ml_offset) // len(catalog.ml_offset) if catalog.ml_offset else None
+            # Use average manifest list size from snapshot
+            avg_ml_size = sum(server_snapshot.ml_offset) // len(server_snapshot.ml_offset) if server_snapshot.ml_offset else None
             yield from resolver.read_manifest_lists(sim, n_snapshots_behind, txn.id, avg_ml_size)
 
             # Merge conflicts for affected tables
-            # In ML+ mode, catalog is needed to re-append on real conflicts
-            yield from resolver.merge_table_conflicts(sim, txn, v_catalog, catalog)
+            # Pass server_snapshot for read-only operations, catalog for ML append mutations
+            yield from resolver.merge_table_conflicts(sim, txn, v_catalog, catalog, server_snapshot)
 
-            # Read current catalog state for retry
-            # This is a separate round-trip to get the latest table versions
-            # Without this latency, information would "teleport" from catalog to client
-            yield sim.timeout(get_cas_latency())
+            # Read current catalog state for retry via message-passing API
+            retry_snapshot = yield from catalog.read()
+            txn.current_snapshot = retry_snapshot
 
-            # Re-capture catalog state after the read completes
-            txn.v_catalog_seq = catalog.seq
+            # Update transaction state from fresh snapshot
+            txn.v_catalog_seq = retry_snapshot.seq
             for t in txn.v_dirty.keys():
-                v_catalog[t] = catalog.tbl[t]
+                v_catalog[t] = retry_snapshot.tbl[t]
                 # Also update v_dirty to current for CAS check (when N_GROUPS == N_TABLES)
-                txn.v_dirty[t] = catalog.tbl[t]
+                txn.v_dirty[t] = retry_snapshot.tbl[t]
 
             # Update write set to the next available version per table
             resolver.update_write_set(txn, v_catalog)
@@ -2277,8 +2525,58 @@ def select_partitions(n_partitions: int) -> tuple[set[int], set[int]]:
     return partitions_read, partitions_written
 
 
+def rand_tbl_from_snapshot(snapshot: CatalogSnapshot):
+    """Select tables for transaction using snapshot state.
+
+    This is the snapshot-based version of rand_tbl. Uses immutable snapshot
+    data instead of direct catalog access, enforcing message-passing semantics.
+
+    Args:
+        snapshot: Immutable catalog snapshot from catalog.read()
+
+    Returns:
+        (tblr, tblw): Dicts mapping table_id -> version for read/write
+    """
+    # If no grouping (N_GROUPS == 1), use all tables
+    if N_GROUPS == 1:
+        available_tables = list(range(N_TABLES))
+        table_pmf = TBL_R_PMF
+        max_tables = N_TABLES
+    else:
+        # Select a random group
+        group_id = np.random.choice(N_GROUPS)
+        available_tables = GROUP_TO_TABLES[group_id]
+        max_tables = len(available_tables)
+
+        # Create PMF for tables in this group
+        # Normalize the original PMF over the available tables
+        table_pmf = np.array([TBL_R_PMF[t] for t in available_tables])
+        table_pmf = table_pmf / table_pmf.sum()
+
+    # how many tables (limit to group size)
+    ntbl_requested = int(np.random.choice(np.arange(1, N_TABLES + 1), p=N_TBL_PMF))
+    ntbl = min(ntbl_requested, max_tables)
+
+    # which tables read - use snapshot's frozen tuple
+    tblr_idx = np.random.choice(available_tables, size=ntbl, replace=False, p=table_pmf).astype(int).tolist()
+    tblr = {t: snapshot.tbl[t] for t in tblr_idx}
+    tblr_idx.sort()
+
+    # write \subseteq read (not empty, read-only txn snapshot)
+    ntblw = int(np.random.choice(np.arange(1, ntbl + 1), p=N_TBL_W_PMF[ntbl]))
+    # uniform random from #tables to write
+    tblw_idx = np.random.choice(tblr_idx, size=ntblw, replace=False).astype(int).tolist()
+    # write versions = current versions + 1
+    tblw = {t: tblr[t] + 1 for t in tblw_idx}
+    return tblr, tblw
+
+
 def rand_tbl(catalog):
-    """Select tables for transaction, respecting group boundaries."""
+    """Select tables for transaction, respecting group boundaries.
+
+    DEPRECATED: Use rand_tbl_from_snapshot() with a CatalogSnapshot instead.
+    This function exists for backward compatibility during migration.
+    """
     # If no grouping (N_GROUPS == 1), use all tables
     if N_GROUPS == 1:
         available_tables = list(range(N_TABLES))
@@ -2317,22 +2615,29 @@ def rand_tbl(catalog):
     return tblr, tblw
 
 def txn_gen(sim, txn_id, catalog):
-    tblr, tblw = rand_tbl(catalog)
+    # Read catalog state via message-passing (pays round-trip latency)
+    start_snapshot = yield from catalog.read()
+
+    # Select tables using snapshot data (no direct catalog access)
+    tblr, tblw = rand_tbl_from_snapshot(start_snapshot)
     t_runtime = T_MIN_RUNTIME + np.random.lognormal(mean=T_RUNTIME_MU, sigma=T_RUNTIME_SIGMA)
     logger.debug(f"{sim.now} TXN {txn_id} {t_runtime} r {tblr} w {tblw}")
-    # check all versions read/written TODO: serializable vs snapshot
-    txn = Txn(txn_id, sim.now, int(t_runtime), catalog.seq, tblr, tblw)
+
+    # Create transaction with snapshot-derived state
+    txn = Txn(txn_id, sim.now, int(t_runtime), start_snapshot.seq, tblr, tblw)
     txn.v_dirty = txn.v_tblr.copy()
     txn.v_dirty.update(txn.v_tblw)
+    txn.start_snapshot = start_snapshot
+    txn.current_snapshot = start_snapshot
 
-    # For append mode, also capture log offset
+    # For append mode, also capture log offset (still needs catalog for log_offset)
     if CATALOG_MODE == "append":
         txn.v_log_offset = catalog.log_offset
 
-    # Capture manifest list offsets for append mode
+    # Capture manifest list offsets from snapshot
     if MANIFEST_LIST_MODE == "append":
         for tbl_id in list(tblr.keys()) + list(tblw.keys()):
-            txn.v_ml_offset[tbl_id] = catalog.ml_offset[tbl_id]
+            txn.v_ml_offset[tbl_id] = start_snapshot.ml_offset[tbl_id]
 
     # Partition mode: select partitions for EACH table and capture per-partition state
     if PARTITION_ENABLED:
@@ -2348,12 +2653,12 @@ def txn_gen(sim, txn_id, catalog):
             # Only include in written if table is being written
             if tbl_id in tblw:
                 txn.partitions_written[tbl_id] = parts_w
-            # Capture per-partition versions (vector clock snapshot)
+            # Capture per-partition versions from snapshot
             txn.v_partition_seq[tbl_id] = {}
             txn.v_partition_ml_offset[tbl_id] = {}
             for p in parts_r:
-                txn.v_partition_seq[tbl_id][p] = catalog.partition_seq[tbl_id][p]
-                txn.v_partition_ml_offset[tbl_id][p] = catalog.partition_ml_offset[tbl_id][p]
+                txn.v_partition_seq[tbl_id][p] = start_snapshot.partition_seq[tbl_id][p]
+                txn.v_partition_ml_offset[tbl_id][p] = start_snapshot.partition_ml_offset[tbl_id][p]
 
         logger.debug(f"{sim.now} TXN {txn_id} partitions r={txn.partitions_read} w={txn.partitions_written}")
 
