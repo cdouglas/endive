@@ -143,9 +143,23 @@ pytest tests/test_storage_provider_config.py  # Provider configs
 ## Documentation
 
 - **[docs/QUICKSTART.md](docs/QUICKSTART.md)** - Getting started
-- **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** - Design and invariants
+- **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** - Design, invariants, and module structure
 - **[docs/RUNNING_EXPERIMENTS.md](docs/RUNNING_EXPERIMENTS.md)** - Running experiments
 - **[experiment_configs/README.md](experiment_configs/README.md)** - Experiment descriptions
+
+## Code Organization
+
+```
+endive/
+├── snapshot.py       # CatalogSnapshot, CASResult (immutable data types)
+├── transaction.py    # Txn, LogEntry (transaction state)
+├── main.py           # Catalog, ConflictResolver, simulation orchestration
+├── config.py         # Configuration loading and validation
+├── capstats.py       # Statistics collection
+└── utils.py          # Utilities (git sha, table partitioning)
+```
+
+Key design: Transactions never access Catalog state directly. All state is obtained via `catalog.read()` or `catalog.try_cas()` which return immutable snapshots, ensuring proper message-passing semantics.
 
 ## References
 

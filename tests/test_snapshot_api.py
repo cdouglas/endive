@@ -12,11 +12,10 @@ import simpy
 import tempfile
 import os
 
+from endive.snapshot import CatalogSnapshot, CASResult
+from endive.transaction import Txn
 from endive.main import (
-    CatalogSnapshot,
-    CASResult,
     Catalog,
-    Txn,
     configure_from_toml,
     rand_tbl_from_snapshot,
 )

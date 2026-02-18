@@ -11,6 +11,34 @@
 - **Transactions**: Capture snapshot version at start, attempt CAS at commit
 - **Conflict Resolution**: Distinguish false vs real conflicts, handle retries
 
+## Module Structure
+
+The simulator is organized into focused modules:
+
+```
+endive/
+├── snapshot.py       # CatalogSnapshot, CASResult (immutable data types)
+├── transaction.py    # Txn, LogEntry (transaction state)
+├── main.py           # Catalog, ConflictResolver, simulation orchestration
+├── config.py         # Configuration loading and validation
+├── capstats.py       # Statistics collection
+└── utils.py          # Utilities (git sha, table partitioning)
+```
+
+### Message-Passing Design
+
+The key architectural principle is **message-passing semantics** between catalog (server) and transactions (client):
+
+1. **CatalogSnapshot**: Immutable frozen dataclass capturing catalog state at a specific time
+2. **CASResult**: Contains success/failure status plus server-time snapshot
+3. **Catalog.read()**: Returns `CatalogSnapshot` with full RTT latency
+4. **Catalog.try_cas()**: Returns `CASResult` with server-time state capture
+
+Transactions **never access Catalog state directly**. All state is obtained via `read()` or `try_cas()` which return immutable snapshots. This ensures:
+- State is captured at a specific point in time
+- Cannot accidentally read stale or future state
+- All reads have explicit latency costs
+
 ## Key Invariants
 
 ### Version Tracking (CRITICAL)

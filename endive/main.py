@@ -12,6 +12,8 @@ import numpy as np
 from tqdm import tqdm
 from endive.capstats import Stats, truncated_zipf_pmf, lognormal_params_from_mean_and_sigma
 from endive.utils import get_git_sha, get_git_sha_short, partition_tables_into_groups
+from endive.snapshot import CatalogSnapshot, CASResult
+from endive.transaction import Txn, LogEntry
 from endive.config import (
     PROVIDER_PROFILES,
     lognormal_mu_from_median,
@@ -1537,46 +1539,14 @@ class ConflictResolver:
 
 
 # =============================================================================
-# CATALOG MODULE: Snapshot types and Catalog class
+# CATALOG MODULE: Catalog class (snapshot types in endive/snapshot.py)
 # =============================================================================
-# This section implements the "server" side of the simulation:
-# - CatalogSnapshot: Immutable state returned to clients via message-passing
-# - CASResult: Result of CAS operations including server-time snapshot
-# - Catalog: The catalog server with read(), try_cas(), and internal state
+# This section implements the "server" side of the simulation.
+# Catalog provides read() and try_cas() which return immutable CatalogSnapshot/CASResult.
 #
 # Design principle: Transactions NEVER access Catalog state directly.
 # All state is obtained via read() or try_cas() which return immutable snapshots.
 # =============================================================================
-
-@dataclass(frozen=True)
-class CatalogSnapshot:
-    """Immutable snapshot of catalog state at a specific time.
-
-    Transactions receive snapshots via message-passing (catalog.read() or CASResult).
-    All catalog state access goes through snapshots, ensuring proper distributed semantics:
-    - State is captured at a specific point in time
-    - Cannot accidentally read stale or future state
-    - All reads have explicit latency costs
-    """
-    seq: int
-    tbl: tuple[int, ...]                              # Frozen table versions
-    partition_seq: tuple[tuple[int, ...], ...] | None  # Frozen partition versions (or None if disabled)
-    ml_offset: tuple[int, ...]                        # Frozen ML offsets per table
-    partition_ml_offset: tuple[tuple[int, ...], ...] | None  # Frozen partition ML offsets (or None)
-    timestamp: int  # Simulation time when snapshot was taken
-
-
-@dataclass(frozen=True)
-class CASResult:
-    """Result of a CAS operation.
-
-    Contains the success/failure status and a snapshot of catalog state
-    at server-processing time. On failure, this snapshot is used for
-    conflict resolution without additional round-trips.
-    """
-    success: bool
-    snapshot: CatalogSnapshot  # State at server processing time
-
 
 class Catalog:
     def __init__(self, sim):
@@ -1858,54 +1828,14 @@ class Catalog:
 
 
 # =============================================================================
-# TRANSACTION MODULE: Transaction state and lifecycle
+# TRANSACTION MODULE (types in endive/transaction.py)
 # =============================================================================
-# This section implements the "client" side of the simulation:
-# - Txn: Transaction state including snapshots from catalog reads
-# - txn_gen: Transaction lifecycle (read -> execute -> commit loop)
-# - txn_commit: Commit with conflict resolution via message-passing
+# Transaction state (Txn, LogEntry) moved to endive/transaction.py.
+# Transaction lifecycle functions (txn_gen, txn_commit) remain here.
 #
 # Design principle: Transactions hold CatalogSnapshots obtained via read() or
 # try_cas(). All catalog state access uses these snapshots, not direct refs.
 # =============================================================================
-
-@dataclass
-class Txn:
-    id: int
-    t_submit: int # ms submitted since start
-    t_runtime: int # ms between submission and commit
-    v_catalog_seq: int # version of catalog read (CAS in storage)
-    v_tblr: dict[int, int] # versions of tables read
-    v_tblw: dict[int, int] # versions of tables written
-    n_retries: int = 0 # number of retries
-    t_commit: int = field(default=-1)
-    t_abort: int = field(default=-1)
-    v_dirty: dict[int, int] = field(default_factory=lambda: defaultdict(dict)) # versions validated (init union(v_tblr, v_tblw))
-    # Append mode fields
-    v_log_offset: int = 0  # Log offset when snapshot was taken (for append mode)
-    v_ml_offset: dict[int, int] = field(default_factory=dict)  # Per-table manifest list offsets
-    # Partition mode fields (when PARTITION_ENABLED)
-    # Indexed by table_id -> set of partition_ids or table_id -> partition_id -> value
-    partitions_read: dict[int, set[int]] = field(default_factory=dict)  # table_id -> partition_ids read
-    partitions_written: dict[int, set[int]] = field(default_factory=dict)  # table_id -> partition_ids written
-    v_partition_seq: dict[int, dict[int, int]] = field(default_factory=dict)  # table_id -> partition_id -> version
-    v_partition_ml_offset: dict[int, dict[int, int]] = field(default_factory=dict)  # table_id -> partition_id -> offset
-    # Snapshot-based fields (for message-passing semantics)
-    start_snapshot: 'CatalogSnapshot | None' = None  # Initial catalog state from read()
-    current_snapshot: 'CatalogSnapshot | None' = None  # Latest snapshot (updated on CAS failure)
-
-
-@dataclass
-class LogEntry:
-    """Log entry for append-based catalog operations.
-
-    Each entry represents a committed transaction's effect on the catalog.
-    Used for conflict detection and compaction in append mode.
-    """
-    txn_id: int  # Transaction ID (used for deduplication)
-    tables_written: dict[int, int]  # table_id -> new_version after this txn
-    tables_read: dict[int, int]  # table_id -> version_read by this txn
-    sealed: bool = False  # True if this entry triggers compaction
 
 
 class AppendCatalog:
