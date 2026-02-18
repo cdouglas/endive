@@ -68,18 +68,17 @@ class TestFalseConflicts:
                 assert endive.main.STATS.manifest_files_read == 0, "Should not read manifest files"
                 assert endive.main.STATS.manifest_files_written == 0, "Should not write manifest files"
 
-                # In rewrite mode, false conflicts SHOULD trigger manifest LIST operations
-                # (need to create new ML with combined pointers from both transactions)
-                # Note: ML reads/writes count may be slightly higher if multiple tables are dirty
-                # or if there are edge cases with multi-retry transactions
+                # In rewrite mode, false conflicts SHOULD trigger manifest LIST operations:
+                # 1. History reads: N MLs for N snapshots behind (like Iceberg's validationHistory)
+                # 2. Resolution reads/writes: 1 ML per conflict (rewrite with combined pointers)
+                # Note: History reads can be much larger than conflict count under high contention
+                # because transactions may be many snapshots behind when they retry
                 total_conflicts = endive.main.STATS.false_conflicts + endive.main.STATS.real_conflicts
                 assert endive.main.STATS.manifest_list_reads >= endive.main.STATS.false_conflicts, \
                     f"Expected at least {endive.main.STATS.false_conflicts} ML reads, got {endive.main.STATS.manifest_list_reads}"
                 assert endive.main.STATS.manifest_list_writes >= endive.main.STATS.false_conflicts, \
                     f"Expected at least {endive.main.STATS.false_conflicts} ML writes, got {endive.main.STATS.manifest_list_writes}"
-                # Verify ML operations are close to conflict count (within 10%)
-                assert endive.main.STATS.manifest_list_reads <= total_conflicts * 1.1 + 5, \
-                    f"ML reads ({endive.main.STATS.manifest_list_reads}) too high vs conflicts ({total_conflicts})"
+                # ML reads include history + resolution; no upper bound since history can be large
 
                 print(f"✓ False conflicts (rewrite mode) test passed")
                 print(f"  False conflicts: {endive.main.STATS.false_conflicts}")
@@ -135,16 +134,19 @@ class TestFalseConflicts:
                 assert endive.main.STATS.manifest_files_read == 0, "Should not read manifest files"
                 assert endive.main.STATS.manifest_files_written == 0, "Should not write manifest files"
 
-                # In ML+ mode, false conflicts should NOT trigger ML operations
+                # In ML+ mode, false conflicts skip ML read/write in RESOLUTION
                 # (tentative entry is still valid - readers filter by committed txn list)
-                assert endive.main.STATS.manifest_list_reads == 0, \
-                    f"ML+ mode should skip ML reads on false conflicts, got {endive.main.STATS.manifest_list_reads}"
+                # BUT we still read ML HISTORY for conflict detection (like Iceberg's validationHistory)
+                # So ML reads > 0 (history), but ML writes == 0 (skipped in resolution)
+                assert endive.main.STATS.manifest_list_reads > 0, \
+                    f"Should have ML history reads, got {endive.main.STATS.manifest_list_reads}"
                 assert endive.main.STATS.manifest_list_writes == 0, \
                     f"ML+ mode should skip ML writes on false conflicts, got {endive.main.STATS.manifest_list_writes}"
 
                 print(f"✓ False conflicts (ML+ mode) test passed")
                 print(f"  False conflicts: {endive.main.STATS.false_conflicts}")
-                print(f"  Manifest list operations: 0 (tentative entries still valid)")
+                print(f"  Manifest list reads (history): {endive.main.STATS.manifest_list_reads}")
+                print(f"  Manifest list writes: 0 (tentative entries still valid)")
 
             finally:
                 os.unlink(config_path)

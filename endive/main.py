@@ -934,6 +934,7 @@ class ConflictResolver:
         """Read n manifest lists in batches respecting MAX_PARALLEL limit.
 
         Yields timeout events for simulating parallel I/O with batching.
+        This reads ML history for conflict resolution (like Iceberg's validationHistory).
 
         Args:
             sim: SimPy environment
@@ -957,6 +958,9 @@ class ConflictResolver:
                 batch_latencies = [get_manifest_list_latency('read') for _ in range(batch_size)]
             yield sim.timeout(max(batch_latencies))
             logger.debug(f"{sim.now} TXN {txn_id} Read batch of {batch_size} manifest lists")
+
+        # Track ML reads for history traversal
+        STATS.manifest_list_reads += n_snapshots
 
     @staticmethod
     def merge_table_conflicts(sim, txn: 'Txn', v_catalog: dict, catalog=None):
@@ -2074,6 +2078,8 @@ def txn_commit(sim, txn, catalog):
             txn.v_catalog_seq = catalog.seq
             for t in txn.v_dirty.keys():
                 v_catalog[t] = catalog.tbl[t]
+                # Also update v_dirty to current for CAS check (when N_GROUPS == N_TABLES)
+                txn.v_dirty[t] = catalog.tbl[t]
 
             # Update write set to the next available version per table
             resolver.update_write_set(txn, v_catalog)
