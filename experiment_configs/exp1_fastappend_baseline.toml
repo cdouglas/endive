@@ -1,0 +1,51 @@
+# Experiment 1: FastAppend Baseline
+#
+# Goal: Establish baseline throughput with cheapest operation type and instant catalog.
+#
+# Operation types: 100% FastAppend (no validation, ~160ms retry cost)
+# Catalog: Instant (1ms CAS) to isolate storage I/O effects
+#
+# Sweep: inter_arrival.scale = [10, 20, 50, 100, 200, 500, 1000, 2000, 5000] ms
+#
+# Validation:
+# - All operation_type values should be "fast_append"
+# - No validation_exception aborts (FastAppend cannot have real conflicts)
+# - Success rate monotonically decreases as arrival rate decreases (higher load)
+
+[simulation]
+duration_ms = 3600000  # 1 hour
+output_path = "results.parquet"
+
+[experiment]
+label = "exp1_fa_baseline"
+
+[catalog]
+num_tables = 1
+num_groups = 1
+table_metadata_inlined = true
+
+[transaction]
+retry = 10
+runtime.min = 30000
+runtime.mean = 180000
+runtime.sigma = 1.5
+
+inter_arrival.distribution = "exponential"
+inter_arrival.scale = 100.0
+
+# 100% FastAppend - no validation, no real conflicts possible
+operation_types.fast_append = 1.0
+operation_types.validated_overwrite = 0.0
+real_conflict_probability = 0.0  # Doesn't matter for FastAppend
+
+# No manifest file operations needed for false conflicts
+conflicting_manifests.distribution = "exponential"
+conflicting_manifests.mean = 3.0
+conflicting_manifests.min = 1
+conflicting_manifests.max = 10
+manifest_list_mode = "rewrite"
+
+[storage]
+provider = "instant"  # 1ms CAS to isolate storage effects
+max_parallel = 4
+min_latency = 5

@@ -1,0 +1,62 @@
+# Experiment 2: FastAppend/ValidatedOverwrite Mix Heatmap
+#
+# Goal: Understand how maintenance operations (compaction, MERGE INTO) compete
+# with streaming appends across different workload mixes and arrival rates.
+#
+# 2D Sweep:
+#   X-axis: inter_arrival.scale = [10, 20, 50, 100, 200, 500, 1000, 2000, 5000] ms
+#   Y-axis: operation_types.fast_append = [1.0, 0.9, 0.8, 0.7, 0.5, 0.3, 0.1, 0.0]
+#           (validated_overwrite = 1.0 - fast_append)
+#
+# Real conflict probability: 0.1 (10% of VO conflicts are data overlap -> abort)
+#
+# Heatmaps to generate:
+#   1. VO transaction success rate
+#   2. FastAppend transaction success rate
+#   3. Overall mean commit latency
+#   4. VO P99 commit latency
+#   5. Validation exception count (as % of VO transactions)
+#
+# Expected patterns:
+#   - VO success rate degrades faster than FastAppend as load increases
+#   - At high FA ratio (0.9), VO transactions face massive I/O convoy
+#   - FastAppend success rate relatively stable across mix ratios
+
+[simulation]
+duration_ms = 3600000  # 1 hour
+output_path = "results.parquet"
+
+[experiment]
+label = "exp2_mix_heatmap"
+
+[catalog]
+num_tables = 1
+num_groups = 1
+table_metadata_inlined = true
+
+[transaction]
+retry = 10
+runtime.min = 30000
+runtime.mean = 180000
+runtime.sigma = 1.5
+
+inter_arrival.distribution = "exponential"
+inter_arrival.scale = 100.0  # Swept parameter
+
+# 50/50 mix as baseline (parameters swept in runner)
+operation_types.fast_append = 0.5
+operation_types.validated_overwrite = 0.5
+
+# 10% of VO conflicts are real (data overlap) -> ValidationException abort
+real_conflict_probability = 0.1
+
+conflicting_manifests.distribution = "exponential"
+conflicting_manifests.mean = 3.0
+conflicting_manifests.min = 1
+conflicting_manifests.max = 10
+manifest_list_mode = "rewrite"
+
+[storage]
+provider = "instant"  # 1ms CAS to isolate storage effects
+max_parallel = 4
+min_latency = 5

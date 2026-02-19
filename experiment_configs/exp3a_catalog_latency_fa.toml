@@ -1,0 +1,61 @@
+# Experiment 3a: Catalog Latency Sweep (100% FastAppend)
+#
+# Goal: Determine catalog latency impact on pure append workload.
+#
+# Catalog latency sweep: [instant, s3x, azure_premium, s3, gcp]
+#   - Instant: ~1ms
+#   - S3 Express: ~15ms
+#   - Azure Premium: ~50ms
+#   - S3 / Azure: ~100ms
+#   - GCP: ~500ms
+#
+# Arrival rate sweep: [50, 100, 200, 500] ms (subset of Exp 1)
+#
+# Operation types: 100% FastAppend
+#
+# Expected patterns:
+#   - Higher catalog latency -> lower throughput at same arrival rate
+#   - Effect is moderate (catalog adds ~1 RTT per attempt)
+#   - Catalog latency dominates at low contention, storage I/O at high contention
+#
+# Validation:
+#   - All operation_type values should be "fast_append"
+#   - No validation_exception aborts
+#   - Clear ordering: instant > s3x > azure_premium > s3 > gcp
+
+[simulation]
+duration_ms = 3600000  # 1 hour
+output_path = "results.parquet"
+
+[experiment]
+label = "exp3a_catalog_fa"
+
+[catalog]
+num_tables = 1
+num_groups = 1
+table_metadata_inlined = true
+
+[transaction]
+retry = 10
+runtime.min = 30000
+runtime.mean = 180000
+runtime.sigma = 1.5
+
+inter_arrival.distribution = "exponential"
+inter_arrival.scale = 100.0  # Swept parameter
+
+# 100% FastAppend
+operation_types.fast_append = 1.0
+operation_types.validated_overwrite = 0.0
+real_conflict_probability = 0.0
+
+conflicting_manifests.distribution = "exponential"
+conflicting_manifests.mean = 3.0
+conflicting_manifests.min = 1
+conflicting_manifests.max = 10
+manifest_list_mode = "rewrite"
+
+[storage]
+provider = "s3"  # Swept parameter: instant, s3x, azure_premium, s3, gcp
+max_parallel = 4
+min_latency = 5

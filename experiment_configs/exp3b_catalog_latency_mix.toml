@@ -1,0 +1,64 @@
+# Experiment 3b: Catalog Latency Sweep (90/10 FastAppend/ValidatedOverwrite Mix)
+#
+# Goal: Determine catalog latency impact when maintenance operations are present.
+#
+# Catalog latency sweep: [instant, s3x, azure_premium, s3, gcp]
+#   - Instant: ~1ms
+#   - S3 Express: ~15ms
+#   - Azure Premium: ~50ms
+#   - S3 / Azure: ~100ms
+#   - GCP: ~500ms
+#
+# Arrival rate sweep: [50, 100, 200, 500] ms
+#
+# Operation types: 90% FastAppend, 10% ValidatedOverwrite
+# Real conflict probability: 0.1 (10% of VO conflicts -> ValidationException abort)
+#
+# Expected patterns:
+#   - VO success rate degrades more than FA as catalog latency increases
+#   - Higher catalog latency -> more time for txns to commit -> higher n_behind -> larger I/O convoy
+#   - Compare to Exp 3a: mixed workload more sensitive to catalog latency
+#
+# Validation:
+#   - Operation type distribution matches ~90/10 (within sampling variance)
+#   - validation_exception aborts only for validated_overwrite transactions
+#   - Clear ordering of throughput: instant > s3x > azure_premium > s3 > gcp
+
+[simulation]
+duration_ms = 3600000  # 1 hour
+output_path = "results.parquet"
+
+[experiment]
+label = "exp3b_catalog_mix"
+
+[catalog]
+num_tables = 1
+num_groups = 1
+table_metadata_inlined = true
+
+[transaction]
+retry = 10
+runtime.min = 30000
+runtime.mean = 180000
+runtime.sigma = 1.5
+
+inter_arrival.distribution = "exponential"
+inter_arrival.scale = 100.0  # Swept parameter
+
+# 90% FastAppend, 10% ValidatedOverwrite (realistic mixed workload)
+operation_types.fast_append = 0.9
+operation_types.validated_overwrite = 0.1
+
+# 10% of VO conflicts are real (data overlap) -> ValidationException abort
+real_conflict_probability = 0.1
+
+conflicting_manifests.distribution = "exponential"
+conflicting_manifests.mean = 3.0
+conflicting_manifests.min = 1
+conflicting_manifests.max = 10
+manifest_list_mode = "rewrite"
+
+[storage]
+provider = "s3"  # Swept parameter: instant, s3x, azure_premium, s3, gcp
+max_parallel = 4
+min_latency = 5
