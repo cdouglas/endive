@@ -214,6 +214,43 @@ With partitions enabled:
 - Conflicts only occur when transactions touch the same partition
 - Higher partition count reduces conflict probability
 
+## Operation Type Experiments
+
+These experiments study the impact of Iceberg operation types (FastAppend, ValidatedOverwrite) on commit throughput.
+
+### Experiment Groups
+
+| Group | Config | Sweep | Description |
+|-------|--------|-------|-------------|
+| `op_type_baseline` | `exp1_fastappend_baseline.toml` | load | 100% FastAppend baseline |
+| `op_type_heatmap` | `exp2_mix_heatmap.toml` | load × fa_ratio | 2D heatmap: operation mix impact |
+| `op_type_catalog` | `exp3a_catalog_latency_fa.toml` | provider × load | Catalog latency (100% FA) |
+| `op_type_catalog` | `exp3b_catalog_latency_mix.toml` | provider × load | Catalog latency (90/10 mix) |
+
+### Operation Types
+
+| Type | Validation | Retry Cost | Can Abort |
+|------|------------|------------|-----------|
+| `fast_append` | None | ~160ms (1 ML read/write) | No |
+| `validated_overwrite` | O(N) ML reads | ~N×100ms | Yes (ValidationException) |
+
+### Running
+
+```bash
+# Quick test (1 min, subset of params)
+python scripts/run_all_experiments.py --groups op_type_baseline --quick --seeds 1
+
+# Full experiments
+python scripts/run_all_experiments.py --groups op_type_baseline,op_type_heatmap --seeds 5
+```
+
+### Validation
+
+```bash
+python scripts/validate_experiments.py --run    # Run V1-V5 validation experiments
+python scripts/validate_experiments.py --check-only  # Validate existing results
+```
+
 ## Archive
 
 Old experiment configs (expX_Y naming) are in `archive/`.
