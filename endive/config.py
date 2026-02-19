@@ -76,7 +76,9 @@ PROVIDER_PROFILES = {
     # PUT latency model from Durner et al. VLDB 2023:
     #   latency = base_latency + size * latency_per_mib
     #   base_latency ~30ms (first byte), throughput ~50 MiB/s (20 ms/MiB)
+    # min_latency: Minimum observed in YCSB benchmarks (CAS)
     "s3": {
+        "min_latency": 43,  # YCSB measured: CAS min=42.7ms
         "put": {
             "base_latency_ms": 30,       # Durner et al. Fig 2: ~30ms first byte
             "latency_per_mib_ms": 20,    # Durner et al. Sec 2.8: 50 MiB/s = 20ms/MiB
@@ -106,7 +108,9 @@ PROVIDER_PROFILES = {
     # Append failure: median=22.6ms (1.09x), similar shape
     # PUT latency: Estimated from S3 Express positioning as ~3x faster than S3 Standard
     #   S3 Express is designed for single-digit ms latency for small objects
+    # min_latency: Minimum observed in YCSB benchmarks (append slightly lower than CAS)
     "s3x": {
+        "min_latency": 10,  # YCSB measured: append min=10.2ms, CAS min=12.9ms
         "put": {
             "base_latency_ms": 10,       # Estimate: ~3x faster than S3 Standard (30ms)
             "latency_per_mib_ms": 10,    # Estimate: ~2x faster throughput (100 MiB/s)
@@ -140,7 +144,9 @@ PROVIDER_PROFILES = {
     # Append failure: median=2072ms, sigma=0.68 (COMPLETELY DIFFERENT DISTRIBUTION!)
     # PUT latency: Estimated from Azure documentation and Durner et al. Cloud X/Y comparison
     #   Azure typically has higher latency than AWS; Cloud Y in Durner had 12-15 ms/MiB
+    # min_latency: Minimum observed in YCSB benchmarks (append slightly lower than CAS)
     "azure": {
+        "min_latency": 51,  # YCSB measured: append min=51.1ms, CAS min=58.2ms
         "put": {
             "base_latency_ms": 50,       # Estimate: Azure typically higher latency than AWS
             "latency_per_mib_ms": 25,    # Estimate: ~40 MiB/s, slower than S3
@@ -175,7 +181,9 @@ PROVIDER_PROFILES = {
     # Append success: median=70ms, sigma=0.23
     # Append failure: median=2534ms, sigma=0.65 (COMPLETELY DIFFERENT DISTRIBUTION!)
     # PUT latency: Estimated from Premium tier positioning (~1.5x faster than Standard)
+    # min_latency: Minimum observed in YCSB benchmarks (append lower than CAS)
     "azurex": {
+        "min_latency": 40,  # YCSB measured: append min=39.8ms, CAS min=46.1ms
         "put": {
             "base_latency_ms": 30,       # Estimate: Premium ~1.7x faster than Standard
             "latency_per_mib_ms": 15,    # Estimate: ~67 MiB/s, faster than Standard
@@ -207,7 +215,9 @@ PROVIDER_PROFILES = {
     # CAS success: median=170ms, sigma=0.91 (extremely heavy tails) (YCSB June 2025)
     # CAS failure: mean=7111ms, estimated median≈4000-5000ms based on heavy tails
     # PUT latency: Durner et al. Cloud X had 12-15 ms/MiB; GCP likely similar or slower
+    # min_latency: Minimum observed in YCSB benchmarks (CAS only, no append data)
     "gcp": {
+        "min_latency": 118,  # YCSB measured: CAS min=117.7ms
         "put": {
             "base_latency_ms": 40,       # Estimate: similar to Cloud X in Durner et al.
             "latency_per_mib_ms": 17,    # Durner et al. Cloud X: 12-15 ms/MiB, estimate 17
@@ -232,7 +242,9 @@ PROVIDER_PROFILES = {
         "contention_scaling": {"cas": 0.70, "append": None},
     },
     # Hypothetical infinitely fast system for "what if" experiments
+    # min_latency: 1ms floor (messages require time)
     "instant": {
+        "min_latency": 1,  # Synthetic: minimum possible
         "put": {
             "base_latency_ms": 0.5,      # Near-instant base latency
             "latency_per_mib_ms": 0.1,   # ~10 GB/s effective throughput
@@ -410,6 +422,10 @@ def apply_provider_defaults(provider: str, storage_cfg: dict, catalog_backend: s
         # Size-based PUT latency (always from storage provider)
         if profile.get('put'):
             result['T_PUT'] = profile['put']
+
+        # Provider-specific minimum latency (physical network floor)
+        if 'min_latency' in profile:
+            result['MIN_LATENCY'] = profile['min_latency']
 
     return result
 

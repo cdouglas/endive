@@ -261,11 +261,10 @@ def configure_from_toml(config_file: str):
     LOG_ENTRY_SIZE = config["catalog"].get("log_entry_size", 100)  # 100 bytes default
 
     # Load storage and catalog configuration
-    MAX_PARALLEL = config["storage"]["max_parallel"]
-    MIN_LATENCY = config["storage"]["min_latency"]
-
     storage_cfg = config.get("storage", {})
     catalog_cfg = config.get("catalog", {})
+
+    MAX_PARALLEL = config["storage"]["max_parallel"]
 
     # Provider and backend configuration
     STORAGE_PROVIDER = storage_cfg.get("provider", None)
@@ -290,6 +289,15 @@ def configure_from_toml(config_file: str):
         )
     else:
         provider_defaults = {}
+
+    # MIN_LATENCY: use provider default if available, else explicit config, else 0
+    # Provider profiles define physical network floors based on measured distributions
+    if 'MIN_LATENCY' in provider_defaults and 'min_latency' not in storage_cfg:
+        MIN_LATENCY = provider_defaults['MIN_LATENCY']
+    elif 'min_latency' in storage_cfg:
+        MIN_LATENCY = storage_cfg['min_latency']
+    else:
+        MIN_LATENCY = 0.0  # No floor (not recommended)
 
     # === STORAGE OPERATIONS (always from storage, never from catalog service) ===
 

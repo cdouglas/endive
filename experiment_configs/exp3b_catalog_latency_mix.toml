@@ -61,4 +61,3 @@ manifest_list_mode = "rewrite"
 [storage]
 provider = "s3"  # Swept parameter: instant, s3x, azure_premium, s3, gcp
 max_parallel = 4
-min_latency = 5

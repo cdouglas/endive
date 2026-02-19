@@ -17,7 +17,6 @@ num_groups = 1
 [storage]
 provider = "instant"
 max_parallel = 4
-min_latency = 5
 
 [transaction]
 retry = 10

@@ -48,4 +48,3 @@ manifest_list_mode = "rewrite"
 [storage]
 provider = "instant"  # 1ms CAS to isolate storage effects
 max_parallel = 4
-min_latency = 5
