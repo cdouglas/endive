@@ -106,6 +106,7 @@ MANIFEST_LIST_ENTRY_SIZE: int  # Average bytes per manifest list entry
 # Weights must sum to 1.0. Default is 100% FastAppend for backward compatibility.
 OPERATION_TYPE_WEIGHTS: dict[str, float]  # {"fast_append": 0.7, "merge_append": 0.2, "validated_overwrite": 0.1}
 MANIFESTS_PER_CONCURRENT_COMMIT: float  # For MergeAppend: manifests to re-merge per commit behind
+DATA_OVERLAP_PROBABILITY: float  # For partitions: probability of data overlap within overlapping partition
 
 # Partition-level modeling (within a single table)
 # When enabled, transactions span multiple partitions with per-partition conflict detection
@@ -224,7 +225,7 @@ def configure_from_toml(config_file: str):
     global T_PUT, TABLE_METADATA_SIZE_BYTES, PARTITION_METADATA_ENTRY_SIZE
     global PARTITION_ENABLED, N_PARTITIONS, PARTITION_SELECTION_DIST, PARTITION_ZIPF_ALPHA
     global PARTITIONS_PER_TXN_MEAN, PARTITIONS_PER_TXN_MAX
-    global OPERATION_TYPE_WEIGHTS, MANIFESTS_PER_CONCURRENT_COMMIT
+    global OPERATION_TYPE_WEIGHTS, MANIFESTS_PER_CONCURRENT_COMMIT, DATA_OVERLAP_PROBABILITY
 
     with open(config_file, "rb") as f:
         config = tomllib.load(f)
@@ -477,6 +478,11 @@ def configure_from_toml(config_file: str):
 
     # For MergeAppend: manifests to re-merge per concurrent commit
     MANIFESTS_PER_CONCURRENT_COMMIT = config.get("transaction", {}).get("manifests_per_concurrent_commit", 1.0)
+    # Data overlap probability within overlapping partitions (for partition-aware conflict resolution)
+    # Defaults to REAL_CONFLICT_PROBABILITY for backward compatibility
+    DATA_OVERLAP_PROBABILITY = config.get("transaction", {}).get("data_overlap_probability", None)
+    if DATA_OVERLAP_PROBABILITY is None:
+        DATA_OVERLAP_PROBABILITY = REAL_CONFLICT_PROBABILITY
 
     # === PARTITION CONFIGURATION ===
     # Partition-level modeling: transactions span multiple partitions with per-partition conflicts
@@ -2312,15 +2318,45 @@ def txn_commit(sim, txn, catalog):
         # Use server_snapshot from CASResult (no additional round-trip needed).
 
         # Use operation-aware conflict resolution if operation_type is set
-        if txn.operation_type is not None and not PARTITION_ENABLED:
-            # New operation-aware resolution (table mode only for now)
-            result = yield from resolve_conflict(
-                sim, txn, server_snapshot,
-                real_conflict_probability=REAL_CONFLICT_PROBABILITY,
-                manifest_list_mode=MANIFEST_LIST_MODE,
-                manifests_per_commit=MANIFESTS_PER_CONCURRENT_COMMIT,
-                stats=STATS,
-            )
+        if txn.operation_type is not None:
+            if PARTITION_ENABLED:
+                # Partition-aware operation resolution
+                from endive.conflict import resolve_partition_conflict
+                logger.debug(f"{sim.now} TXN {txn.id} CAS Fail - partition-aware conflict resolution")
+
+                # Build partition_seq snapshot dict from frozen tuples
+                cas_partition_seq_at_server = {}
+                for tbl_id, parts in txn.partitions_read.items():
+                    cas_partition_seq_at_server[tbl_id] = {
+                        p: server_snapshot.partition_seq[tbl_id][p] for p in parts
+                    }
+                for tbl_id, parts in txn.partitions_written.items():
+                    if tbl_id not in cas_partition_seq_at_server:
+                        cas_partition_seq_at_server[tbl_id] = {}
+                    for p in parts:
+                        cas_partition_seq_at_server[tbl_id][p] = server_snapshot.partition_seq[tbl_id][p]
+
+                # Read table metadata to discover partition states
+                if not TABLE_METADATA_INLINED:
+                    yield sim.timeout(get_table_metadata_latency('read'))
+
+                result = yield from resolve_partition_conflict(
+                    sim, txn, server_snapshot,
+                    partition_seq_snapshot=cas_partition_seq_at_server,
+                    data_overlap_probability=DATA_OVERLAP_PROBABILITY,
+                    manifest_list_mode=MANIFEST_LIST_MODE,
+                    manifests_per_commit=MANIFESTS_PER_CONCURRENT_COMMIT,
+                    stats=STATS,
+                )
+            else:
+                # Table-mode operation-aware resolution
+                result = yield from resolve_conflict(
+                    sim, txn, server_snapshot,
+                    real_conflict_probability=REAL_CONFLICT_PROBABILITY,
+                    manifest_list_mode=MANIFEST_LIST_MODE,
+                    manifests_per_commit=MANIFESTS_PER_CONCURRENT_COMMIT,
+                    stats=STATS,
+                )
 
             if not result.should_retry:
                 # Real conflict on validated operation - abort with ValidationException
@@ -2336,14 +2372,19 @@ def txn_commit(sim, txn, catalog):
             # Update write set to the next available version per table
             v_catalog = {t: retry_snapshot.tbl[t] for t in txn.v_dirty.keys()}
             ConflictResolver.update_write_set(txn, v_catalog)
+
+            # Update partition state for retry if in partition mode
+            if PARTITION_ENABLED:
+                ConflictResolver.update_partition_state_from_snapshot(txn, retry_snapshot)
+
             return
 
-        # Legacy conflict resolution (partition mode or no operation_type)
+        # Legacy conflict resolution (no operation_type set)
         resolver = ConflictResolver()
 
         if PARTITION_ENABLED:
-            # Partition mode: Resolve per-partition conflicts
-            logger.debug(f"{sim.now} TXN {txn.id} CAS Fail - resolving partition conflicts")
+            # Partition mode: Resolve per-partition conflicts (legacy path)
+            logger.debug(f"{sim.now} TXN {txn.id} CAS Fail - resolving partition conflicts (legacy)")
 
             # Extract state from server snapshot
             txn.v_catalog_seq = server_snapshot.seq

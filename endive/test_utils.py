@@ -174,6 +174,7 @@ def create_test_config(
     seed: Optional[int] = 42,
     duration_ms: int = 10000,
     inter_arrival_scale: float = 500.0,
+    extra_config: str = "",
     **kwargs
 ) -> str:
     """Create a test configuration file with common parameters.
@@ -185,6 +186,7 @@ def create_test_config(
         seed: Random seed (None for random)
         duration_ms: Simulation duration
         inter_arrival_scale: Mean inter-arrival time
+        extra_config: Additional TOML content to append (e.g., partition settings)
         **kwargs: Additional config overrides
 
     Returns:
@@ -239,6 +241,7 @@ T_MANIFEST_FILE.read.mean = 50
 T_MANIFEST_FILE.read.stddev = 5
 T_MANIFEST_FILE.write.mean = 60
 T_MANIFEST_FILE.write.stddev = 6
+{extra_config}
 """
 
     with tempfile.NamedTemporaryFile(mode='w', suffix='.toml', delete=False) as f:

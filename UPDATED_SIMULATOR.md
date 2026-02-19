@@ -62,8 +62,8 @@ manifests_per_concurrent_commit = 1.0
 | File | Purpose |
 |------|---------|
 | `endive/operation.py` | OperationType enum, ConflictCost, OperationBehavior classes |
-| `endive/conflict.py` | resolve_conflict() function, ConflictResolverV2 |
-| `tests/test_operation_types.py` | 28 tests for operation type behavior |
+| `endive/conflict.py` | resolve_conflict(), resolve_partition_conflict(), ConflictResolverV2 |
+| `tests/test_operation_types.py` | 35 tests (operation types + partition-aware conflicts) |
 
 ## Modified Files
 
@@ -79,7 +79,7 @@ manifests_per_concurrent_commit = 1.0
 **Default behavior unchanged**: When no `operation_types` section is configured (or 100% fast_append), the simulator uses legacy conflict resolution. This ensures:
 
 - Existing configs produce identical results
-- All existing tests pass (431 tests, 0 failures)
+- All existing tests pass (438 tests, 0 failures)
 - No changes required to existing experiment configurations
 
 ## Key Behavioral Changes
@@ -93,6 +93,54 @@ manifests_per_concurrent_commit = 1.0
 - FastAppend/MergeAppend: No O(N) cost, no real conflicts possible
 - ValidatedOverwrite: O(N) cost, real conflicts **abort** with ValidationException
 - `real_conflict_probability` only applies to ValidatedOverwrite transactions
+
+## Partition-Aware Conflict Resolution
+
+When partition mode is enabled (`partition.enabled = true`) with operation types, conflicts are resolved at the partition level:
+
+### Key Insight
+
+**Real conflicts are discovered AFTER reading the ML for that partition**. The ML read cost is paid before we know if it's a real conflict.
+
+### Conflict Resolution Flow
+
+1. **Identify overlapping partitions**: Partitions where version changed since transaction read
+2. **For each overlapping partition**:
+   - Pay ML read cost (discovering the conflict state)
+   - For ValidatedOverwrite: Roll dice for data overlap per partition
+     - If data overlap (real conflict): **ABORT** (ML read cost already paid)
+     - If no data overlap (false conflict): Pay ML write cost (merge)
+   - For FastAppend/MergeAppend: Always pay merge cost (no validation)
+
+### Configuration
+
+```toml
+[transaction]
+# Probability of data overlap within an overlapping partition
+# Defaults to real_conflict_probability if not specified
+data_overlap_probability = 0.3
+
+[partition]
+enabled = true
+num_partitions = 10
+```
+
+### Cost Model
+
+For a transaction with P overlapping partitions:
+
+| Operation Type | ML Reads | ML Writes | Abort Possible |
+|----------------|----------|-----------|----------------|
+| FastAppend | P | P (rewrite) or 0 (ML+) | No |
+| MergeAppend | P | P (rewrite) or 0 (ML+) | No |
+| ValidatedOverwrite | P (before abort) | P (if no abort) | Yes |
+
+### New Functions
+
+- `resolve_partition_conflict()` in `conflict.py`: Main entry point
+- `_compute_overlapping_partitions()`: Identifies partitions with version changes
+- `_read_partition_manifest_lists()`: Pays ML read cost per partition
+- `_resolve_partition_false_conflict()`: Handles merge for non-conflicting partitions
 
 ## Statistics Tracking
 

@@ -550,5 +550,476 @@ class TestConfigValidation:
         assert any('abort' in w.lower() or 'validationexception' in w.lower() for w in warnings)
 
 
+class TestPartitionAwareConflictResolution:
+    """Tests for partition-aware conflict resolution with operation types."""
+
+    def test_compute_overlapping_partitions(self):
+        """Should correctly identify partitions with version changes."""
+        from endive.conflict import _compute_overlapping_partitions
+        from endive.transaction import Txn
+
+        txn = Txn(
+            id=1,
+            t_submit=0,
+            t_runtime=1000,
+            v_catalog_seq=10,
+            v_tblr={0: 10},
+            v_tblw={0: 10},
+        )
+        # Txn read/wrote partitions 0 and 1
+        txn.partitions_read = {0: {0, 1}}
+        txn.partitions_written = {0: {0, 1}}
+        # Txn saw version 5 for both partitions
+        txn.v_partition_seq = {0: {0: 5, 1: 5}}
+
+        # Partition 0 changed to v6, partition 1 unchanged
+        partition_seq_snapshot = {0: {0: 6, 1: 5}}
+
+        overlapping = _compute_overlapping_partitions(txn, partition_seq_snapshot)
+
+        assert overlapping == {0: {0}}, "Only partition 0 should be overlapping"
+
+    def test_partition_conflict_resolution_fast_append_always_retries(self):
+        """FastAppend should always retry, never abort."""
+        from endive.conflict import resolve_partition_conflict
+        from endive.transaction import Txn
+        from endive.snapshot import CatalogSnapshot
+        from endive.operation import OperationType
+        from endive.main import configure_from_toml
+        from endive.test_utils import create_test_config
+        import endive.main
+        import simpy
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = create_test_config(
+                output_path=os.path.join(tmpdir, "test.parquet"),
+                seed=42,
+                duration_ms=1000,
+            )
+
+            try:
+                configure_from_toml(config_path)
+                endive.main.STATS = Stats()
+
+                env = simpy.Environment()
+
+                txn = Txn(
+                    id=1,
+                    t_submit=0,
+                    t_runtime=1000,
+                    v_catalog_seq=10,
+                    v_tblr={0: 10},
+                    v_tblw={0: 10},
+                )
+                txn.operation_type = OperationType.FAST_APPEND
+                txn.partitions_read = {0: {0}}
+                txn.partitions_written = {0: {0}}
+                txn.v_partition_seq = {0: {0: 5}}
+
+                snapshot = CatalogSnapshot(
+                    seq=11,
+                    tbl=(11,),
+                    partition_seq=((6,),),
+                    ml_offset=(1000,),
+                    partition_ml_offset=((1000,),),
+                    timestamp=1000,
+                )
+
+                partition_seq_snapshot = {0: {0: 6}}
+
+                def run_resolution():
+                    result = yield from resolve_partition_conflict(
+                        env, txn, snapshot,
+                        partition_seq_snapshot=partition_seq_snapshot,
+                        data_overlap_probability=1.0,  # Would abort for validated
+                        manifest_list_mode="rewrite",
+                        manifests_per_commit=1.0,
+                        stats=endive.main.STATS,
+                    )
+                    return result
+
+                process = env.process(run_resolution())
+                env.run()
+                result = process.value
+
+                # FastAppend should always retry
+                assert result.should_retry is True
+                assert result.abort_reason is None
+                assert endive.main.STATS.false_conflicts == 1
+                assert endive.main.STATS.real_conflicts == 0
+
+            finally:
+                os.unlink(config_path)
+
+    def test_partition_conflict_resolution_validated_overwrite_aborts(self):
+        """ValidatedOverwrite should abort on real conflict after reading ML."""
+        from endive.conflict import resolve_partition_conflict
+        from endive.transaction import Txn
+        from endive.snapshot import CatalogSnapshot
+        from endive.operation import OperationType
+        from endive.main import configure_from_toml
+        from endive.test_utils import create_test_config
+        import endive.main
+        import simpy
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = create_test_config(
+                output_path=os.path.join(tmpdir, "test.parquet"),
+                seed=42,
+                duration_ms=1000,
+            )
+
+            try:
+                configure_from_toml(config_path)
+                endive.main.STATS = Stats()
+
+                np.random.seed(42)
+                env = simpy.Environment()
+
+                txn = Txn(
+                    id=1,
+                    t_submit=0,
+                    t_runtime=1000,
+                    v_catalog_seq=10,
+                    v_tblr={0: 10},
+                    v_tblw={0: 10},
+                )
+                txn.operation_type = OperationType.VALIDATED_OVERWRITE
+                txn.partitions_read = {0: {0}}
+                txn.partitions_written = {0: {0}}
+                txn.v_partition_seq = {0: {0: 5}}
+
+                snapshot = CatalogSnapshot(
+                    seq=11,
+                    tbl=(11,),
+                    partition_seq=((6,),),
+                    ml_offset=(1000,),
+                    partition_ml_offset=((1000,),),
+                    timestamp=1000,
+                )
+
+                partition_seq_snapshot = {0: {0: 6}}
+
+                def run_resolution():
+                    result = yield from resolve_partition_conflict(
+                        env, txn, snapshot,
+                        partition_seq_snapshot=partition_seq_snapshot,
+                        data_overlap_probability=1.0,  # 100% real conflict
+                        manifest_list_mode="rewrite",
+                        manifests_per_commit=1.0,
+                        stats=endive.main.STATS,
+                    )
+                    return result
+
+                process = env.process(run_resolution())
+                env.run()
+                result = process.value
+
+                # ValidatedOverwrite should abort on real conflict
+                assert result.should_retry is False
+                assert result.abort_reason == "validation_exception"
+                assert endive.main.STATS.real_conflicts == 1
+                assert endive.main.STATS.validation_exceptions == 1
+                # ML read cost was paid BEFORE abort (key requirement)
+                assert endive.main.STATS.manifest_list_reads == 1
+
+            finally:
+                os.unlink(config_path)
+
+    def test_partition_conflict_pays_ml_read_before_abort(self):
+        """Real conflict should pay ML read cost BEFORE aborting."""
+        from endive.conflict import resolve_partition_conflict
+        from endive.transaction import Txn
+        from endive.snapshot import CatalogSnapshot
+        from endive.operation import OperationType
+        from endive.main import configure_from_toml
+        from endive.test_utils import create_test_config
+        import endive.main
+        import simpy
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = create_test_config(
+                output_path=os.path.join(tmpdir, "test.parquet"),
+                seed=42,
+                duration_ms=1000,
+            )
+
+            try:
+                configure_from_toml(config_path)
+                endive.main.STATS = Stats()
+
+                np.random.seed(42)
+                env = simpy.Environment()
+
+                # Transaction is 3 snapshots behind on partition 0
+                txn = Txn(
+                    id=1,
+                    t_submit=0,
+                    t_runtime=1000,
+                    v_catalog_seq=10,
+                    v_tblr={0: 10},
+                    v_tblw={0: 10},
+                )
+                txn.operation_type = OperationType.VALIDATED_OVERWRITE
+                txn.partitions_read = {0: {0}}
+                txn.partitions_written = {0: {0}}
+                txn.v_partition_seq = {0: {0: 5}}  # Txn at version 5
+
+                snapshot = CatalogSnapshot(
+                    seq=13,
+                    tbl=(13,),
+                    partition_seq=((8,),),  # Partition at version 8 (3 behind)
+                    ml_offset=(1000,),
+                    partition_ml_offset=((1000,),),
+                    timestamp=1000,
+                )
+
+                partition_seq_snapshot = {0: {0: 8}}  # 8 - 5 = 3 snapshots behind
+
+                def run_resolution():
+                    result = yield from resolve_partition_conflict(
+                        env, txn, snapshot,
+                        partition_seq_snapshot=partition_seq_snapshot,
+                        data_overlap_probability=1.0,
+                        manifest_list_mode="rewrite",
+                        manifests_per_commit=1.0,
+                        stats=endive.main.STATS,
+                    )
+                    return result
+
+                process = env.process(run_resolution())
+                env.run()
+                result = process.value
+
+                # Should abort but AFTER paying ML read cost
+                assert result.should_retry is False
+                # Paid 3 ML reads (one per snapshot behind) BEFORE aborting
+                assert endive.main.STATS.manifest_list_reads == 3
+
+            finally:
+                os.unlink(config_path)
+
+    def test_data_overlap_probability_config(self):
+        """DATA_OVERLAP_PROBABILITY should be loadable from config."""
+        import endive.main as main_module
+
+        # Use the same format as create_test_config
+        toml_content = """
+[simulation]
+duration_ms = 10000
+output_path = "test.parquet"
+seed = 42
+
+[catalog]
+num_tables = 1
+num_groups = 1
+group_size_distribution = "uniform"
+
+[transaction]
+retry = 10
+runtime.min = 100
+runtime.mean = 200
+runtime.sigma = 1.5
+data_overlap_probability = 0.42
+
+inter_arrival.distribution = "exponential"
+inter_arrival.scale = 500.0
+inter_arrival.min = 100.0
+inter_arrival.max = 1000.0
+inter_arrival.mean = 500.0
+inter_arrival.std_dev = 100.0
+inter_arrival.value = 500.0
+
+ntable.zipf = 2.0
+seltbl.zipf = 1.4
+seltblw.zipf = 1.2
+
+[partition]
+enabled = true
+num_partitions = 4
+partitions_per_txn_mean = 2
+partitions_per_txn_max = 3
+
+[storage]
+max_parallel = 4
+min_latency = 5
+
+T_CAS.mean = 100
+T_CAS.stddev = 10
+
+T_METADATA_ROOT.read.mean = 50
+T_METADATA_ROOT.read.stddev = 5
+T_METADATA_ROOT.write.mean = 60
+T_METADATA_ROOT.write.stddev = 6
+
+T_MANIFEST_LIST.read.mean = 50
+T_MANIFEST_LIST.read.stddev = 5
+T_MANIFEST_LIST.write.mean = 60
+T_MANIFEST_LIST.write.stddev = 6
+
+T_MANIFEST_FILE.read.mean = 50
+T_MANIFEST_FILE.read.stddev = 5
+T_MANIFEST_FILE.write.mean = 60
+T_MANIFEST_FILE.write.stddev = 6
+"""
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.toml', delete=False) as f:
+            f.write(toml_content)
+            config_path = f.name
+
+        try:
+            main_module.configure_from_toml(config_path)
+            assert main_module.DATA_OVERLAP_PROBABILITY == 0.42
+        finally:
+            os.unlink(config_path)
+
+    def test_data_overlap_probability_defaults_to_real_conflict(self):
+        """DATA_OVERLAP_PROBABILITY should default to REAL_CONFLICT_PROBABILITY."""
+        import endive.main as main_module
+
+        toml_content = """
+[simulation]
+duration_ms = 10000
+output_path = "test.parquet"
+seed = 42
+
+[catalog]
+num_tables = 1
+num_groups = 1
+group_size_distribution = "uniform"
+
+[transaction]
+retry = 10
+runtime.min = 100
+runtime.mean = 200
+runtime.sigma = 1.5
+real_conflict_probability = 0.35
+# data_overlap_probability not set - should default to real_conflict_probability
+
+inter_arrival.distribution = "exponential"
+inter_arrival.scale = 500.0
+inter_arrival.min = 100.0
+inter_arrival.max = 1000.0
+inter_arrival.mean = 500.0
+inter_arrival.std_dev = 100.0
+inter_arrival.value = 500.0
+
+ntable.zipf = 2.0
+seltbl.zipf = 1.4
+seltblw.zipf = 1.2
+
+[partition]
+enabled = true
+num_partitions = 4
+
+[storage]
+max_parallel = 4
+min_latency = 5
+
+T_CAS.mean = 100
+T_CAS.stddev = 10
+
+T_METADATA_ROOT.read.mean = 50
+T_METADATA_ROOT.read.stddev = 5
+T_METADATA_ROOT.write.mean = 60
+T_METADATA_ROOT.write.stddev = 6
+
+T_MANIFEST_LIST.read.mean = 50
+T_MANIFEST_LIST.read.stddev = 5
+T_MANIFEST_LIST.write.mean = 60
+T_MANIFEST_LIST.write.stddev = 6
+
+T_MANIFEST_FILE.read.mean = 50
+T_MANIFEST_FILE.read.stddev = 5
+T_MANIFEST_FILE.write.mean = 60
+T_MANIFEST_FILE.write.stddev = 6
+"""
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.toml', delete=False) as f:
+            f.write(toml_content)
+            config_path = f.name
+
+        try:
+            main_module.configure_from_toml(config_path)
+            # Should default to REAL_CONFLICT_PROBABILITY
+            assert main_module.DATA_OVERLAP_PROBABILITY == 0.35
+        finally:
+            os.unlink(config_path)
+
+    def test_multiple_partitions_stops_on_first_real_conflict(self):
+        """With multiple overlapping partitions, should abort on first real conflict."""
+        from endive.conflict import resolve_partition_conflict
+        from endive.transaction import Txn
+        from endive.snapshot import CatalogSnapshot
+        from endive.operation import OperationType
+        from endive.main import configure_from_toml
+        from endive.test_utils import create_test_config
+        import endive.main
+        import simpy
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = create_test_config(
+                output_path=os.path.join(tmpdir, "test.parquet"),
+                seed=42,
+                duration_ms=1000,
+            )
+
+            try:
+                configure_from_toml(config_path)
+                endive.main.STATS = Stats()
+
+                np.random.seed(42)
+                env = simpy.Environment()
+
+                # Transaction with 3 overlapping partitions
+                txn = Txn(
+                    id=1,
+                    t_submit=0,
+                    t_runtime=1000,
+                    v_catalog_seq=10,
+                    v_tblr={0: 10},
+                    v_tblw={0: 10},
+                )
+                txn.operation_type = OperationType.VALIDATED_OVERWRITE
+                txn.partitions_written = {0: {0, 1, 2}}
+                txn.partitions_read = {}
+                txn.v_partition_seq = {0: {0: 5, 1: 5, 2: 5}}
+
+                # All 3 partitions have changed
+                snapshot = CatalogSnapshot(
+                    seq=11,
+                    tbl=(11,),
+                    partition_seq=((6, 6, 6),),
+                    ml_offset=(1000,),
+                    partition_ml_offset=((1000, 1000, 1000),),
+                    timestamp=1000,
+                )
+
+                partition_seq_snapshot = {0: {0: 6, 1: 6, 2: 6}}
+
+                def run_resolution():
+                    result = yield from resolve_partition_conflict(
+                        env, txn, snapshot,
+                        partition_seq_snapshot=partition_seq_snapshot,
+                        data_overlap_probability=1.0,  # Real conflict
+                        manifest_list_mode="rewrite",
+                        manifests_per_commit=1.0,
+                        stats=endive.main.STATS,
+                    )
+                    return result
+
+                process = env.process(run_resolution())
+                env.run()
+                result = process.value
+
+                # Should abort after first real conflict
+                assert result.should_retry is False
+                assert result.abort_reason == "validation_exception"
+                # Only paid ML read for first partition before aborting
+                assert endive.main.STATS.manifest_list_reads == 1
+                assert endive.main.STATS.real_conflicts == 1
+
+            finally:
+                os.unlink(config_path)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "-s"])

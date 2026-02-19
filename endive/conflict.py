@@ -12,6 +12,11 @@ Key corrections from SIMULATOR_REVIEW.md:
 - I/O convoy (O(N) ML reads) only affects validated operations
 - FastAppend retries are ~160ms, not 28 seconds
 
+Partition-Aware Conflict Resolution:
+- Partition overlap determines which partitions need ML read/write work
+- Data overlap within a partition determines abort vs merge (for validated ops)
+- Real conflicts discovered AFTER paying ML read cost for that partition
+
 References:
 - SIMULATOR_REVIEW.md Section 2.1-2.3: Operation costs and abort behavior
 - Iceberg source: SnapshotProducer.java, MergingSnapshotProducer.java
@@ -234,6 +239,262 @@ def _update_txn_dirty_versions(txn: 'Txn', snapshot: 'CatalogSnapshot') -> None:
     """Update transaction's dirty versions from snapshot for retry."""
     for t in txn.v_dirty.keys():
         txn.v_dirty[t] = snapshot.tbl[t]
+
+
+def resolve_partition_conflict(
+    sim,
+    txn: 'Txn',
+    snapshot: 'CatalogSnapshot',
+    partition_seq_snapshot: dict,
+    data_overlap_probability: float,
+    manifest_list_mode: str = "rewrite",
+    manifests_per_commit: float = 1.0,
+    stats=None,
+) -> Generator:
+    """Resolve CAS conflict with partition-aware costs.
+
+    This implements accurate conflict resolution where:
+    1. Partition overlap determines which partitions need ML read/write work
+    2. For ValidatedOverwrite: check data overlap per overlapping partition
+       - Real conflict (data overlap): pay ML read cost THEN abort
+       - False conflict (no data overlap): pay ML read + write cost (merge)
+    3. For FastAppend/MergeAppend: no validation, so all conflicts are "false"
+       (partition overlap requires merge, but no abort possible)
+
+    Key insight from user clarification:
+    - Real conflicts are discovered AFTER reading the ML for that partition
+    - We must pay the ML read cost before we can abort
+
+    Args:
+        sim: SimPy environment
+        txn: Transaction that failed CAS
+        snapshot: Catalog state at CAS failure time (from CASResult)
+        partition_seq_snapshot: Partition versions at server time {table_id: {part_id: version}}
+        data_overlap_probability: Probability of data overlap (real conflict) per partition
+        manifest_list_mode: "rewrite" or "append" (ML+ mode)
+        manifests_per_commit: For MergeAppend, manifests per concurrent commit
+        stats: Statistics collector (STATS global)
+
+    Yields:
+        SimPy timeout events for I/O operations
+
+    Returns:
+        ConflictResult with should_retry and abort_reason
+    """
+    # Import here to avoid circular dependencies
+    from endive.main import (
+        get_metadata_root_latency,
+        get_manifest_list_latency,
+        get_manifest_file_latency,
+        get_put_latency,
+        get_manifest_list_write_latency,
+        MAX_PARALLEL,
+        T_PUT,
+        TABLE_METADATA_INLINED,
+        get_table_metadata_latency,
+        sample_conflicting_manifests,
+        STATS,
+    )
+
+    if stats is None:
+        stats = STATS
+
+    behavior = txn.get_behavior(manifests_per_commit)
+    ml_append_mode = manifest_list_mode == "append"
+    can_have_real_conflict = behavior.can_have_real_conflict()
+
+    # 1. Identify overlapping partitions (partition version changed since txn read)
+    overlapping_partitions = _compute_overlapping_partitions(txn, partition_seq_snapshot)
+
+    if not overlapping_partitions:
+        # No partition conflicts - just update state and retry
+        txn.v_catalog_seq = snapshot.seq
+        _update_txn_dirty_versions(txn, snapshot)
+        return ConflictResult(should_retry=True, abort_reason=None)
+
+    total_overlapping = sum(len(parts) for parts in overlapping_partitions.values())
+    logger.debug(f"{sim.now} TXN {txn.id} Partition conflict resolution: "
+                f"{total_overlapping} overlapping partitions, behavior={behavior.get_name()}")
+
+    # 2. Process each overlapping partition
+    for tbl_id, partitions in overlapping_partitions.items():
+        for part_id in partitions:
+            # Calculate how many snapshots behind for this partition
+            snapshot_v = partition_seq_snapshot.get(tbl_id, {}).get(part_id, 0)
+            txn_v = txn.v_partition_seq.get(tbl_id, {}).get(part_id, 0)
+            n_behind = snapshot_v - txn_v
+
+            # Pay ML read cost for this partition (discovering the conflict)
+            # This must happen BEFORE we know if it's a real conflict
+            if n_behind > 0:
+                yield from _read_partition_manifest_lists(
+                    sim, n_behind, txn.id, tbl_id, part_id, stats, MAX_PARALLEL,
+                    get_manifest_list_latency, get_put_latency, T_PUT
+                )
+
+            # Now we've read the ML - determine if this is a real conflict (data overlap)
+            if can_have_real_conflict:
+                is_real_conflict = np.random.random() < data_overlap_probability
+
+                if is_real_conflict:
+                    # Real conflict on validated operation - abort with ValidationException
+                    # We've already paid the ML read cost (correct per user clarification)
+                    logger.debug(f"{sim.now} TXN {txn.id} Real conflict at table {tbl_id} "
+                                f"partition {part_id} - ValidationException (abort)")
+                    stats.real_conflicts += 1
+                    stats.validation_exceptions += 1
+                    return ConflictResult(should_retry=False, abort_reason="validation_exception")
+
+            # False conflict (no data overlap, or operation doesn't validate)
+            # Pay merge costs: ML write (rewrite mode) or manifest file ops (merge_append)
+            yield from _resolve_partition_false_conflict(
+                sim, txn, tbl_id, part_id, behavior, ml_append_mode,
+                manifests_per_commit, n_behind, stats, MAX_PARALLEL,
+                get_manifest_list_latency, get_manifest_file_latency,
+                get_put_latency, T_PUT
+            )
+            stats.false_conflicts += 1
+
+    # 3. Update transaction state for retry
+    txn.v_catalog_seq = snapshot.seq
+    _update_txn_dirty_versions(txn, snapshot)
+    _update_txn_partition_versions(txn, snapshot, overlapping_partitions)
+
+    return ConflictResult(should_retry=True, abort_reason=None)
+
+
+def _compute_overlapping_partitions(
+    txn: 'Txn',
+    partition_seq_snapshot: dict,
+) -> dict[int, set[int]]:
+    """Compute partitions where version changed since transaction read.
+
+    An overlapping partition is one where:
+    - Transaction read or wrote to it
+    - Partition version in snapshot differs from transaction's recorded version
+
+    Args:
+        txn: Transaction object
+        partition_seq_snapshot: Partition versions at server time {table_id: {part_id: version}}
+
+    Returns:
+        Dict of {table_id: set of partition_ids} with version conflicts
+    """
+    overlapping = {}
+
+    # Check partitions read
+    for tbl_id, partitions in txn.partitions_read.items():
+        for p in partitions:
+            snapshot_v = partition_seq_snapshot.get(tbl_id, {}).get(p, 0)
+            txn_v = txn.v_partition_seq.get(tbl_id, {}).get(p, 0)
+            if snapshot_v != txn_v:
+                if tbl_id not in overlapping:
+                    overlapping[tbl_id] = set()
+                overlapping[tbl_id].add(p)
+
+    # Check partitions written
+    for tbl_id, partitions in txn.partitions_written.items():
+        for p in partitions:
+            snapshot_v = partition_seq_snapshot.get(tbl_id, {}).get(p, 0)
+            txn_v = txn.v_partition_seq.get(tbl_id, {}).get(p, 0)
+            if snapshot_v != txn_v:
+                if tbl_id not in overlapping:
+                    overlapping[tbl_id] = set()
+                overlapping[tbl_id].add(p)
+
+    return overlapping
+
+
+def _read_partition_manifest_lists(
+    sim, count: int, txn_id: int, table_id: int, partition_id: int,
+    stats, max_parallel: int, get_ml_latency, get_put_latency, t_put
+) -> Generator:
+    """Read manifest lists for a partition's history.
+
+    This is the I/O cost paid when discovering conflicts - happens BEFORE
+    we know if it's a real or false conflict.
+    """
+    if count <= 0:
+        return
+
+    logger.debug(f"{sim.now} TXN {txn_id} Reading {count} MLs for table {table_id} "
+                f"partition {partition_id}")
+
+    for batch_start in range(0, count, max_parallel):
+        batch_size = min(max_parallel, count - batch_start)
+        batch_latencies = [get_ml_latency('read') for _ in range(batch_size)]
+        yield sim.timeout(max(batch_latencies))
+
+    stats.manifest_list_reads += count
+
+
+def _resolve_partition_false_conflict(
+    sim, txn: 'Txn', table_id: int, partition_id: int,
+    behavior: 'OperationBehavior', ml_append_mode: bool,
+    manifests_per_commit: float, n_behind: int,
+    stats, max_parallel: int,
+    get_ml_latency, get_mf_latency, get_put_latency, t_put
+) -> Generator:
+    """Resolve false conflict for a partition (version changed, no data overlap).
+
+    Cost depends on operation type:
+    - FastAppend: Just ML write (rewrite mode) or nothing (ML+ mode)
+    - MergeAppend: ML write + manifest file re-merge
+    - ValidatedOverwrite: ML write (already paid historical ML reads)
+    """
+    from endive.main import sample_conflicting_manifests
+
+    logger.debug(f"{sim.now} TXN {txn.id} False conflict table {table_id} "
+                f"partition {partition_id}, behavior={behavior.get_name()}")
+
+    if ml_append_mode:
+        # ML+ mode: Tentative entry still valid, no ML update needed
+        logger.debug(f"{sim.now} TXN {txn.id} ML+ mode: partition entry still valid")
+    else:
+        # Rewrite mode: Write new ML for this partition
+        yield sim.timeout(get_ml_latency('write'))
+        stats.manifest_list_writes += 1
+
+    # MergeAppend requires manifest file re-merge
+    if behavior.get_name() == "merge_append" and n_behind > 0:
+        k_manifests = int(n_behind * manifests_per_commit)
+        if k_manifests > 0:
+            # Read manifest files
+            for batch_start in range(0, k_manifests, max_parallel):
+                batch_size = min(max_parallel, k_manifests - batch_start)
+                batch_latencies = [get_mf_latency('read') for _ in range(batch_size)]
+                yield sim.timeout(max(batch_latencies))
+            stats.manifest_files_read += k_manifests
+
+            # Write merged manifest files
+            for batch_start in range(0, k_manifests, max_parallel):
+                batch_size = min(max_parallel, k_manifests - batch_start)
+                batch_latencies = [get_mf_latency('write') for _ in range(batch_size)]
+                yield sim.timeout(max(batch_latencies))
+            stats.manifest_files_written += k_manifests
+
+
+def _update_txn_partition_versions(
+    txn: 'Txn',
+    snapshot: 'CatalogSnapshot',
+    overlapping_partitions: dict[int, set[int]]
+) -> None:
+    """Update transaction's partition versions from snapshot for retry."""
+    if snapshot.partition_seq is None:
+        return
+
+    for tbl_id, partitions in overlapping_partitions.items():
+        if tbl_id not in txn.v_partition_seq:
+            txn.v_partition_seq[tbl_id] = {}
+        for p in partitions:
+            txn.v_partition_seq[tbl_id][p] = snapshot.partition_seq[tbl_id][p]
+
+        # Also update ML offsets if available
+        if snapshot.partition_ml_offset is not None:
+            if tbl_id not in txn.v_partition_ml_offset:
+                txn.v_partition_ml_offset[tbl_id] = {}
+            for p in partitions:
+                txn.v_partition_ml_offset[tbl_id][p] = snapshot.partition_ml_offset[tbl_id][p]
 
 
 # Legacy compatibility: ConflictResolver class wrapper
