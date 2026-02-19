@@ -435,6 +435,7 @@ conflicting_manifests.max = 10
 
 - **SimPy Documentation**: https://simpy.readthedocs.io/
 - **Apache Iceberg Spec**: https://iceberg.apache.org/spec/
+- **Simulator Internals**: [`SIMULATOR.md`](SIMULATOR.md) - Detailed pseudocode and latency models
 - **Snapshot Versioning**: [`SNAPSHOT_VERSIONING.md`](SNAPSHOT_VERSIONING.md)
 - **Analysis Plan**: [`ANALYSIS_PLAN.md`](ANALYSIS_PLAN.md)
 - **Baseline Results**: [`BASELINE_RESULTS.md`](BASELINE_RESULTS.md)

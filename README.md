@@ -144,6 +144,7 @@ pytest tests/test_storage_provider_config.py  # Provider configs
 
 - **[docs/QUICKSTART.md](docs/QUICKSTART.md)** - Getting started
 - **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** - Design, invariants, and module structure
+- **[docs/SIMULATOR.md](docs/SIMULATOR.md)** - Detailed simulator internals with pseudocode
 - **[docs/RUNNING_EXPERIMENTS.md](docs/RUNNING_EXPERIMENTS.md)** - Running experiments
 - **[experiment_configs/README.md](experiment_configs/README.md)** - Experiment descriptions
 
