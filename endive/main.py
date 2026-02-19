@@ -49,14 +49,16 @@ N_TXN_RETRY: int
 # Storage operation latencies
 # New format: {'mu': float, 'sigma': float, 'distribution': 'lognormal'}
 # Legacy format: {'mean': float, 'stddev': float, 'distribution': 'normal'}
-T_CAS: dict
-T_METADATA_ROOT: dict  # {'read': {...}, 'write': {...}}
-T_MANIFEST_LIST: dict
-T_MANIFEST_FILE: dict
+# Defaults: All latencies initialized to 1ms with sigma=0.1 (overwritten by configure_from_toml)
+_DEFAULT_LATENCY = {'mu': 0.0, 'sigma': 0.1, 'distribution': 'lognormal'}  # 1ms median
+T_CAS: dict = _DEFAULT_LATENCY.copy()
+T_METADATA_ROOT: dict = {'read': _DEFAULT_LATENCY.copy(), 'write': _DEFAULT_LATENCY.copy()}
+T_MANIFEST_LIST: dict = {'read': _DEFAULT_LATENCY.copy(), 'write': _DEFAULT_LATENCY.copy()}
+T_MANIFEST_FILE: dict = {'read': _DEFAULT_LATENCY.copy(), 'write': _DEFAULT_LATENCY.copy()}
 # Latency distribution type: "lognormal" (recommended) or "normal" (legacy)
-LATENCY_DISTRIBUTION: str
-MAX_PARALLEL: int  # Maximum parallel manifest operations during conflict resolution
-MIN_LATENCY: float  # Minimum latency for any storage operation (prevents unrealistic zeros)
+LATENCY_DISTRIBUTION: str = "lognormal"
+MAX_PARALLEL: int = 4  # Maximum parallel manifest operations during conflict resolution
+MIN_LATENCY: float = 0.0  # Minimum latency for any storage operation (prevents unrealistic zeros)
 # lognormal distribution of transaction runtimes
 T_MIN_RUNTIME: int
 T_RUNTIME_MU: float
@@ -94,7 +96,7 @@ T_APPEND: dict  # {'mean': float, 'stddev': float} - Append operation latency
 T_LOG_ENTRY_READ: dict  # {'mean': float, 'stddev': float} - Per-entry log read latency
 T_COMPACTION: dict  # {'mean': float, 'stddev': float} - Compaction CAS latency (larger payload)
 # Table metadata configuration
-TABLE_METADATA_INLINED: bool  # Whether table metadata is inlined in catalog/intention record
+TABLE_METADATA_INLINED: bool = True  # Whether table metadata is inlined in catalog/intention record
 T_TABLE_METADATA_R: dict  # {'mean': float, 'stddev': float} - Table metadata read latency
 T_TABLE_METADATA_W: dict  # {'mean': float, 'stddev': float} - Table metadata write latency
 # Manifest list append mode
@@ -119,7 +121,7 @@ PARTITIONS_PER_TXN_MAX: int  # Maximum partitions per transaction
 
 # Size-based PUT latency (Durner et al. VLDB 2023)
 # latency = base_latency + size_mib * latency_per_mib + lognormal_noise
-T_PUT: dict  # {'base_latency_ms': float, 'latency_per_mib_ms': float, 'sigma': float}
+T_PUT: dict = {'base_latency_ms': 10.0, 'latency_per_mib_ms': 100.0, 'sigma': 0.5}  # Default values
 TABLE_METADATA_SIZE_BYTES: int  # Size of table metadata JSON file (~1-10 KB)
 PARTITION_METADATA_ENTRY_SIZE: int  # Bytes per partition in table metadata (~100 bytes)
 

@@ -1,0 +1,33 @@
+# V3: Conflict resolution validation
+# 100% ValidatedOverwrite with 100% real conflict probability
+# Every conflict should abort with ValidationException
+
+[simulation]
+duration_ms = 60000  # 1 minute
+seed = 42
+output_path = "results.parquet"
+
+[experiment]
+label = "v3_vo_abort"
+
+[catalog]
+num_tables = 1
+num_groups = 1
+
+[storage]
+provider = "instant"
+max_parallel = 4
+min_latency = 5
+
+[transaction]
+retry = 10
+runtime.min = 100
+runtime.mean = 200
+runtime.sigma = 1.5
+
+inter_arrival.distribution = "exponential"
+inter_arrival.scale = 100  # 10 TPS - enough contention to cause conflicts
+
+operation_types.fast_append = 0.0
+operation_types.validated_overwrite = 1.0
+real_conflict_probability = 1.0  # All conflicts are real -> abort
