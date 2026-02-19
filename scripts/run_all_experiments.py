@@ -110,6 +110,18 @@ EXPERIMENT_GROUPS = {
     "partition_vs_tables": [
         "instant_partition_vs_tables.toml",
     ],
+    # Operation type experiments (FastAppend, ValidatedOverwrite, etc.)
+    # Tests accurate conflict resolution per operation type
+    "op_type_baseline": [
+        "exp1_fastappend_baseline.toml",  # 100% FA baseline
+    ],
+    "op_type_heatmap": [
+        "exp2_mix_heatmap.toml",  # FA/VO mix × arrival rate
+    ],
+    "op_type_catalog": [
+        "exp3a_catalog_latency_fa.toml",   # Catalog latency × 100% FA
+        "exp3b_catalog_latency_mix.toml",  # Catalog latency × 90/10 mix
+    ],
 }
 
 # Parameter sweeps
@@ -121,6 +133,10 @@ NUM_TABLES_MIXED_SWEEP = [2, 5, 10, 20]
 CONFLICT_PROB_MIXED_SWEEP = [0.0, 0.1, 0.3, 0.5]
 NUM_PARTITIONS_SWEEP = [1, 5, 10, 25, 50, 100]
 NUM_PARTITIONS_COMPARE_SWEEP = [2, 5, 10, 20]  # Match num_tables for comparison
+
+# Operation type experiments
+FA_RATIO_SWEEP = [1.0, 0.9, 0.8, 0.7, 0.5, 0.3, 0.1, 0.0]  # fast_append fraction
+CATALOG_PROVIDERS = ["instant", "s3x", "azure_premium", "s3", "gcp"]
 
 # Quick mode parameters
 QUICK_LOADS = [100, 500, 2000]
@@ -461,6 +477,74 @@ def generate_all_runs(groups: list, num_seeds: int, quick: bool = False) -> list
                                 label=base_name,
                                 seed=seed,
                                 params={"inter_arrival.scale": float(load), "partition.num_partitions": np}
+                            ))
+
+            # Operation type experiments
+            elif "exp1_fastappend_baseline" in config_name:
+                # 100% FastAppend baseline: sweep load only
+                for load in loads:
+                    for seed_num in range(1, num_seeds + 1):
+                        seed = generate_seed(nonce, base_name, {"load": load}, seed_num)
+                        runs.append(ExperimentRun(
+                            config_path=config_name,
+                            label=base_name,
+                            seed=seed,
+                            params={"inter_arrival.scale": float(load)}
+                        ))
+
+            elif "exp2_mix_heatmap" in config_name:
+                # FA/VO mix heatmap: sweep load x fa_ratio (2D heatmap)
+                fa_ratios = [1.0, 0.5, 0.0] if quick else FA_RATIO_SWEEP
+                for load in loads:
+                    for fa_ratio in fa_ratios:
+                        vo_ratio = round(1.0 - fa_ratio, 2)
+                        for seed_num in range(1, num_seeds + 1):
+                            seed = generate_seed(nonce, base_name, {"load": load, "fa": fa_ratio}, seed_num)
+                            runs.append(ExperimentRun(
+                                config_path=config_name,
+                                label=base_name,
+                                seed=seed,
+                                params={
+                                    "inter_arrival.scale": float(load),
+                                    "operation_types.fast_append": fa_ratio,
+                                    "operation_types.validated_overwrite": vo_ratio,
+                                }
+                            ))
+
+            elif "exp3a_catalog_latency_fa" in config_name:
+                # 100% FA with catalog latency sweep
+                providers = ["instant", "s3", "gcp"] if quick else CATALOG_PROVIDERS
+                catalog_loads = [100, 500] if quick else [50, 100, 200, 500]
+                for provider in providers:
+                    for load in catalog_loads:
+                        for seed_num in range(1, num_seeds + 1):
+                            seed = generate_seed(nonce, base_name, {"provider": provider, "load": load}, seed_num)
+                            runs.append(ExperimentRun(
+                                config_path=config_name,
+                                label=base_name,
+                                seed=seed,
+                                params={
+                                    "inter_arrival.scale": float(load),
+                                    "storage.provider": provider,
+                                }
+                            ))
+
+            elif "exp3b_catalog_latency_mix" in config_name:
+                # 90/10 mix with catalog latency sweep
+                providers = ["instant", "s3", "gcp"] if quick else CATALOG_PROVIDERS
+                catalog_loads = [100, 500] if quick else [50, 100, 200, 500]
+                for provider in providers:
+                    for load in catalog_loads:
+                        for seed_num in range(1, num_seeds + 1):
+                            seed = generate_seed(nonce, base_name, {"provider": provider, "load": load}, seed_num)
+                            runs.append(ExperimentRun(
+                                config_path=config_name,
+                                label=base_name,
+                                seed=seed,
+                                params={
+                                    "inter_arrival.scale": float(load),
+                                    "storage.provider": provider,
+                                }
                             ))
 
             else:
