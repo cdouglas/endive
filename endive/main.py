@@ -59,6 +59,9 @@ T_MANIFEST_FILE: dict = {'read': _DEFAULT_LATENCY.copy(), 'write': _DEFAULT_LATE
 LATENCY_DISTRIBUTION: str = "lognormal"
 MAX_PARALLEL: int = 4  # Maximum parallel manifest operations during conflict resolution
 MIN_LATENCY: float = 0.0  # Minimum latency for any storage operation (prevents unrealistic zeros)
+# Minimum time delta to ensure strict event ordering (no same-instant events)
+# All timeouts must be >= MIN_TIME_DELTA to ensure t(e1) < t(e2) when e1 happens before e2
+MIN_TIME_DELTA: float = 0.001  # 1 microsecond in milliseconds
 # lognormal distribution of transaction runtimes
 T_MIN_RUNTIME: int
 T_RUNTIME_MU: float
@@ -561,19 +564,22 @@ def configure_from_toml(config_file: str):
 
 
 def generate_inter_arrival_time():
-    """Generate inter-arrival time based on configured distribution."""
+    """Generate inter-arrival time based on configured distribution.
+
+    Returns value >= MIN_TIME_DELTA to ensure strict event ordering.
+    """
     if INTER_ARRIVAL_DIST == "fixed":
-        return INTER_ARRIVAL_PARAMS["value"]
+        return max(MIN_TIME_DELTA, INTER_ARRIVAL_PARAMS["value"])
     elif INTER_ARRIVAL_DIST == "exponential":
-        return np.random.exponential(scale=INTER_ARRIVAL_PARAMS["scale"])
+        return max(MIN_TIME_DELTA, np.random.exponential(scale=INTER_ARRIVAL_PARAMS["scale"]))
     elif INTER_ARRIVAL_DIST == "uniform":
-        return np.random.uniform(
+        return max(MIN_TIME_DELTA, np.random.uniform(
             low=INTER_ARRIVAL_PARAMS["min"],
             high=INTER_ARRIVAL_PARAMS["max"]
-        )
+        ))
     elif INTER_ARRIVAL_DIST == "normal":
-        # Ensure non-negative values for normal distribution
-        return max(0, np.random.normal(
+        # Ensure positive values for normal distribution
+        return max(MIN_TIME_DELTA, np.random.normal(
             loc=INTER_ARRIVAL_PARAMS["mean"],
             scale=INTER_ARRIVAL_PARAMS["std_dev"]
         ))
@@ -584,9 +590,10 @@ def generate_inter_arrival_time():
 def generate_latency(mean: float, stddev: float) -> float:
     """Generate storage operation latency from normal distribution (legacy).
 
-    Enforces minimum latency to prevent unrealistic zero or near-zero values.
+    Enforces minimum latency to prevent unrealistic zero or near-zero values
+    and ensure strict event ordering (no same-instant events).
     """
-    return max(MIN_LATENCY, np.random.normal(loc=mean, scale=stddev))
+    return max(MIN_LATENCY, MIN_TIME_DELTA, np.random.normal(loc=mean, scale=stddev))
 
 
 def generate_latency_lognormal(mu: float, sigma: float) -> float:
@@ -599,9 +606,9 @@ def generate_latency_lognormal(mu: float, sigma: float) -> float:
             Higher sigma = heavier tail.
 
     Returns:
-        Latency in milliseconds.
+        Latency in milliseconds, >= MIN_TIME_DELTA for strict event ordering.
     """
-    return max(MIN_LATENCY, np.random.lognormal(mean=mu, sigma=sigma))
+    return max(MIN_LATENCY, MIN_TIME_DELTA, np.random.lognormal(mean=mu, sigma=sigma))
 
 
 def generate_latency_from_config(params: dict) -> float:
@@ -2698,7 +2705,7 @@ def txn_gen(sim, txn_id, catalog):
 
     # Select tables using snapshot data (no direct catalog access)
     tblr, tblw = rand_tbl_from_snapshot(start_snapshot)
-    t_runtime = T_MIN_RUNTIME + np.random.lognormal(mean=T_RUNTIME_MU, sigma=T_RUNTIME_SIGMA)
+    t_runtime = max(MIN_TIME_DELTA, T_MIN_RUNTIME + np.random.lognormal(mean=T_RUNTIME_MU, sigma=T_RUNTIME_SIGMA))
     logger.debug(f"{sim.now} TXN {txn_id} {t_runtime} r {tblr} w {tblw}")
 
     # Create transaction with snapshot-derived state
