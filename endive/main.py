@@ -14,6 +14,8 @@ from endive.capstats import Stats, truncated_zipf_pmf, lognormal_params_from_mea
 from endive.utils import get_git_sha, get_git_sha_short, partition_tables_into_groups
 from endive.snapshot import CatalogSnapshot, CASResult
 from endive.transaction import Txn, LogEntry
+from endive.operation import OperationType, get_behavior
+from endive.conflict import ConflictResolverV2, resolve_conflict, ConflictResult
 from endive.config import (
     PROVIDER_PROFILES,
     lognormal_mu_from_median,
@@ -99,6 +101,11 @@ T_TABLE_METADATA_W: dict  # {'mean': float, 'stddev': float} - Table metadata wr
 MANIFEST_LIST_MODE: str  # "rewrite" (default) or "append"
 MANIFEST_LIST_SEAL_THRESHOLD: int  # Bytes before manifest list is sealed/rewritten (0 = disabled)
 MANIFEST_LIST_ENTRY_SIZE: int  # Average bytes per manifest list entry
+
+# Operation type configuration (FastAppend, MergeAppend, ValidatedOverwrite)
+# Weights must sum to 1.0. Default is 100% FastAppend for backward compatibility.
+OPERATION_TYPE_WEIGHTS: dict[str, float]  # {"fast_append": 0.7, "merge_append": 0.2, "validated_overwrite": 0.1}
+MANIFESTS_PER_CONCURRENT_COMMIT: float  # For MergeAppend: manifests to re-merge per commit behind
 
 # Partition-level modeling (within a single table)
 # When enabled, transactions span multiple partitions with per-partition conflict detection
@@ -217,6 +224,7 @@ def configure_from_toml(config_file: str):
     global T_PUT, TABLE_METADATA_SIZE_BYTES, PARTITION_METADATA_ENTRY_SIZE
     global PARTITION_ENABLED, N_PARTITIONS, PARTITION_SELECTION_DIST, PARTITION_ZIPF_ALPHA
     global PARTITIONS_PER_TXN_MEAN, PARTITIONS_PER_TXN_MAX
+    global OPERATION_TYPE_WEIGHTS, MANIFESTS_PER_CONCURRENT_COMMIT
 
     with open(config_file, "rb") as f:
         config = tomllib.load(f)
@@ -452,6 +460,23 @@ def configure_from_toml(config_file: str):
     RETRY_BACKOFF_MULTIPLIER = config.get("transaction", {}).get("retry_backoff", {}).get("multiplier", 2.0)
     RETRY_BACKOFF_MAX_MS = config.get("transaction", {}).get("retry_backoff", {}).get("max_ms", 5000.0)
     RETRY_BACKOFF_JITTER = config.get("transaction", {}).get("retry_backoff", {}).get("jitter", 0.1)
+
+    # === OPERATION TYPE CONFIGURATION ===
+    # Operation types: fast_append, merge_append, validated_overwrite
+    # Default is 100% fast_append for backward compatibility (cheap retries)
+    op_types_cfg = config.get("transaction", {}).get("operation_types", {})
+    OPERATION_TYPE_WEIGHTS = {
+        "fast_append": op_types_cfg.get("fast_append", 1.0),
+        "merge_append": op_types_cfg.get("merge_append", 0.0),
+        "validated_overwrite": op_types_cfg.get("validated_overwrite", 0.0),
+    }
+    # Normalize weights if they don't sum to 1.0
+    weight_sum = sum(OPERATION_TYPE_WEIGHTS.values())
+    if weight_sum > 0 and abs(weight_sum - 1.0) > 1e-6:
+        OPERATION_TYPE_WEIGHTS = {k: v / weight_sum for k, v in OPERATION_TYPE_WEIGHTS.items()}
+
+    # For MergeAppend: manifests to re-merge per concurrent commit
+    MANIFESTS_PER_CONCURRENT_COMMIT = config.get("transaction", {}).get("manifests_per_concurrent_commit", 1.0)
 
     # === PARTITION CONFIGURATION ===
     # Partition-level modeling: transactions span multiple partitions with per-partition conflicts
@@ -799,6 +824,44 @@ def sample_conflicting_manifests() -> int:
         return np.random.randint(params['min'], params['max'] + 1)
     else:
         raise ValueError(f"Unknown conflicting_manifests distribution: {dist}")
+
+
+def _sample_operation_type() -> OperationType | None:
+    """Sample operation type from configured weights.
+
+    Uses OPERATION_TYPE_WEIGHTS dict to randomly select an operation type.
+    Default is 100% fast_append for backward compatibility.
+
+    For backward compatibility: Returns None if using default weights (100% fast_append).
+    This causes the legacy conflict resolution path to be used.
+
+    Returns:
+        OperationType enum value, or None if using default weights (legacy behavior)
+    """
+    weights = OPERATION_TYPE_WEIGHTS
+
+    # Check if using default weights (100% fast_append)
+    # This enables backward compatibility with existing tests and configs
+    if (weights.get("fast_append", 0.0) >= 1.0 - 1e-6 and
+        weights.get("merge_append", 0.0) < 1e-6 and
+        weights.get("validated_overwrite", 0.0) < 1e-6):
+        return None  # Use legacy conflict resolution
+
+    r = np.random.random()
+
+    cumulative = 0.0
+    for op_name, weight in weights.items():
+        cumulative += weight
+        if r < cumulative:
+            if op_name == "fast_append":
+                return OperationType.FAST_APPEND
+            elif op_name == "merge_append":
+                return OperationType.MERGE_APPEND
+            elif op_name == "validated_overwrite":
+                return OperationType.VALIDATED_OVERWRITE
+
+    # Fallback (should not happen if weights sum to 1.0)
+    return OperationType.FAST_APPEND
 
 
 def calculate_backoff_time(retry_number: int) -> float:
@@ -2222,6 +2285,11 @@ def txn_commit(sim, txn, catalog):
     - Request travels to server (half RTT)
     - Server captures snapshot and performs CAS
     - Response returns with snapshot (half RTT)
+
+    When operation_type is set, uses operation-aware conflict resolution:
+    - FastAppend: No validation, no I/O convoy, cheapest retry
+    - MergeAppend: No validation, manifest re-merge on retry
+    - ValidatedOverwrite: O(N) ML reads, real conflicts ABORT (ValidationException)
     """
     # Use message-passing API - handles latency internally and returns snapshot
     cas_result = yield from catalog.try_cas(txn, txn.current_snapshot)
@@ -2234,15 +2302,44 @@ def txn_commit(sim, txn, catalog):
         STATS.commit(txn)
     else:
         # CAS failed - need to resolve conflicts
-        resolver = ConflictResolver()
-
         if txn.n_retries >= N_TXN_RETRY:
             txn.t_abort = sim.now
+            txn.abort_reason = "max_retries"
             STATS.abort(txn)
             return
 
         # CAS failure response contains catalog state at server-processing time.
         # Use server_snapshot from CASResult (no additional round-trip needed).
+
+        # Use operation-aware conflict resolution if operation_type is set
+        if txn.operation_type is not None and not PARTITION_ENABLED:
+            # New operation-aware resolution (table mode only for now)
+            result = yield from resolve_conflict(
+                sim, txn, server_snapshot,
+                real_conflict_probability=REAL_CONFLICT_PROBABILITY,
+                manifest_list_mode=MANIFEST_LIST_MODE,
+                manifests_per_commit=MANIFESTS_PER_CONCURRENT_COMMIT,
+                stats=STATS,
+            )
+
+            if not result.should_retry:
+                # Real conflict on validated operation - abort with ValidationException
+                txn.t_abort = sim.now
+                txn.abort_reason = result.abort_reason
+                STATS.abort(txn)
+                return
+
+            # Read current catalog state for retry via message-passing API
+            retry_snapshot = yield from catalog.read()
+            txn.current_snapshot = retry_snapshot
+
+            # Update write set to the next available version per table
+            v_catalog = {t: retry_snapshot.tbl[t] for t in txn.v_dirty.keys()}
+            ConflictResolver.update_write_set(txn, v_catalog)
+            return
+
+        # Legacy conflict resolution (partition mode or no operation_type)
+        resolver = ConflictResolver()
 
         if PARTITION_ENABLED:
             # Partition mode: Resolve per-partition conflicts
@@ -2559,6 +2656,9 @@ def txn_gen(sim, txn_id, catalog):
     txn.v_dirty.update(txn.v_tblw)
     txn.start_snapshot = start_snapshot
     txn.current_snapshot = start_snapshot
+
+    # Sample operation type from configured weights
+    txn.operation_type = _sample_operation_type()
 
     # For append mode, also capture log offset (still needs catalog for log_offset)
     if CATALOG_MODE == "append":

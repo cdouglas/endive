@@ -542,6 +542,34 @@ def validate_config(config: dict) -> tuple[list[str], list[str]]:
     if not 0.0 <= real_conflict_prob <= 1.0:
         errors.append(f"transaction.real_conflict_probability must be in [0, 1], got {real_conflict_prob}")
 
+    # Operation type weights validation
+    op_types = txn.get('operation_types', {})
+    if op_types:
+        valid_op_types = {'fast_append', 'merge_append', 'validated_overwrite'}
+        for op_name in op_types.keys():
+            if op_name not in valid_op_types:
+                errors.append(f"Unknown operation type: '{op_name}'. Valid types: {valid_op_types}")
+
+        # Check weights are non-negative
+        for op_name, weight in op_types.items():
+            if not isinstance(weight, (int, float)):
+                errors.append(f"operation_types.{op_name} must be a number, got {type(weight).__name__}")
+            elif weight < 0:
+                errors.append(f"operation_types.{op_name} must be >= 0, got {weight}")
+
+        # Warn if weights don't sum to 1.0 (will be normalized)
+        weight_sum = sum(w for w in op_types.values() if isinstance(w, (int, float)))
+        if weight_sum > 0 and abs(weight_sum - 1.0) > 0.01:
+            warnings.append(f"operation_types weights sum to {weight_sum:.3f}, will be normalized to 1.0")
+
+        # Warn about validated_overwrite with real_conflict_probability > 0
+        validated_weight = op_types.get('validated_overwrite', 0.0)
+        if validated_weight > 0 and real_conflict_prob > 0:
+            warnings.append(
+                f"validated_overwrite ({validated_weight*100:.0f}%) with real_conflict_probability={real_conflict_prob:.1%} "
+                f"will cause ~{validated_weight * real_conflict_prob * 100:.1f}% of transactions to abort (ValidationException)"
+            )
+
     # Storage section (optional for partition-only validation)
     storage = config.get('storage', {})
     provider = storage.get('provider')

@@ -50,7 +50,8 @@ class Stats:
 
         # Conflict resolution statistics (CAS mode)
         self.false_conflicts = 0  # Version changed, no data overlap (still requires ML update in rewrite mode)
-        self.real_conflicts = 0   # Overlapping data changes requiring manifest file operations
+        self.real_conflicts = 0   # Overlapping data changes (detected by validation)
+        self.validation_exceptions = 0  # Real conflicts that caused ValidationException (abort)
         self.manifest_files_read = 0
         self.manifest_files_written = 0
         self.manifest_list_reads = 0    # ML reads during conflict resolution
@@ -90,6 +91,9 @@ class Stats:
         # Record transaction details
         # Note: All time/latency fields are int64 (ms), not float64
         # This eliminates floating point inaccuracy and reduces file size by 24%
+        # operation_type is included if set (None for backward compatibility)
+        op_type = getattr(txn, 'operation_type', None)
+        op_type_str = op_type.value if op_type is not None else None
         self.transactions.append({
             'txn_id': txn.id,
             't_submit': txn.t_submit,
@@ -100,7 +104,8 @@ class Stats:
             'n_retries': txn.n_retries,
             'n_tables_read': len(txn.v_tblr),
             'n_tables_written': len(txn.v_tblw),
-            'status': 'committed'
+            'status': 'committed',
+            'operation_type': op_type_str,
         })
 
     def abort(self, txn):
@@ -108,6 +113,8 @@ class Stats:
         self.txn_aborted += 1
 
         # Record aborted transaction details
+        op_type = getattr(txn, 'operation_type', None)
+        op_type_str = op_type.value if op_type is not None else None
         self.transactions.append({
             'txn_id': txn.id,
             't_submit': txn.t_submit,
@@ -118,7 +125,9 @@ class Stats:
             'n_retries': txn.n_retries,
             'n_tables_read': len(txn.v_tblr),
             'n_tables_written': len(txn.v_tblw),
-            'status': 'aborted'
+            'status': 'aborted',
+            'operation_type': op_type_str,
+            'abort_reason': getattr(txn, 'abort_reason', None) or 'max_retries',
         })
 
     def print_summary(self, out=sys.stdout):
@@ -142,7 +151,9 @@ class Stats:
             'n_retries': 'int8',
             'n_tables_read': 'int8',
             'n_tables_written': 'int8',
-            'status': 'object'  # String type
+            'status': 'object',  # String type
+            'operation_type': 'object',  # String type (nullable)
+            'abort_reason': 'object',  # String type (nullable)
         }
 
         for col, dtype in dtype_map.items():
@@ -179,12 +190,17 @@ class Stats:
             print(f"    Total conflicts: {total_conflicts}")
             print(f"    False conflicts: {self.false_conflicts} ({100*self.false_conflicts/total_conflicts:.1f}%)")
             print(f"    Real conflicts: {self.real_conflicts} ({100*self.real_conflicts/total_conflicts:.1f}%)")
+            if self.validation_exceptions > 0:
+                print(f"    ValidationExceptions (aborts): {self.validation_exceptions}")
             if self.manifest_list_reads > 0 or self.manifest_list_writes > 0:
                 print(f"    Manifest list reads: {self.manifest_list_reads}")
                 print(f"    Manifest list writes: {self.manifest_list_writes}")
-            if self.real_conflicts > 0:
-                print(f"    Manifest files read: {self.manifest_files_read} (avg {self.manifest_files_read/self.real_conflicts:.1f} per real conflict)")
-                print(f"    Manifest files written: {self.manifest_files_written} (avg {self.manifest_files_written/self.real_conflicts:.1f} per real conflict)")
+            if self.real_conflicts > 0 and self.real_conflicts > self.validation_exceptions:
+                # Only show manifest file stats if there were merged real conflicts (legacy behavior)
+                merged_real = self.real_conflicts - self.validation_exceptions
+                if merged_real > 0 and self.manifest_files_read > 0:
+                    print(f"    Manifest files read: {self.manifest_files_read} (avg {self.manifest_files_read/merged_real:.1f} per merged conflict)")
+                    print(f"    Manifest files written: {self.manifest_files_written} (avg {self.manifest_files_written/merged_real:.1f} per merged conflict)")
 
         # Print append mode statistics
         total_appends = self.append_physical_success + self.append_physical_failure
