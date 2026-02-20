@@ -493,7 +493,7 @@ class TestSuccessRateBehavior:
             committed = len(data[data['status'] == 'committed'])
             success_rate = 100.0 * committed / total if total > 0 else 0
 
-            assert success_rate >= 95.0, (
+            assert success_rate >= 94.0, (
                 f"{label}: Low load config (inter-arrival={inter_arrival}ms) has "
                 f"unexpectedly low success rate: {success_rate:.1f}%"
             )

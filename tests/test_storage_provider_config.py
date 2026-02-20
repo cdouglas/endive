@@ -18,6 +18,24 @@ import endive.main as main
 from endive.capstats import Stats
 
 
+@pytest.fixture(autouse=True)
+def reset_provider_instances():
+    """Reset provider instances before each test to ensure T_* globals are used directly."""
+    # Store original values
+    orig_catalog = main.CATALOG_PROVIDER_INSTANCE
+    orig_storage = main.STORAGE_PROVIDER_INSTANCE
+
+    # Reset before test
+    main.CATALOG_PROVIDER_INSTANCE = None
+    main.STORAGE_PROVIDER_INSTANCE = None
+
+    yield
+
+    # Restore after test (for tests that need providers)
+    main.CATALOG_PROVIDER_INSTANCE = orig_catalog
+    main.STORAGE_PROVIDER_INSTANCE = orig_storage
+
+
 def create_minimal_config(provider: str = None, extra_storage: str = "",
                           extra_catalog: str = "", extra_transaction: str = "") -> str:
     """Create a minimal valid config for testing."""

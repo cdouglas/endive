@@ -105,6 +105,9 @@ CATALOG_CONFIGS = {
     ),
 }
 
+# Legacy alias: "aws" maps to "s3x" for backward compatibility
+CATALOG_CONFIGS["aws"] = CATALOG_CONFIGS["s3x"]
+
 
 class CatalogProvider(ABC):
     """Abstract interface for catalog operations.

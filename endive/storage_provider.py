@@ -156,6 +156,9 @@ STORAGE_CONFIGS = {
     ),
 }
 
+# Legacy alias: "aws" maps to "s3x" for backward compatibility
+STORAGE_CONFIGS["aws"] = STORAGE_CONFIGS["s3x"]
+
 
 class StorageProvider(ABC):
     """Abstract interface for storage operations.

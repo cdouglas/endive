@@ -24,7 +24,7 @@ class TestCatalogConfigs:
 
     def test_all_providers_have_configs(self):
         """All expected providers have configurations."""
-        expected = {"instant", "s3x", "s3", "azurex", "azure", "gcp"}
+        expected = {"instant", "s3x", "s3", "azurex", "azure", "gcp", "aws"}
         assert expected == set(CATALOG_CONFIGS.keys())
 
     def test_instant_config_values(self):
@@ -184,7 +184,7 @@ class TestStorageConfigs:
 
     def test_all_providers_have_configs(self):
         """All expected providers have configurations."""
-        expected = {"instant", "s3x", "s3", "azurex", "azure", "gcp"}
+        expected = {"instant", "s3x", "s3", "azurex", "azure", "gcp", "aws"}
         assert expected == set(STORAGE_CONFIGS.keys())
 
     def test_instant_config_values(self):
