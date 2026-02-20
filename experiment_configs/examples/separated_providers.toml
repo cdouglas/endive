@@ -1,0 +1,75 @@
+# Example: Separated Catalog and Storage Providers
+#
+# This config demonstrates the architectural separation between:
+# - Catalog: Where the table pointer lives (CAS operations)
+# - Storage: Where manifest lists and data files live (I/O operations)
+#
+# Use cases:
+# 1. Fast catalog (Nessie) + S3 storage: Isolate catalog contention from storage
+# 2. S3 Express catalog + S3 Express storage: Unified fast tier
+# 3. S3 Express catalog + S3 Standard storage: Fast commits, cheap bulk storage
+
+[simulation]
+duration_ms = 3600000  # 1 hour
+output_path = "results.parquet"
+
+[experiment]
+label = "nessie_s3x"
+
+# =============================================================================
+# NEW: Separate catalog and storage configuration
+# =============================================================================
+
+[catalog]
+# Catalog type: "instant" or "object_storage"
+type = "instant"
+# For object_storage type, specify the provider:
+# provider = "s3x"  # Uses S3 Express conditional writes for CAS
+
+num_tables = 1
+num_groups = 1
+table_metadata_inlined = true
+
+[storage]
+# Storage provider for manifest lists, manifest files, data files
+provider = "s3x"
+max_parallel = 4
+
+# =============================================================================
+# Alternative configurations
+# =============================================================================
+
+# Config A: Fast Nessie catalog + S3 Standard storage (cost-optimized)
+# [catalog]
+# type = "instant"
+# [storage]
+# provider = "s3"
+
+# Config B: S3 Express for both (performance-optimized)
+# [catalog]
+# type = "object_storage"
+# provider = "s3x"
+# [storage]
+# provider = "s3x"
+
+# Config C: Realistic datacenter setup
+# [catalog]
+# type = "object_storage"
+# provider = "s3x"  # Fast catalog tier
+# [storage]
+# provider = "s3"   # Standard storage tier
+
+[transaction]
+retry = 10
+runtime.min = 30000
+runtime.mean = 180000
+runtime.sigma = 1.5
+
+inter_arrival.distribution = "exponential"
+inter_arrival.scale = 100.0
+
+operation_types.fast_append = 0.9
+operation_types.validated_overwrite = 0.1
+
+real_conflict_probability = 0.1
+manifest_list_mode = "rewrite"
