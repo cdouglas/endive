@@ -382,3 +382,79 @@ class TestStochasticLatencies:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+class TestTableLevelConflictDetection:
+    """Test table-level conflict detection (N_GROUPS == N_TABLES case)."""
+
+    def test_table_level_cas_detects_conflicts(self):
+        """When N_GROUPS == N_TABLES, CAS should compare against START version."""
+        import simpy
+        from endive.transaction import Txn
+        import endive.main as main
+        
+        # Configure for single table (N_GROUPS == N_TABLES path)
+        main.N_TABLES = 1
+        main.N_GROUPS = 1
+        main.PARTITION_ENABLED = False
+        
+        sim = simpy.Environment()
+        catalog = main.Catalog(sim)
+        
+        # Initial state
+        assert catalog.seq == 0
+        assert catalog.tbl[0] == 0
+        
+        # Create two transactions that both see table 0 at version 0
+        t1 = Txn(1, 0, 100, 0, {0: 0}, {0: 1})
+        t1.v_dirty = {0: 1}  # Expected write version
+        t1.v_tblr = {0: 0}   # Start version
+        
+        t2 = Txn(2, 0, 100, 0, {0: 0}, {0: 1})
+        t2.v_dirty = {0: 1}
+        t2.v_tblr = {0: 0}
+        
+        # T1 commits successfully
+        r1 = catalog.try_CAS(sim, t1)
+        assert r1 == True, "T1 should succeed (no conflict)"
+        assert catalog.tbl[0] == 1, "Table should be at version 1"
+        
+        # T2 should FAIL because catalog.tbl[0]=1 != t2.v_tblr[0]=0
+        r2 = catalog.try_CAS(sim, t2)
+        assert r2 == False, f"T2 should fail (conflict): catalog.tbl[0]={catalog.tbl[0]}, t2.v_tblr[0]={t2.v_tblr[0]}"
+        
+        print("✓ Table-level CAS conflict detection works correctly")
+
+    def test_catalog_level_cas_still_works(self):
+        """When N_GROUPS != N_TABLES, catalog-level check should work."""
+        import simpy
+        from endive.transaction import Txn
+        import endive.main as main
+        
+        # Configure for multiple tables (catalog-level path)
+        main.N_TABLES = 3
+        main.N_GROUPS = 1  # N_GROUPS != N_TABLES
+        main.PARTITION_ENABLED = False
+        
+        sim = simpy.Environment()
+        catalog = main.Catalog(sim)
+        
+        # Create two transactions at same catalog version
+        t1 = Txn(1, 0, 100, 0, {0: 0}, {0: 1})
+        t1.v_dirty = {0: 1}
+        t1.v_tblr = {0: 0}
+        
+        t2 = Txn(2, 0, 100, 0, {0: 0}, {0: 1})
+        t2.v_dirty = {0: 1}
+        t2.v_tblr = {0: 0}
+        
+        # T1 commits, catalog.seq advances
+        r1 = catalog.try_CAS(sim, t1)
+        assert r1 == True
+        assert catalog.seq == 1
+        
+        # T2 should fail because catalog.seq=1 != t2.v_catalog_seq=0
+        r2 = catalog.try_CAS(sim, t2)
+        assert r2 == False, f"T2 should fail: catalog.seq={catalog.seq}, t2.v_catalog_seq={t2.v_catalog_seq}"
+        
+        print("✓ Catalog-level CAS conflict detection works correctly")
