@@ -494,13 +494,8 @@ def validate_config(config: dict) -> tuple[list[str], list[str]]:
     # Catalog section
     catalog = config.get('catalog', {})
     num_tables = catalog.get('num_tables', 1)
-    num_groups = catalog.get('num_groups', 1)
     if num_tables <= 0:
         errors.append("catalog.num_tables must be > 0")
-    if num_groups <= 0:
-        errors.append("catalog.num_groups must be > 0")
-    if num_groups > num_tables:
-        errors.append(f"catalog.num_groups ({num_groups}) cannot exceed num_tables ({num_tables})")
 
     # Validate catalog mode
     catalog_mode = catalog.get('mode', 'cas')
@@ -634,9 +629,5 @@ def validate_config(config: dict) -> tuple[list[str], list[str]]:
 
         if parts_mean >= n_partitions:
             warnings.append(f"partition.partitions_per_txn_mean ({parts_mean}) >= num_partitions ({n_partitions}); transactions will touch all partitions, defeating partition isolation")
-
-        # Warn about complex interactions
-        if num_groups > 1:
-            warnings.append(f"partition.enabled=true with num_groups={num_groups} > 1 creates nested isolation (table groups + partitions); this is valid but may be unintended")
 
     return errors, warnings

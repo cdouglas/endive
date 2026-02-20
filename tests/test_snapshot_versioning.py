@@ -107,8 +107,6 @@ class TestManifestListReading:
             try:
                 configure_from_toml(config_path)
                 np.random.seed(42)
-                endive.main.TABLE_TO_GROUP = {i: 0 for i in range(endive.main.N_TABLES)}
-                endive.main.GROUP_TO_TABLES = {0: list(range(endive.main.N_TABLES))}
 
                 env = simpy.Environment()
                 catalog = Catalog(env)
@@ -292,8 +290,6 @@ class TestEndToEndVersioning:
                 configure_from_toml(config_path)
                 np.random.seed(42)
                 endive.main.STATS = Stats()
-                endive.main.TABLE_TO_GROUP = {i: 0 for i in range(endive.main.N_TABLES)}
-                endive.main.GROUP_TO_TABLES = {0: list(range(endive.main.N_TABLES))}
 
                 env = simpy.Environment()
                 env.process(setup(env))

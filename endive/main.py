@@ -11,7 +11,7 @@ import tomllib
 import numpy as np
 from tqdm import tqdm
 from endive.capstats import Stats, truncated_zipf_pmf, lognormal_params_from_mean_and_sigma
-from endive.utils import get_git_sha, get_git_sha_short, partition_tables_into_groups
+from endive.utils import get_git_sha, get_git_sha_short
 from endive.snapshot import CatalogSnapshot, CASResult
 from endive.transaction import Txn, LogEntry
 from endive.operation import OperationType, get_behavior
@@ -51,11 +51,6 @@ SIM_SEED: int | None
 EXPERIMENT_LABEL: str | None
 
 N_TABLES: int
-N_GROUPS: int  # Number of table groups
-GROUP_SIZE_DIST: str  # Distribution of group sizes
-LONGTAIL_PARAMS: dict  # Parameters for longtail distribution
-TABLE_TO_GROUP: dict  # Mapping from table ID to group ID
-GROUP_TO_TABLES: dict  # Mapping from group ID to list of table IDs
 N_TXN_RETRY: int
 # Storage operation latencies
 # New format: {'mu': float, 'sigma': float, 'distribution': 'lognormal'}
@@ -225,8 +220,7 @@ CONTENTION_TRACKER = ContentionTracker()
 
 
 def configure_from_toml(config_file: str):
-    global N_TABLES, N_GROUPS, GROUP_SIZE_DIST, LONGTAIL_PARAMS
-    global TABLE_TO_GROUP, GROUP_TO_TABLES
+    global N_TABLES
     global T_CAS, T_METADATA_ROOT, T_MANIFEST_LIST, T_MANIFEST_FILE
     global T_MIN_RUNTIME, T_RUNTIME_MU, T_RUNTIME_SIGMA
     global N_TBL_PMF, TBL_R_PMF, N_TBL_W_PMF, N_TXN_RETRY
@@ -262,17 +256,6 @@ def configure_from_toml(config_file: str):
 
     # Load basic integer configuration
     N_TABLES = config["catalog"]["num_tables"]
-    N_GROUPS = config["catalog"].get("num_groups", 1)
-    GROUP_SIZE_DIST = config["catalog"].get("group_size_distribution", "uniform")
-
-    # Load longtail parameters
-    LONGTAIL_PARAMS = {}
-    if "longtail" in config["catalog"]:
-        LONGTAIL_PARAMS = {
-            "large_group_fraction": config["catalog"]["longtail"].get("large_group_fraction", 0.5),
-            "medium_groups_count": config["catalog"]["longtail"].get("medium_groups_count", 3),
-            "medium_group_fraction": config["catalog"]["longtail"].get("medium_group_fraction", 0.3)
-        }
 
     # Load append mode parameters
     CATALOG_MODE = config["catalog"].get("mode", "cas")
@@ -1038,12 +1021,6 @@ def print_configuration():
 
     print("\n[Catalog]")
     print(f"  Tables:       {N_TABLES}")
-    print(f"  Groups:       {N_GROUPS}")
-    if N_GROUPS > 1:
-        print(f"  Distribution: {GROUP_SIZE_DIST}")
-        # GROUP_TO_TABLES will be populated after seed is set
-        if N_GROUPS == N_TABLES:
-            print(f"  Conflicts:    Table-level only (no multi-table transactions)")
 
     print("\n[Transaction]")
     print(f"  Max Retries:  {N_TXN_RETRY}")
@@ -1750,8 +1727,6 @@ class Catalog:
         self.sim = sim
         self.seq = 0
         self.tbl = [0] * N_TABLES
-        # Track last committed transaction per group (for table-level conflicts when N_GROUPS == N_TABLES)
-        self.group_seq = [0] * N_GROUPS if N_GROUPS > 1 else None
         # Per-table manifest list state for append mode
         self.ml_offset = [0] * N_TABLES  # Manifest list byte offset per table
         self.ml_sealed = [False] * N_TABLES  # Whether manifest list is sealed (needs rewrite)
@@ -1840,8 +1815,7 @@ class Catalog:
 
         Conflict detection modes:
         1. Partition mode (PARTITION_ENABLED): Per-partition vector clock comparison
-        2. Table-level (N_GROUPS == N_TABLES): Per-table version comparison
-        3. Catalog-level (default): Global sequence number comparison
+        2. Catalog-level (default): Global sequence number comparison
         """
         logger.debug(f"{sim.now} TXN {txn.id} CAS {self.seq} = {txn.v_catalog_seq} {txn.v_tblw}")
         logger.debug(f"{sim.now} TXN {txn.id} Catalog {self.tbl}")
@@ -1850,34 +1824,14 @@ class Catalog:
         if PARTITION_ENABLED:
             return self._try_CAS_partition(sim, txn)
 
-        # Table-level conflicts when each table is its own group
-        if N_GROUPS == N_TABLES:
-            # Check if any of the tables we read/wrote have changed
-            # Must compare against START version (v_tblr), not expected write version (v_dirty)
-            # v_dirty contains start+1 for written tables, which would miss conflicts!
-            conflict = False
-            for t in txn.v_dirty.keys():
-                if self.tbl[t] != txn.v_tblr[t]:
-                    conflict = True
-                    break
-
-            if not conflict:
-                # No conflicts - commit
-                for off, val in txn.v_tblw.items():
-                    self.tbl[off] = val
-                self.seq += 1
-                logger.debug(f"{sim.now} TXN {txn.id} CASOK (table-level)   {self.tbl}")
-                return True
-            return False
-        else:
-            # Catalog-level conflicts (original behavior)
-            if self.seq == txn.v_catalog_seq:
-                for off, val in txn.v_tblw.items():
-                    self.tbl[off] = val
-                self.seq += 1
-                logger.debug(f"{sim.now} TXN {txn.id} CASOK   {self.tbl}")
-                return True
-            return False
+        # Catalog-level conflicts: compare global sequence number
+        if self.seq == txn.v_catalog_seq:
+            for off, val in txn.v_tblw.items():
+                self.tbl[off] = val
+            self.seq += 1
+            logger.debug(f"{sim.now} TXN {txn.id} CASOK   {self.tbl}")
+            return True
+        return False
 
     def _try_CAS_partition(self, sim, txn):
         """Partition-level CAS using vector clock comparison.
@@ -2747,25 +2701,11 @@ def rand_tbl_from_snapshot(snapshot: CatalogSnapshot):
     Returns:
         (tblr, tblw): Dicts mapping table_id -> version for read/write
     """
-    # If no grouping (N_GROUPS == 1), use all tables
-    if N_GROUPS == 1:
-        available_tables = list(range(N_TABLES))
-        table_pmf = TBL_R_PMF
-        max_tables = N_TABLES
-    else:
-        # Select a random group
-        group_id = np.random.choice(N_GROUPS)
-        available_tables = GROUP_TO_TABLES[group_id]
-        max_tables = len(available_tables)
+    available_tables = list(range(N_TABLES))
+    table_pmf = TBL_R_PMF
 
-        # Create PMF for tables in this group
-        # Normalize the original PMF over the available tables
-        table_pmf = np.array([TBL_R_PMF[t] for t in available_tables])
-        table_pmf = table_pmf / table_pmf.sum()
-
-    # how many tables (limit to group size)
-    ntbl_requested = int(np.random.choice(np.arange(1, N_TABLES + 1), p=N_TBL_PMF))
-    ntbl = min(ntbl_requested, max_tables)
+    # how many tables to read
+    ntbl = int(np.random.choice(np.arange(1, N_TABLES + 1), p=N_TBL_PMF))
 
     # which tables read - use snapshot's frozen tuple
     tblr_idx = np.random.choice(available_tables, size=ntbl, replace=False, p=table_pmf).astype(int).tolist()
@@ -2782,34 +2722,16 @@ def rand_tbl_from_snapshot(snapshot: CatalogSnapshot):
 
 
 def rand_tbl(catalog):
-    """Select tables for transaction, respecting group boundaries.
+    """Select tables for transaction.
 
     DEPRECATED: Use rand_tbl_from_snapshot() with a CatalogSnapshot instead.
     This function exists for backward compatibility during migration.
     """
-    # If no grouping (N_GROUPS == 1), use all tables
-    if N_GROUPS == 1:
-        available_tables = list(range(N_TABLES))
-        table_pmf = TBL_R_PMF
-        max_tables = N_TABLES
-    else:
-        # Select a random group
-        group_id = np.random.choice(N_GROUPS)
-        available_tables = GROUP_TO_TABLES[group_id]
-        max_tables = len(available_tables)
+    available_tables = list(range(N_TABLES))
+    table_pmf = TBL_R_PMF
 
-        # Create PMF for tables in this group
-        # Normalize the original PMF over the available tables
-        table_pmf = np.array([TBL_R_PMF[t] for t in available_tables])
-        table_pmf = table_pmf / table_pmf.sum()
-
-    # how many tables (limit to group size)
-    ntbl_requested = int(np.random.choice(np.arange(1, N_TABLES + 1), p=N_TBL_PMF))
-    ntbl = min(ntbl_requested, max_tables)
-
-    # Note: When num_groups == num_tables (table-level conflicts), groups have 1 table each.
-    # Transactions requesting multiple tables are automatically capped to group size.
-    # This is expected behavior, not an error.
+    # how many tables to read
+    ntbl = int(np.random.choice(np.arange(1, N_TABLES + 1), p=N_TBL_PMF))
 
     # which tables read
     tblr_idx = np.random.choice(available_tables, size=ntbl, replace=False, p=table_pmf).astype(int).tolist()
@@ -3142,20 +3064,6 @@ def cli():
 
     # Prepare experiment output directory with actual seed
     final_output_path = prepare_experiment_output(config, args.config, seed)
-
-    # Partition tables into groups (after seed is set for determinism)
-    global TABLE_TO_GROUP, GROUP_TO_TABLES
-    TABLE_TO_GROUP, GROUP_TO_TABLES = partition_tables_into_groups(
-        N_TABLES, N_GROUPS, GROUP_SIZE_DIST, LONGTAIL_PARAMS
-    )
-
-    # Print group size information if using multiple groups
-    if N_GROUPS > 1 and not args.quiet:
-        group_sizes = [len(tables) for tables in GROUP_TO_TABLES.values()]
-        print(f"[Group Partitioning]")
-        print(f"  Group sizes: min={min(group_sizes)}, max={max(group_sizes)}, "
-              f"mean={sum(group_sizes)/len(group_sizes):.1f}")
-        print()
 
     # Run simulation with progress bar
     logger.info(f"Starting simulation...")

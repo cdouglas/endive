@@ -538,7 +538,6 @@ label = "accuracy_test"
 
 [catalog]
 num_tables = 1
-num_groups = 1
 
 [transaction]
 inter_arrival.scale = 100

@@ -242,10 +242,6 @@ class TestExponentialBackoff:
 
                 # Setup and run simulation
                 env = simpy.Environment()
-                endive.main.TABLE_TO_GROUP, endive.main.GROUP_TO_TABLES = endive.main.partition_tables_into_groups(
-                    endive.main.N_TABLES, endive.main.N_GROUPS,
-                    endive.main.GROUP_SIZE_DIST, endive.main.LONGTAIL_PARAMS
-                )
                 env.process(endive.main.setup(env))
                 env.run(until=endive.main.SIM_DURATION_MS)
 
@@ -300,10 +296,6 @@ class TestExponentialBackoff:
                 np.random.seed(seed)
 
                 env = simpy.Environment()
-                endive.main.TABLE_TO_GROUP, endive.main.GROUP_TO_TABLES = endive.main.partition_tables_into_groups(
-                    endive.main.N_TABLES, endive.main.N_GROUPS,
-                    endive.main.GROUP_SIZE_DIST, endive.main.LONGTAIL_PARAMS
-                )
                 env.process(endive.main.setup(env))
                 env.run(until=endive.main.SIM_DURATION_MS)
                 endive.main.STATS.export_parquet(output_no_backoff)
@@ -333,10 +325,6 @@ class TestExponentialBackoff:
                 np.random.seed(seed)
 
                 env = simpy.Environment()
-                endive.main.TABLE_TO_GROUP, endive.main.GROUP_TO_TABLES = endive.main.partition_tables_into_groups(
-                    endive.main.N_TABLES, endive.main.N_GROUPS,
-                    endive.main.GROUP_SIZE_DIST, endive.main.LONGTAIL_PARAMS
-                )
                 env.process(endive.main.setup(env))
                 env.run(until=endive.main.SIM_DURATION_MS)
                 endive.main.STATS.export_parquet(output_with_backoff)

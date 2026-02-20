@@ -174,8 +174,6 @@ class TestConflictResolution:
 
             try:
                 configure_from_toml(config_path)
-                endive.main.TABLE_TO_GROUP = {i: 0 for i in range(5)}
-                endive.main.GROUP_TO_TABLES = {0: list(range(5))}
                 endive.main.STATS = Stats()
 
                 env = simpy.Environment()
@@ -217,8 +215,6 @@ class TestConflictResolution:
 
             try:
                 configure_from_toml(config_path)
-                endive.main.TABLE_TO_GROUP = {i: 0 for i in range(5)}
-                endive.main.GROUP_TO_TABLES = {0: list(range(5))}
                 endive.main.STATS = Stats()
 
                 env = simpy.Environment()
@@ -267,8 +263,6 @@ class TestConflictResolution:
 
             try:
                 configure_from_toml(config_path)
-                endive.main.TABLE_TO_GROUP = {i: 0 for i in range(5)}
-                endive.main.GROUP_TO_TABLES = {0: list(range(5))}
                 endive.main.STATS = Stats()
 
                 env = simpy.Environment()
@@ -455,7 +449,7 @@ class TestConfigValidation:
         from endive.config import validate_config
 
         config = {
-            'catalog': {'num_tables': 5, 'num_groups': 1},
+            'catalog': {'num_tables': 5},
             'transaction': {
                 'operation_types': {
                     'fast_append': 0.7,
@@ -475,7 +469,7 @@ class TestConfigValidation:
         from endive.config import validate_config
 
         config = {
-            'catalog': {'num_tables': 5, 'num_groups': 1},
+            'catalog': {'num_tables': 5},
             'transaction': {
                 'operation_types': {
                     'fast_append': 0.5,
@@ -494,7 +488,7 @@ class TestConfigValidation:
         from endive.config import validate_config
 
         config = {
-            'catalog': {'num_tables': 5, 'num_groups': 1},
+            'catalog': {'num_tables': 5},
             'transaction': {
                 'operation_types': {
                     'fast_append': 1.5,
@@ -513,7 +507,7 @@ class TestConfigValidation:
         from endive.config import validate_config
 
         config = {
-            'catalog': {'num_tables': 5, 'num_groups': 1},
+            'catalog': {'num_tables': 5},
             'transaction': {
                 'operation_types': {
                     'fast_append': 0.3,
@@ -534,7 +528,7 @@ class TestConfigValidation:
         from endive.config import validate_config
 
         config = {
-            'catalog': {'num_tables': 5, 'num_groups': 1},
+            'catalog': {'num_tables': 5},
             'transaction': {
                 'real_conflict_probability': 0.5,
                 'operation_types': {
@@ -812,8 +806,6 @@ seed = 42
 
 [catalog]
 num_tables = 1
-num_groups = 1
-group_size_distribution = "uniform"
 
 [transaction]
 retry = 10
@@ -884,8 +876,6 @@ seed = 42
 
 [catalog]
 num_tables = 1
-num_groups = 1
-group_size_distribution = "uniform"
 
 [transaction]
 retry = 10

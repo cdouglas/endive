@@ -41,8 +41,6 @@ class TestZeroRetries:
                 configure_from_toml(config_path)
                 np.random.seed(42)
                 endive.main.STATS = Stats()
-                endive.main.TABLE_TO_GROUP = {0: 0}
-                endive.main.GROUP_TO_TABLES = {0: [0]}
 
                 # Run simulation
                 env = simpy.Environment()
@@ -91,10 +89,6 @@ class TestZeroRetries:
                 configure_from_toml(config_path)
                 np.random.seed(42)
                 endive.main.STATS = Stats()
-                endive.main.TABLE_TO_GROUP, endive.main.GROUP_TO_TABLES = endive.main.partition_tables_into_groups(
-                    endive.main.N_TABLES, endive.main.N_GROUPS,
-                    endive.main.GROUP_SIZE_DIST, endive.main.LONGTAIL_PARAMS
-                )
 
                 # Run simulation
                 env = simpy.Environment()
@@ -135,10 +129,6 @@ class TestSingleTransaction:
                 configure_from_toml(config_path)
                 np.random.seed(42)
                 endive.main.STATS = Stats()
-                endive.main.TABLE_TO_GROUP, endive.main.GROUP_TO_TABLES = endive.main.partition_tables_into_groups(
-                    endive.main.N_TABLES, endive.main.N_GROUPS,
-                    endive.main.GROUP_SIZE_DIST, endive.main.LONGTAIL_PARAMS
-                )
 
                 # Run simulation
                 env = simpy.Environment()
@@ -181,8 +171,6 @@ class TestExtremeLoad:
                 configure_from_toml(config_path)
                 np.random.seed(42)
                 endive.main.STATS = Stats()
-                endive.main.TABLE_TO_GROUP = {0: 0}
-                endive.main.GROUP_TO_TABLES = {0: [0]}
 
                 # Run simulation
                 env = simpy.Environment()
@@ -234,8 +222,6 @@ class TestExtremeLoad:
                 configure_from_toml(config_path)
                 np.random.seed(42)
                 endive.main.STATS = Stats()
-                endive.main.TABLE_TO_GROUP = {0: 0}
-                endive.main.GROUP_TO_TABLES = {0: [0]}
 
                 # Run simulation - should complete without errors
                 env = simpy.Environment()
@@ -273,10 +259,6 @@ class TestLargeVersionGaps:
             try:
                 configure_from_toml(config_path)
                 np.random.seed(42)
-                endive.main.TABLE_TO_GROUP, endive.main.GROUP_TO_TABLES = endive.main.partition_tables_into_groups(
-                    endive.main.N_TABLES, endive.main.N_GROUPS,
-                    endive.main.GROUP_SIZE_DIST, endive.main.LONGTAIL_PARAMS
-                )
 
                 env = simpy.Environment()
                 catalog = Catalog(env)
@@ -329,8 +311,6 @@ class TestBoundaryConditions:
                 configure_from_toml(config_path)
                 np.random.seed(42)
                 endive.main.STATS = Stats()
-                endive.main.TABLE_TO_GROUP = {0: 0}
-                endive.main.GROUP_TO_TABLES = {0: [0]}
 
                 # Run simulation
                 env = simpy.Environment()
@@ -341,13 +321,13 @@ class TestBoundaryConditions:
                 df = pd.DataFrame(endive.main.STATS.transactions)
                 assert len(df) > 0, "Should generate transactions"
 
-                print(f"✓ Minimum configuration (1 table, 1 group) works")
+                print(f"✓ Minimum configuration (1 table) works")
 
             finally:
                 os.unlink(config_path)
 
-    def test_many_tables_many_groups(self):
-        """Test large configuration: many tables and groups."""
+    def test_many_tables(self):
+        """Test large configuration: many tables."""
         with tempfile.TemporaryDirectory() as tmpdir:
             config_path = create_test_config(
                 output_path=os.path.join(tmpdir, "test.parquet"),
@@ -358,21 +338,9 @@ class TestBoundaryConditions:
             )
 
             try:
-                # Modify to have many groups - replace existing num_groups value
-                with open(config_path, 'r') as f:
-                    content = f.read()
-                # Replace the default num_groups = 1 with num_groups = 50
-                content = content.replace('num_groups = 1', 'num_groups = 50')
-                with open(config_path, 'w') as f:
-                    f.write(content)
-
                 configure_from_toml(config_path)
                 np.random.seed(42)
                 endive.main.STATS = Stats()
-                endive.main.TABLE_TO_GROUP, endive.main.GROUP_TO_TABLES = endive.main.partition_tables_into_groups(
-                    endive.main.N_TABLES, endive.main.N_GROUPS,
-                    endive.main.GROUP_SIZE_DIST, endive.main.LONGTAIL_PARAMS
-                )
 
                 # Run simulation
                 env = simpy.Environment()
@@ -383,7 +351,7 @@ class TestBoundaryConditions:
                 df = pd.DataFrame(endive.main.STATS.transactions)
                 assert len(df) > 0, "Should generate transactions"
 
-                print(f"✓ Large configuration (100 tables, 50 groups) works")
+                print(f"✓ Large configuration (100 tables) works")
                 print(f"  Generated {len(df)} transactions")
 
             finally:
@@ -412,10 +380,6 @@ class TestBoundaryConditions:
                 configure_from_toml(config_path)
                 np.random.seed(42)
                 endive.main.STATS = Stats()
-                endive.main.TABLE_TO_GROUP, endive.main.GROUP_TO_TABLES = endive.main.partition_tables_into_groups(
-                    endive.main.N_TABLES, endive.main.N_GROUPS,
-                    endive.main.GROUP_SIZE_DIST, endive.main.LONGTAIL_PARAMS
-                )
 
                 # Run simulation
                 env = simpy.Environment()

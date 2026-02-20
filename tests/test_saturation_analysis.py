@@ -52,7 +52,6 @@ label = "exp_test"
 
 [catalog]
 num_tables = 1
-num_groups = 1
 
 [transaction]
 inter_arrival.scale = 100
@@ -149,14 +148,12 @@ class TestParameterExtraction:
         """Verify catalog parameter extraction."""
         config = {
             'catalog': {
-                'num_tables': 10,
-                'num_groups': 5
+                'num_tables': 10
             }
         }
 
         params = extract_key_parameters(config)
         assert params['num_tables'] == 10
-        assert params['num_groups'] == 5
 
         print("✓ Extracts catalog parameters")
 
@@ -368,7 +365,6 @@ label = "exp_test"
 
 [catalog]
 num_tables = 1
-num_groups = 1
 
 [transaction]
 inter_arrival.scale = 100
@@ -1051,7 +1047,6 @@ label = 'cli_exp'
 
 [catalog]
 num_tables = 1
-num_groups = 1
 
 [transaction]
 runtime.mean = 10000
@@ -1125,7 +1120,6 @@ label = 'default_exp'
 
 [catalog]
 num_tables = 1
-num_groups = 1
 
 [transaction]
 runtime.mean = 10000
@@ -1208,7 +1202,6 @@ label = "group_exp_{num_tables}"
 
 [catalog]
 num_tables = {num_tables}
-num_groups = {num_tables}
 
 [transaction]
 inter_arrival.scale = 100

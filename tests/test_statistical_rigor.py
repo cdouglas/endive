@@ -48,11 +48,7 @@ class TestDistributionConformance:
                 configure_from_toml(config_path)
                 np.random.seed(42)
                 endive.main.STATS = Stats()
-                endive.main.TABLE_TO_GROUP, endive.main.GROUP_TO_TABLES = endive.main.partition_tables_into_groups(
-                    endive.main.N_TABLES, endive.main.N_GROUPS,
-                    endive.main.GROUP_SIZE_DIST, endive.main.LONGTAIL_PARAMS
-                )
-
+                
                 # Run simulation
                 env = simpy.Environment()
                 env.process(endive.main.setup(env))
@@ -118,11 +114,7 @@ class TestDistributionConformance:
                 configure_from_toml(config_path)
                 np.random.seed(42)
                 endive.main.STATS = Stats()
-                endive.main.TABLE_TO_GROUP, endive.main.GROUP_TO_TABLES = endive.main.partition_tables_into_groups(
-                    endive.main.N_TABLES, endive.main.N_GROUPS,
-                    endive.main.GROUP_SIZE_DIST, endive.main.LONGTAIL_PARAMS
-                )
-
+                
                 # Run simulation
                 env = simpy.Environment()
                 env.process(endive.main.setup(env))
@@ -173,11 +165,7 @@ class TestDistributionConformance:
                 configure_from_toml(config_path)
                 np.random.seed(42)
                 endive.main.STATS = Stats()
-                endive.main.TABLE_TO_GROUP, endive.main.GROUP_TO_TABLES = endive.main.partition_tables_into_groups(
-                    endive.main.N_TABLES, endive.main.N_GROUPS,
-                    endive.main.GROUP_SIZE_DIST, endive.main.LONGTAIL_PARAMS
-                )
-
+                
                 # Run simulation
                 env = simpy.Environment()
                 env.process(endive.main.setup(env))
@@ -228,11 +216,7 @@ class TestSelectionBias:
                 configure_from_toml(config_path)
                 np.random.seed(42)
                 endive.main.STATS = Stats()
-                endive.main.TABLE_TO_GROUP, endive.main.GROUP_TO_TABLES = endive.main.partition_tables_into_groups(
-                    endive.main.N_TABLES, endive.main.N_GROUPS,
-                    endive.main.GROUP_SIZE_DIST, endive.main.LONGTAIL_PARAMS
-                )
-
+                
                 # Run simulation
                 env = simpy.Environment()
                 env.process(endive.main.setup(env))
@@ -299,11 +283,7 @@ class TestSelectionBias:
                 configure_from_toml(config_path)
                 np.random.seed(42)
                 endive.main.STATS = Stats()
-                endive.main.TABLE_TO_GROUP, endive.main.GROUP_TO_TABLES = endive.main.partition_tables_into_groups(
-                    endive.main.N_TABLES, endive.main.N_GROUPS,
-                    endive.main.GROUP_SIZE_DIST, endive.main.LONGTAIL_PARAMS
-                )
-
+                
                 # Run simulation
                 env = simpy.Environment()
                 env.process(endive.main.setup(env))
@@ -388,10 +368,6 @@ class TestCrossExperimentConsistency:
                     configure_from_toml(config_path)
                     np.random.seed(42)  # Same seed for numpy
                     endive.main.STATS = Stats()
-                    endive.main.TABLE_TO_GROUP, endive.main.GROUP_TO_TABLES = endive.main.partition_tables_into_groups(
-                        endive.main.N_TABLES, endive.main.N_GROUPS,
-                        endive.main.GROUP_SIZE_DIST, endive.main.LONGTAIL_PARAMS
-                    )
 
                     # Run simulation
                     env = simpy.Environment()

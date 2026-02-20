@@ -34,11 +34,8 @@ def create_partition_test_config(
     partitions_per_txn_mean: float = 3.0,
     partitions_per_txn_max: int = 10,
     real_conflict_probability: float = 0.0,
-    num_groups: int = None,  # Defaults to num_tables if None
 ) -> str:
     """Create a test configuration file for partition mode."""
-    if num_groups is None:
-        num_groups = 1  # Default to single group (catalog-level conflicts)
     config_content = f"""[simulation]
 duration_ms = {duration_ms}
 output_path = "{output_path}"
@@ -46,7 +43,6 @@ output_path = "{output_path}"
 
 [catalog]
 num_tables = {num_tables}
-num_groups = {num_groups}
 
 [partition]
 enabled = {str(partition_enabled).lower()}
@@ -112,14 +108,8 @@ def run_simulation_from_config(config_path: str) -> pd.DataFrame:
     # Load configuration
     configure_from_toml(config_path)
 
-    # Partition tables into groups (after seed is set)
+    # Set random seed
     np.random.seed(endive.main.SIM_SEED if endive.main.SIM_SEED else 42)
-    endive.main.TABLE_TO_GROUP, endive.main.GROUP_TO_TABLES = endive.main.partition_tables_into_groups(
-        endive.main.N_TABLES,
-        endive.main.N_GROUPS,
-        endive.main.GROUP_SIZE_DIST,
-        endive.main.LONGTAIL_PARAMS
-    )
 
     # Run simulation
     sim = simpy.Environment()
@@ -136,7 +126,7 @@ class TestPartitionValidation:
     def test_validation_warns_on_single_partition(self):
         """Test that num_partitions=1 triggers a warning."""
         config = {
-            'catalog': {'num_tables': 1, 'num_groups': 1},
+            'catalog': {'num_tables': 1},
             'partition': {'enabled': True, 'num_partitions': 1},
             'simulation': {'duration_ms': 1000}
         }
@@ -146,27 +136,17 @@ class TestPartitionValidation:
     def test_validation_warns_on_high_partitions_per_txn(self):
         """Test that partitions_per_txn_mean >= num_partitions triggers a warning."""
         config = {
-            'catalog': {'num_tables': 1, 'num_groups': 1},
+            'catalog': {'num_tables': 1},
             'partition': {'enabled': True, 'num_partitions': 5, 'partitions_per_txn_mean': 5.0},
             'simulation': {'duration_ms': 1000}
         }
         errors, warnings = validate_config(config)
         assert any('defeating partition isolation' in w for w in warnings)
 
-    def test_validation_warns_on_nested_isolation(self):
-        """Test that partition mode with multiple groups triggers a warning."""
-        config = {
-            'catalog': {'num_tables': 10, 'num_groups': 5},
-            'partition': {'enabled': True, 'num_partitions': 100},
-            'simulation': {'duration_ms': 1000}
-        }
-        errors, warnings = validate_config(config)
-        assert any('nested isolation' in w for w in warnings)
-
     def test_validation_no_warnings_for_valid_config(self):
         """Test that a valid partition config produces no warnings."""
         config = {
-            'catalog': {'num_tables': 1, 'num_groups': 1},
+            'catalog': {'num_tables': 1},
             'partition': {'enabled': True, 'num_partitions': 100, 'partitions_per_txn_mean': 3.0},
             'simulation': {'duration_ms': 1000}
         }
@@ -177,7 +157,7 @@ class TestPartitionValidation:
     def test_validation_warns_on_partitions_exceeding_max(self):
         """Test that partitions_per_txn_max > num_partitions is a warning (clamped at runtime)."""
         config = {
-            'catalog': {'num_tables': 1, 'num_groups': 1},
+            'catalog': {'num_tables': 1},
             'partition': {'enabled': True, 'num_partitions': 5, 'partitions_per_txn_max': 10},
             'simulation': {'duration_ms': 1000}
         }

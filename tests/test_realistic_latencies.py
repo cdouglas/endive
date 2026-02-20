@@ -1077,9 +1077,6 @@ min_latency = 1
         main.SIM_OUTPUT_PATH = str(output_file)
 
         np.random.seed(42)
-        main.TABLE_TO_GROUP, main.GROUP_TO_TABLES = main.partition_tables_into_groups(
-            main.N_TABLES, main.N_GROUPS, main.GROUP_SIZE_DIST, main.LONGTAIL_PARAMS
-        )
         main.STATS = main.Stats()
 
         env = main.simpy.Environment()
@@ -1122,9 +1119,6 @@ min_latency = 1
 
             main.configure_from_toml(str(config_file))
             np.random.seed(42)
-            main.TABLE_TO_GROUP, main.GROUP_TO_TABLES = main.partition_tables_into_groups(
-                main.N_TABLES, main.N_GROUPS, main.GROUP_SIZE_DIST, main.LONGTAIL_PARAMS
-            )
             main.STATS = main.Stats()
 
             env = main.simpy.Environment()

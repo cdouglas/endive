@@ -302,7 +302,6 @@ def extract_key_parameters(config: Dict) -> Dict:
     # Extract catalog config
     if 'catalog' in config:
         params['num_tables'] = config['catalog'].get('num_tables', None)
-        params['num_groups'] = config['catalog'].get('num_groups', None)
 
     # Extract transaction config
     if 'transaction' in config:
@@ -1588,7 +1587,7 @@ def save_experiment_index(index_df: pd.DataFrame, output_path: str):
         # Create empty DataFrame with expected column headers
         columns = [
             'label', 'hash', 'num_seeds',
-            'inter_arrival_scale', 'num_tables', 'num_groups',
+            'inter_arrival_scale', 'num_tables',
             'real_conflict_probability',
             'total_txns', 'committed', 'success_rate',
             'throughput',
@@ -1606,7 +1605,7 @@ def save_experiment_index(index_df: pd.DataFrame, output_path: str):
     # Select relevant columns
     columns = [
         'label', 'hash', 'num_seeds',
-        'inter_arrival_scale', 'num_tables', 'num_groups',
+        'inter_arrival_scale', 'num_tables',
         'real_conflict_probability',
         'partition_enabled', 'num_partitions',
         'partitions_per_txn_mean', 'partitions_per_txn_max',

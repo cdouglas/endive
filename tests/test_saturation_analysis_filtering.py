@@ -59,8 +59,8 @@ class TestParseFilterExpression:
 
     def test_parse_less_than_or_equal(self):
         """Test parsing <= operator."""
-        param, op, value = parse_filter_expression("num_groups<=5")
-        assert param == "num_groups"
+        param, op, value = parse_filter_expression("num_partitions<=5")
+        assert param == "num_partitions"
         assert op == "<="
         assert value == 5
 
@@ -111,7 +111,7 @@ class TestApplyFilters:
         return pd.DataFrame({
             't_cas_mean': [15, 50, 100, 200, 500, 1000],
             'num_tables': [1, 1, 5, 5, 10, 10],
-            'num_groups': [1, 2, 5, 10, 20, 20],
+            'num_partitions': [1, 2, 5, 10, 20, 20],
             'throughput': [100, 80, 60, 40, 20, 10],
             'latency': [10, 20, 30, 50, 100, 200],
             'label': ['a', 'b', 'c', 'd', 'e', 'f']
@@ -144,7 +144,7 @@ class TestApplyFilters:
 
     def test_apply_filters_result_ordering(self, sample_df):
         """Test that filter preserves DataFrame ordering."""
-        result = apply_filters(sample_df, ["num_groups>=5"])
+        result = apply_filters(sample_df, ["num_partitions>=5"])
         # Check that result is a subset with preserved order
         expected_indices = [2, 3, 4, 5]
         assert list(result.index) == expected_indices

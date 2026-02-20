@@ -9,7 +9,8 @@ from typing import Optional
 import tempfile
 import os
 
-from endive.main import Catalog, Txn, configure_from_toml
+from endive.main import Catalog, configure_from_toml
+from endive.transaction import Txn
 import endive.main
 
 
@@ -22,7 +23,6 @@ class SimulationBuilder:
     Example:
         env, catalog, txn = (SimulationBuilder()
             .with_tables(5)
-            .with_groups(2, "uniform")
             .with_catalog_at_version(10)
             .with_transaction_at_version(5)
             .build())
@@ -30,8 +30,6 @@ class SimulationBuilder:
 
     def __init__(self):
         self._num_tables = 5
-        self._num_groups = 1
-        self._group_distribution = "uniform"
         self._catalog_version = 0
         self._txn_version = None  # If None, use catalog version
         self._txn_tables_read = None  # If None, auto-generate
@@ -42,12 +40,6 @@ class SimulationBuilder:
     def with_tables(self, n: int) -> 'SimulationBuilder':
         """Set number of tables in catalog."""
         self._num_tables = n
-        return self
-
-    def with_groups(self, n: int, distribution: str = "uniform") -> 'SimulationBuilder':
-        """Set number of table groups and distribution type."""
-        self._num_groups = n
-        self._group_distribution = distribution
         return self
 
     def with_catalog_at_version(self, seq: int) -> 'SimulationBuilder':
@@ -96,16 +88,6 @@ class SimulationBuilder:
         # Set seed for determinism
         np.random.seed(self._seed)
 
-        # Create table grouping
-        endive.main.TABLE_TO_GROUP, endive.main.GROUP_TO_TABLES = (
-            endive.main.partition_tables_into_groups(
-                self._num_tables,
-                self._num_groups,
-                self._group_distribution,
-                {}
-            )
-        )
-
         # Create environment and catalog
         env = simpy.Environment()
         catalog = Catalog(env)
@@ -139,9 +121,6 @@ class SimulationBuilder:
     def _configure_minimal(self):
         """Configure minimal simulation parameters for testing."""
         endive.main.N_TABLES = self._num_tables
-        endive.main.N_GROUPS = self._num_groups
-        endive.main.GROUP_SIZE_DIST = self._group_distribution
-        endive.main.LONGTAIL_PARAMS = {}
         endive.main.N_TXN_RETRY = 10
         endive.main.MAX_PARALLEL = 4
         endive.main.MIN_LATENCY = 5
@@ -170,7 +149,6 @@ class SimulationBuilder:
 def create_test_config(
     output_path: str,
     num_tables: int = 5,
-    num_groups: int = 1,
     seed: Optional[int] = 42,
     duration_ms: int = 10000,
     inter_arrival_scale: float = 500.0,
@@ -182,7 +160,6 @@ def create_test_config(
     Args:
         output_path: Path for simulation output
         num_tables: Number of tables in catalog
-        num_groups: Number of table groups
         seed: Random seed (None for random)
         duration_ms: Simulation duration
         inter_arrival_scale: Mean inter-arrival time
@@ -199,8 +176,6 @@ output_path = "{output_path}"
 
 [catalog]
 num_tables = {num_tables}
-num_groups = {num_groups}
-group_size_distribution = "{kwargs.get('group_distribution', 'uniform')}"
 
 [transaction]
 retry = {kwargs.get('retry', 10)}

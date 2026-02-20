@@ -27,14 +27,8 @@ def run_simulation_from_config(config_path: str) -> pd.DataFrame:
     # Load configuration
     configure_from_toml(config_path)
 
-    # Partition tables into groups (after seed is set)
+    # Set random seed
     np.random.seed(endive.main.SIM_SEED if endive.main.SIM_SEED else 42)
-    endive.main.TABLE_TO_GROUP, endive.main.GROUP_TO_TABLES = endive.main.partition_tables_into_groups(
-        endive.main.N_TABLES,
-        endive.main.N_GROUPS,
-        endive.main.GROUP_SIZE_DIST,
-        endive.main.LONGTAIL_PARAMS
-    )
 
     # Run simulation
     sim = simpy.Environment()
@@ -220,7 +214,6 @@ class TestTableModeLatency:
                 duration_ms=30000,
                 inter_arrival_scale=100.0,
                 num_tables=1,
-                num_groups=1,  # Single group = catalog-level conflicts
                 partition_enabled=False,
             )
 
