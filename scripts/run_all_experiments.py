@@ -218,6 +218,18 @@ def get_or_create_nonce() -> str:
     nonce_file.write_text(nonce)
     return nonce
 
+def format_toml_value(value) -> str:
+    """Format a value for TOML output. Strings need quotes, numbers don't."""
+    if isinstance(value, str):
+        return f'"{value}"'
+    elif isinstance(value, bool):
+        return "true" if value else "false"
+    elif isinstance(value, (int, float)):
+        return str(value)
+    else:
+        return str(value)
+
+
 def create_config_variant(base_config: Path, params: dict, seed: int,
                           duration_ms: Optional[int] = None) -> Path:
     """Create a temporary config file with modified parameters.
@@ -241,6 +253,7 @@ def create_config_variant(base_config: Path, params: dict, seed: int,
 
     # Apply parameter overrides
     for key, value in params.items():
+        formatted_value = format_toml_value(value)
         if '.' in key:
             # Handle nested keys like "partition.num_partitions"
             parts = key.split('.')
@@ -249,7 +262,7 @@ def create_config_variant(base_config: Path, params: dict, seed: int,
                 # Look for param within [section] block
                 # Match: [section] ... param = value (before next section or EOF)
                 section_pattern = rf'(\[{re.escape(section)}\][^\[]*?)({re.escape(param)}\s*=\s*)[^\n]+'
-                replacement = rf'\g<1>\g<2>{value}'
+                replacement = rf'\g<1>\g<2>{formatted_value}'
                 new_content = re.sub(section_pattern, replacement, content, flags=re.DOTALL)
                 if new_content != content:
                     content = new_content
@@ -257,19 +270,19 @@ def create_config_variant(base_config: Path, params: dict, seed: int,
                     # Fallback: try flat key pattern
                     escaped_key = re.escape(key)
                     pattern = rf'^{escaped_key}\s*=\s*.*$'
-                    replacement = f'{key} = {value}'
+                    replacement = f'{key} = {formatted_value}'
                     content = re.sub(pattern, replacement, content, flags=re.MULTILINE)
             else:
                 # More than 2 levels not supported, try flat
                 escaped_key = re.escape(key)
                 pattern = rf'^{escaped_key}\s*=\s*.*$'
-                replacement = f'{key} = {value}'
+                replacement = f'{key} = {formatted_value}'
                 content = re.sub(pattern, replacement, content, flags=re.MULTILINE)
         else:
             # Flat key
             escaped_key = re.escape(key)
             pattern = rf'^{escaped_key}\s*=\s*.*$'
-            replacement = f'{key} = {value}'
+            replacement = f'{key} = {formatted_value}'
             content = re.sub(pattern, replacement, content, flags=re.MULTILINE)
 
     # Write to temp file
