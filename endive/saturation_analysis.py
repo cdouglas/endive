@@ -353,6 +353,13 @@ def extract_key_parameters(config: Dict) -> Dict:
     if 'transaction' in config:
         params['manifest_list_mode'] = config['transaction'].get('manifest_list_mode', 'rewrite')
 
+    # Extract operation type parameters (for FA/VO mix experiments)
+    if 'transaction' in config and 'operation_types' in config['transaction']:
+        op_types = config['transaction']['operation_types']
+        if isinstance(op_types, dict):
+            params['fast_append_ratio'] = op_types.get('fast_append', None)
+            params['validated_overwrite_ratio'] = op_types.get('validated_overwrite', None)
+
     # Extract partition parameters
     if 'partition' in config:
         params['partition_enabled'] = config['partition'].get('enabled', False)
