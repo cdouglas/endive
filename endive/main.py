@@ -26,6 +26,17 @@ from endive.config import (
     compute_experiment_hash,
     validate_config,
 )
+from endive.catalog_provider import (
+    CatalogProvider,
+    InstantCatalog,
+    ObjectStorageCatalog,
+    create_catalog_provider,
+)
+from endive.storage_provider import (
+    StorageProvider,
+    ObjectStorageProvider,
+    create_storage_provider,
+)
 from collections import defaultdict
 from dataclasses import dataclass, field
 
@@ -87,8 +98,13 @@ RETRY_BACKOFF_MAX_MS: float  # Maximum backoff time in milliseconds
 RETRY_BACKOFF_JITTER: float  # Jitter factor (0.0 to 1.0) for randomization
 
 # Storage and catalog configuration
-STORAGE_PROVIDER: str | None  # "aws", "azure", "gcp", "instant", or None for custom
-CATALOG_BACKEND: str  # "storage" (default), "service", or "fifo_queue"
+STORAGE_PROVIDER: str | None = None  # "aws", "azure", "gcp", "instant", or None for custom
+CATALOG_BACKEND: str = "storage"  # "storage" (default), "service", or "fifo_queue"
+
+# Provider instances (new abstraction)
+# These provide latency generation with proper separation of concerns
+CATALOG_PROVIDER_INSTANCE: CatalogProvider | None = None
+STORAGE_PROVIDER_INSTANCE: StorageProvider | None = None
 
 # Append mode parameters (catalog mode = "append")
 CATALOG_MODE: str  # "cas" (default) or "append"
@@ -226,6 +242,7 @@ def configure_from_toml(config_file: str):
     global T_APPEND, T_LOG_ENTRY_READ, T_COMPACTION
     global LATENCY_DISTRIBUTION
     global STORAGE_PROVIDER, CATALOG_BACKEND
+    global CATALOG_PROVIDER_INSTANCE, STORAGE_PROVIDER_INSTANCE
     global CONTENTION_SCALING_ENABLED, CATALOG_CONTENTION_SCALING
     global T_PUT, TABLE_METADATA_SIZE_BYTES, PARTITION_METADATA_ENTRY_SIZE
     global PARTITION_ENABLED, N_PARTITIONS, PARTITION_SELECTION_DIST, PARTITION_ZIPF_ALPHA
@@ -272,6 +289,33 @@ def configure_from_toml(config_file: str):
     # Provider and backend configuration
     STORAGE_PROVIDER = storage_cfg.get("provider", None)
     CATALOG_BACKEND = catalog_cfg.get("backend", "storage")  # Default: catalog ops in storage
+
+    # === CREATE PROVIDER INSTANCES ===
+    # These provide clean separation between catalog (CAS) and storage (I/O) latencies
+
+    # Storage provider: handles manifest list, manifest file, and data file I/O
+    if STORAGE_PROVIDER:
+        STORAGE_PROVIDER_INSTANCE = create_storage_provider(STORAGE_PROVIDER)
+    else:
+        STORAGE_PROVIDER_INSTANCE = None  # Will use legacy T_* globals
+
+    # Catalog provider: handles CAS operations on table pointer
+    # New config format: [catalog] type = "instant" | "object_storage", provider = "s3x"
+    # Legacy: derive from STORAGE_PROVIDER or CATALOG_BACKEND
+    catalog_type = catalog_cfg.get("type", None)
+    if catalog_type == "instant":
+        CATALOG_PROVIDER_INSTANCE = InstantCatalog()
+    elif catalog_type == "object_storage":
+        catalog_provider_name = catalog_cfg.get("provider", STORAGE_PROVIDER)
+        if catalog_provider_name:
+            CATALOG_PROVIDER_INSTANCE = ObjectStorageCatalog(catalog_provider_name)
+        else:
+            CATALOG_PROVIDER_INSTANCE = None
+    elif STORAGE_PROVIDER:
+        # Legacy: use storage provider for catalog operations
+        CATALOG_PROVIDER_INSTANCE = ObjectStorageCatalog(STORAGE_PROVIDER)
+    else:
+        CATALOG_PROVIDER_INSTANCE = None  # Will use legacy T_CAS global
 
     # Global latency distribution setting (can be overridden per-operation)
     LATENCY_DISTRIBUTION = storage_cfg.get("latency_distribution", "normal")
@@ -632,6 +676,9 @@ def generate_latency_from_config(params: dict) -> float:
 def get_cas_latency(success: bool = True) -> float:
     """Get CAS operation latency.
 
+    Uses CATALOG_PROVIDER_INSTANCE if available, otherwise falls back to
+    legacy T_CAS configuration.
+
     Args:
         success: If True, draw from success distribution; else use failure distribution.
                  Based on measurements, failed operations can have completely different
@@ -640,8 +687,16 @@ def get_cas_latency(success: bool = True) -> float:
     Returns:
         Latency in milliseconds.
     """
-    if not success and 'failure' in T_CAS:
-        # Use separate failure distribution
+    # Use provider instance if available
+    if CATALOG_PROVIDER_INSTANCE is not None:
+        base = CATALOG_PROVIDER_INSTANCE.get_cas_latency()
+        # TODO: Add failure distribution support to provider interface
+        if not success:
+            # Apply failure multiplier from legacy config if available
+            multiplier = T_CAS.get('failure_multiplier', 1.0) if T_CAS else 1.0
+            base *= multiplier
+    elif not success and 'failure' in T_CAS:
+        # Legacy: Use separate failure distribution
         failure_config = {
             'mu': lognormal_mu_from_median(T_CAS['failure']['median']),
             'sigma': T_CAS['failure']['sigma'],
@@ -649,8 +704,8 @@ def get_cas_latency(success: bool = True) -> float:
         }
         base = generate_latency_from_config(failure_config)
     else:
+        # Legacy: use T_CAS global
         base = generate_latency_from_config(T_CAS)
-        # Legacy: apply failure multiplier if no separate distribution
         if not success:
             multiplier = T_CAS.get('failure_multiplier', 1.0)
             base *= multiplier
@@ -663,28 +718,68 @@ def get_cas_latency(success: bool = True) -> float:
 
 
 def get_metadata_root_latency(operation: str) -> float:
-    """Get metadata root latency for read or write operation."""
+    """Get metadata root latency for read or write operation.
+
+    Note: Metadata root is a small pointer, so we don't use size-based latency.
+    Uses legacy T_METADATA_ROOT config (typically fast, ~1ms).
+    """
     params = T_METADATA_ROOT[operation]
     return generate_latency_from_config(params)
 
 
-def get_manifest_list_latency(operation: str) -> float:
-    """Get manifest list latency for read or write operation."""
-    params = T_MANIFEST_LIST[operation]
-    return generate_latency_from_config(params)
+def get_manifest_list_latency(operation: str, size_kib: float = 10.0) -> float:
+    """Get manifest list latency for read or write operation.
+
+    Uses STORAGE_PROVIDER_INSTANCE if available, otherwise falls back to
+    legacy T_MANIFEST_LIST configuration.
+
+    Args:
+        operation: 'read' or 'write'
+        size_kib: Manifest list size in KiB (default 10 KiB)
+
+    Returns:
+        Latency in milliseconds.
+    """
+    if STORAGE_PROVIDER_INSTANCE is not None:
+        if operation == 'read':
+            return STORAGE_PROVIDER_INSTANCE.get_manifest_list_read_latency(size_kib)
+        else:
+            return STORAGE_PROVIDER_INSTANCE.get_manifest_list_write_latency(size_kib)
+    else:
+        # Legacy: use T_MANIFEST_LIST global
+        params = T_MANIFEST_LIST[operation]
+        return generate_latency_from_config(params)
 
 
-def get_manifest_file_latency(operation: str) -> float:
-    """Get manifest file latency for read or write operation."""
-    params = T_MANIFEST_FILE[operation]
-    return generate_latency_from_config(params)
+def get_manifest_file_latency(operation: str, size_kib: float = 100.0) -> float:
+    """Get manifest file latency for read or write operation.
+
+    Uses STORAGE_PROVIDER_INSTANCE if available, otherwise falls back to
+    legacy T_MANIFEST_FILE configuration.
+
+    Args:
+        operation: 'read' or 'write'
+        size_kib: Manifest file size in KiB (default 100 KiB)
+
+    Returns:
+        Latency in milliseconds.
+    """
+    if STORAGE_PROVIDER_INSTANCE is not None:
+        if operation == 'read':
+            return STORAGE_PROVIDER_INSTANCE.get_manifest_file_read_latency(size_kib)
+        else:
+            return STORAGE_PROVIDER_INSTANCE.get_manifest_file_write_latency(size_kib)
+    else:
+        # Legacy: use T_MANIFEST_FILE global
+        params = T_MANIFEST_FILE[operation]
+        return generate_latency_from_config(params)
 
 
 def get_put_latency(size_bytes: int) -> float:
     """Get PUT operation latency based on file size.
 
-    Uses the size-based latency model from Durner et al. VLDB 2023:
-        latency = base_latency + size_mib * latency_per_mib + lognormal_noise
+    Uses STORAGE_PROVIDER_INSTANCE if available, otherwise falls back to
+    legacy T_PUT configuration with size-based model from Durner et al.
 
     The model accounts for:
     - Fixed connection/first-byte overhead (base_latency)
@@ -697,6 +792,13 @@ def get_put_latency(size_bytes: int) -> float:
     Returns:
         Latency in milliseconds.
     """
+    size_mib = size_bytes / (1024 * 1024)
+
+    # Use provider instance if available
+    if STORAGE_PROVIDER_INSTANCE is not None:
+        return STORAGE_PROVIDER_INSTANCE.get_put_latency(size_mib)
+
+    # Legacy: use T_PUT global
     if T_PUT is None:
         # Fallback to manifest list write latency if PUT not configured
         return get_manifest_list_latency('write')
@@ -704,9 +806,6 @@ def get_put_latency(size_bytes: int) -> float:
     base_latency = T_PUT.get('base_latency_ms', 30)
     latency_per_mib = T_PUT.get('latency_per_mib_ms', 20)
     sigma = T_PUT.get('sigma', 0.3)
-
-    # Convert bytes to MiB
-    size_mib = size_bytes / (1024 * 1024)
 
     # Compute deterministic component: base + size * rate
     deterministic_latency = base_latency + size_mib * latency_per_mib
@@ -788,6 +887,9 @@ def get_manifest_list_write_latency(size_bytes: int) -> float:
 def get_append_latency(success: bool = True) -> float:
     """Get append operation latency (for catalog log append).
 
+    Uses CATALOG_PROVIDER_INSTANCE if available and it supports append,
+    otherwise falls back to legacy T_APPEND configuration.
+
     Args:
         success: If True, draw from success distribution; else use failure distribution.
                  CRITICAL: Azure append failures have completely different distribution!
@@ -796,8 +898,15 @@ def get_append_latency(success: bool = True) -> float:
     Returns:
         Latency in milliseconds.
     """
-    if not success and 'failure' in T_APPEND:
-        # Use separate failure distribution - critical for Azure!
+    # Use provider instance if available and supports append
+    if CATALOG_PROVIDER_INSTANCE is not None and CATALOG_PROVIDER_INSTANCE.supports_append():
+        base = CATALOG_PROVIDER_INSTANCE.get_append_latency()
+        # TODO: Add failure distribution support to provider interface
+        if not success:
+            multiplier = T_APPEND.get('failure_multiplier', 1.0) if T_APPEND else 1.0
+            base *= multiplier
+    elif not success and T_APPEND and 'failure' in T_APPEND:
+        # Legacy: Use separate failure distribution - critical for Azure!
         failure_config = {
             'mu': lognormal_mu_from_median(T_APPEND['failure']['median']),
             'sigma': T_APPEND['failure']['sigma'],
@@ -805,8 +914,8 @@ def get_append_latency(success: bool = True) -> float:
         }
         base = generate_latency_from_config(failure_config)
     else:
+        # Legacy: use T_APPEND global
         base = generate_latency_from_config(T_APPEND)
-        # Legacy: apply failure multiplier if no separate distribution
         if not success:
             multiplier = T_APPEND.get('failure_multiplier', 1.0)
             base *= multiplier
