@@ -1299,8 +1299,9 @@ class ConflictResolver:
         if not TABLE_METADATA_INLINED:
             yield sim.timeout(get_table_metadata_latency('write'))
 
-        # Update validation version
+        # Update validation version for retry
         txn.v_dirty[table_id] = v_catalog[table_id]
+        txn.v_tblr[table_id] = v_catalog[table_id]
 
     @staticmethod
     def resolve_real_conflict(sim, txn, table_id: int, v_catalog: dict, catalog=None, snapshot: 'CatalogSnapshot' = None):
@@ -1408,8 +1409,9 @@ class ConflictResolver:
         if not TABLE_METADATA_INLINED:
             yield sim.timeout(get_table_metadata_latency('write'))
 
-        # Update validation version
+        # Update validation version for retry
         txn.v_dirty[table_id] = v_catalog[table_id]
+        txn.v_tblr[table_id] = v_catalog[table_id]
 
     @staticmethod
     def update_write_set(txn: 'Txn', v_catalog: dict):
@@ -1851,9 +1853,11 @@ class Catalog:
         # Table-level conflicts when each table is its own group
         if N_GROUPS == N_TABLES:
             # Check if any of the tables we read/wrote have changed
+            # Must compare against START version (v_tblr), not expected write version (v_dirty)
+            # v_dirty contains start+1 for written tables, which would miss conflicts!
             conflict = False
             for t in txn.v_dirty.keys():
-                if self.tbl[t] != txn.v_dirty[t]:
+                if self.tbl[t] != txn.v_tblr[t]:
                     conflict = True
                     break
 
@@ -2495,8 +2499,14 @@ def txn_commit(sim, txn, catalog):
             retry_snapshot = yield from catalog.read()
             txn.current_snapshot = retry_snapshot
 
-            # Update write set to the next available version per table
+            # Update transaction state from fresh snapshot for retry
             v_catalog = {t: retry_snapshot.tbl[t] for t in txn.v_dirty.keys()}
+            for t in txn.v_dirty.keys():
+                # Update start versions for next CAS attempt
+                txn.v_dirty[t] = retry_snapshot.tbl[t]
+                txn.v_tblr[t] = retry_snapshot.tbl[t]
+
+            # Update write set to the next available version per table
             ConflictResolver.update_write_set(txn, v_catalog)
 
             # Update partition state for retry if in partition mode
@@ -2545,6 +2555,9 @@ def txn_commit(sim, txn, catalog):
             txn.v_catalog_seq = retry_snapshot.seq
             for t in txn.v_dirty.keys():
                 v_catalog[t] = retry_snapshot.tbl[t]
+                # Update start versions for next CAS attempt
+                txn.v_dirty[t] = retry_snapshot.tbl[t]
+                txn.v_tblr[t] = retry_snapshot.tbl[t]
 
             # Update partition state for retry using snapshot
             resolver.update_partition_state_from_snapshot(txn, retry_snapshot)
@@ -2576,8 +2589,9 @@ def txn_commit(sim, txn, catalog):
             txn.v_catalog_seq = retry_snapshot.seq
             for t in txn.v_dirty.keys():
                 v_catalog[t] = retry_snapshot.tbl[t]
-                # Also update v_dirty to current for CAS check (when N_GROUPS == N_TABLES)
+                # Update start versions for next CAS attempt
                 txn.v_dirty[t] = retry_snapshot.tbl[t]
+                txn.v_tblr[t] = retry_snapshot.tbl[t]
 
             # Update write set to the next available version per table
             resolver.update_write_set(txn, v_catalog)
@@ -2652,7 +2666,9 @@ def txn_commit_append(sim, txn, catalog: AppendCatalog):
         v_catalog = {}
         for t in txn.v_dirty.keys():
             v_catalog[t] = catalog.tbl[t]
+            # Update start versions for next attempt
             txn.v_dirty[t] = catalog.tbl[t]
+            txn.v_tblr[t] = catalog.tbl[t]
 
         # Resolve conflict: read manifest list(s) for affected tables
         # This is same as CAS conflict resolution but at table level
