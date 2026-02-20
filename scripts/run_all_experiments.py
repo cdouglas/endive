@@ -136,7 +136,7 @@ NUM_PARTITIONS_COMPARE_SWEEP = [2, 5, 10, 20]  # Match num_tables for comparison
 
 # Operation type experiments
 FA_RATIO_SWEEP = [1.0, 0.9, 0.8, 0.7, 0.5, 0.3, 0.1, 0.0]  # fast_append fraction
-CATALOG_PROVIDERS = ["instant", "s3x", "azure_premium", "s3", "gcp"]
+CATALOG_PROVIDERS = ["instant", "s3x", "azurex", "s3", "gcp"]
 
 # Quick mode parameters
 QUICK_LOADS = [100, 500, 2000]
