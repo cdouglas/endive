@@ -1,22 +1,276 @@
 """Configuration parsing and validation for the Endive simulator.
 
 This module contains:
+- load_simulation_config(): unified entry point per SPEC.md §7
 - Provider profiles with latency characteristics
 - Latency configuration parsing functions
 - Configuration validation
 - Experiment hash computation
-
-Note: Global state variables are kept in main.py to avoid import binding issues.
-The configure_from_toml() function that sets globals remains in main.py.
 """
+
+from __future__ import annotations
 
 import hashlib
 import json
 import logging
-import numpy as np
 from pathlib import Path
+from typing import Tuple
+
+import numpy as np
+import tomllib
+
+from endive.catalog import CASCatalog, InstantCatalog
+from endive.conflict_detector import (
+    PartitionOverlapConflictDetector,
+    ProbabilisticConflictDetector,
+)
+from endive.simulation import SimulationConfig
+from endive.storage import (
+    FixedLatency,
+    LognormalLatency,
+    create_provider,
+)
+from endive.workload import Workload, WorkloadConfig
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Configuration error
+# ---------------------------------------------------------------------------
+
+class ConfigurationError(Exception):
+    """Fatal configuration error(s)."""
+
+    def __init__(self, errors: list[str]):
+        self.errors = errors
+        super().__init__("\n".join(errors))
+
+
+# ---------------------------------------------------------------------------
+# Unified config loader (SPEC.md §7)
+# ---------------------------------------------------------------------------
+
+def load_simulation_config(
+    config_path: str,
+    *,
+    seed_override: int | None = None,
+) -> SimulationConfig:
+    """Load simulation configuration from TOML file.
+
+    This is the ONLY entry point for configuration.
+    All parameters are validated before returning.
+
+    Args:
+        config_path: Path to TOML configuration file.
+        seed_override: If provided, overrides the seed in the config file.
+
+    Returns:
+        Fully constructed SimulationConfig ready to run.
+    """
+    with open(config_path, "rb") as f:
+        raw = tomllib.load(f)
+
+    # Apply seed override
+    if seed_override is not None:
+        raw.setdefault("simulation", {})["seed"] = seed_override
+
+    # Validate configuration
+    errors, warnings = validate_config(raw)
+    if errors:
+        raise ConfigurationError(errors)
+    for warning in warnings:
+        logger.warning(warning)
+
+    # Extract shared topology
+    catalog_cfg = raw.get("catalog", {})
+    num_tables = catalog_cfg.get("num_tables", 1)
+    partitions_per_table = _build_partition_counts(catalog_cfg, num_tables)
+
+    # Build seed-derived RNG
+    sim_cfg = raw.get("simulation", {})
+    seed = sim_cfg.get("seed")
+    rng = np.random.RandomState(seed) if seed is not None else np.random.RandomState()
+
+    # Build components in dependency order
+    storage = _build_storage_provider(raw.get("storage", {}), rng)
+    catalog = _build_catalog(catalog_cfg, storage, num_tables, partitions_per_table)
+    workload = _build_workload(raw.get("transaction", {}), num_tables,
+                                partitions_per_table, seed)
+    conflict_detector = _build_conflict_detector(
+        raw.get("transaction", {}), raw.get("partition", {}), rng,
+    )
+
+    # Extract simulation parameters
+    txn_cfg = raw.get("transaction", {})
+    ml_mode = txn_cfg.get("manifest_list_mode", "rewrite")
+
+    return SimulationConfig(
+        duration_ms=sim_cfg.get("duration_ms", 3600000),
+        seed=seed,
+        storage_provider=storage,
+        catalog=catalog,
+        workload=workload,
+        conflict_detector=conflict_detector,
+        max_retries=txn_cfg.get("retry", 10),
+        ml_append_mode=(ml_mode == "append"),
+    )
+
+
+def _build_partition_counts(
+    catalog_cfg: dict,
+    num_tables: int,
+) -> Tuple[int, ...]:
+    """Build per-table partition counts from config.
+
+    Supports:
+    - catalog.partition.num_partitions (uniform for all tables)
+    - catalog.partition.per_table (explicit per-table list)
+    - Default: 1 partition per table
+    """
+    partition_cfg = catalog_cfg.get("partition", {})
+    if not partition_cfg:
+        return tuple([1] * num_tables)
+
+    if "per_table" in partition_cfg:
+        counts = tuple(partition_cfg["per_table"])
+        if len(counts) != num_tables:
+            raise ConfigurationError([
+                f"catalog.partition.per_table has {len(counts)} entries "
+                f"but num_tables={num_tables}"
+            ])
+        return counts
+
+    n = partition_cfg.get("num_partitions", 1)
+    return tuple([n] * num_tables)
+
+
+def _build_storage_provider(storage_cfg: dict, rng: np.random.RandomState):
+    """Build StorageProvider from [storage] config section."""
+    provider_name = storage_cfg.get("provider", "instant")
+    return create_provider(provider_name, rng=rng)
+
+
+def _build_catalog(
+    catalog_cfg: dict,
+    storage,
+    num_tables: int,
+    partitions_per_table: Tuple[int, ...],
+):
+    """Build Catalog from [catalog] config section."""
+    mode = catalog_cfg.get("mode", "cas")
+
+    if mode == "cas" and catalog_cfg.get("provider", "") == "instant":
+        # Explicit instant catalog
+        latency = catalog_cfg.get("latency_ms", 1.0)
+        return InstantCatalog(
+            num_tables=num_tables,
+            partitions_per_table=partitions_per_table,
+            latency_ms=latency,
+        )
+
+    # Check if storage provider is instant → use InstantCatalog
+    provider_name = catalog_cfg.get("_storage_provider_name", "")
+    if not provider_name:
+        # Infer from storage section or check storage type
+        from endive.storage import InstantStorageProvider
+        if isinstance(storage, InstantStorageProvider):
+            latency = catalog_cfg.get("latency_ms", 1.0)
+            return InstantCatalog(
+                num_tables=num_tables,
+                partitions_per_table=partitions_per_table,
+                latency_ms=latency,
+            )
+
+    # Default: CASCatalog with storage provider
+    return CASCatalog(
+        storage=storage,
+        num_tables=num_tables,
+        partitions_per_table=partitions_per_table,
+    )
+
+
+def _build_inter_arrival(txn_cfg: dict):
+    """Build inter-arrival LatencyDistribution from config."""
+    ia_cfg = txn_cfg.get("inter_arrival", {})
+    dist = ia_cfg.get("distribution", "exponential")
+
+    if dist == "fixed":
+        return FixedLatency(latency_ms=ia_cfg.get("value", 100.0))
+    elif dist == "exponential":
+        # For exponential inter-arrival, use lognormal approximation
+        # scale is the mean inter-arrival time
+        scale = ia_cfg.get("scale", 100.0)
+        sigma = ia_cfg.get("sigma", 0.5)
+        return LognormalLatency.from_median(median_ms=scale, sigma=sigma)
+    else:
+        # Fallback: use scale as median
+        scale = ia_cfg.get("scale", ia_cfg.get("mean", 100.0))
+        sigma = ia_cfg.get("sigma", 0.5)
+        return LognormalLatency.from_median(median_ms=scale, sigma=sigma)
+
+
+def _build_runtime(txn_cfg: dict):
+    """Build runtime LatencyDistribution from config."""
+    rt_cfg = txn_cfg.get("runtime", {})
+    mean = rt_cfg.get("mean", 180000)
+    sigma = rt_cfg.get("sigma", 1.5)
+    min_val = rt_cfg.get("min", 1.0)
+    return LognormalLatency.from_median(
+        median_ms=mean, sigma=sigma, min_latency_ms=min_val,
+    )
+
+
+def _build_workload(
+    txn_cfg: dict,
+    num_tables: int,
+    partitions_per_table: Tuple[int, ...],
+    seed: int | None,
+):
+    """Build Workload from [transaction] config section."""
+    inter_arrival = _build_inter_arrival(txn_cfg)
+    runtime = _build_runtime(txn_cfg)
+
+    # Operation type weights
+    op_types = txn_cfg.get("operation_types", {})
+    fa_weight = op_types.get("fast_append", 1.0)
+    ma_weight = op_types.get("merge_append", 0.0)
+    vo_weight = op_types.get("validated_overwrite", 0.0)
+
+    # MergeAppend parameters
+    cm = txn_cfg.get("conflicting_manifests", {})
+    manifests_per_commit = cm.get("mean", 1.5)
+
+    wl_config = WorkloadConfig(
+        inter_arrival=inter_arrival,
+        runtime=runtime,
+        num_tables=num_tables,
+        partitions_per_table=partitions_per_table,
+        fast_append_weight=fa_weight,
+        merge_append_weight=ma_weight,
+        validated_overwrite_weight=vo_weight,
+        manifests_per_concurrent_commit=manifests_per_commit,
+    )
+
+    # Workload seed is derived from simulation seed
+    wl_seed = (seed + 100) if seed is not None else None
+    return Workload(wl_config, seed=wl_seed)
+
+
+def _build_conflict_detector(
+    txn_cfg: dict,
+    partition_cfg: dict,
+    rng: np.random.RandomState,
+):
+    """Build ConflictDetector from config."""
+    prob = txn_cfg.get("real_conflict_probability", 0.0)
+
+    # If partitions are enabled and probability-based detection is not forced,
+    # use partition overlap detector
+    if partition_cfg.get("enabled", False):
+        return PartitionOverlapConflictDetector()
+
+    return ProbabilisticConflictDetector(prob, rng=rng)
 
 
 def lognormal_mu_from_median(median_ms: float) -> float:
