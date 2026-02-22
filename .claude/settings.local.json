@@ -66,7 +66,12 @@
       "Bash(do ls \"$d\")",
       "Bash(do grep '^num_partitions' \"$d/cfg.toml\")",
       "Bash(do grep '^inter_arrival.scale' \"$d/cfg.toml\")",
-      "Bash(for:*)"
+      "Bash(for:*)",
+      "Bash(head:*)",
+      "WebFetch(domain:github.com)",
+      "Bash(./scripts/dev-container.sh:*)",
+      "Bash(tail:*)",
+      "Bash(docker compose:*)"
     ],
     "deny": [],
     "ask": []
