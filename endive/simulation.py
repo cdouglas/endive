@@ -134,6 +134,7 @@ class Statistics:
                 "t_submit": int(round(r.commit_time_ms - r.total_latency_ms))
                     if r.status == TransactionStatus.COMMITTED
                     else int(round(r.abort_time_ms - r.total_latency_ms)),
+                "t_runtime": int(round(r.runtime_ms)),
                 "t_commit": int(round(r.commit_time_ms))
                     if r.status == TransactionStatus.COMMITTED
                     else -1,
@@ -145,6 +146,7 @@ class Statistics:
                 "status": "committed"
                     if r.status == TransactionStatus.COMMITTED
                     else "aborted",
+                "operation_type": r.operation_type,
                 "abort_reason": r.abort_reason,
                 "manifest_list_reads": r.manifest_list_reads,
                 "manifest_list_writes": r.manifest_list_writes,
@@ -156,8 +158,8 @@ class Statistics:
 
         # Optimize dtypes
         int_cols = [
-            "txn_id", "t_submit", "t_commit", "commit_latency",
-            "total_latency",
+            "txn_id", "t_submit", "t_runtime", "t_commit",
+            "commit_latency", "total_latency",
         ]
         for col in int_cols:
             if col in df.columns:

@@ -68,6 +68,8 @@ class TransactionResult:
     total_retries: int
     commit_latency_ms: float       # Time in commit protocol only
     total_latency_ms: float        # End-to-end time
+    operation_type: str            # "fast_append", "merge_append", "validated_overwrite"
+    runtime_ms: float              # Transaction runtime (execution phase)
 
     # Detailed I/O tracking
     manifest_list_reads: int
@@ -240,6 +242,11 @@ class Transaction(ABC):
             for t in self.tables_written
         }
 
+    @property
+    def operation_type(self) -> str:
+        """Return operation type string for this transaction class."""
+        raise NotImplementedError
+
     def _make_result(
         self,
         status: TransactionStatus,
@@ -263,6 +270,8 @@ class Transaction(ABC):
             total_retries=self._retries,
             commit_latency_ms=self._elapsed - self._commit_start_elapsed,
             total_latency_ms=self._elapsed,
+            operation_type=self.operation_type,
+            runtime_ms=self.runtime,
             manifest_list_reads=self._ml_reads,
             manifest_list_writes=self._ml_writes,
             manifest_file_reads=self._mf_reads,
@@ -404,6 +413,10 @@ class FastAppendTransaction(Transaction):
     - 1 manifest list write (rewrite mode) or 0 (ML+ mode)
     """
 
+    @property
+    def operation_type(self) -> str:
+        return "fast_append"
+
     def can_have_real_conflict(self) -> bool:
         return False
 
@@ -436,6 +449,10 @@ class MergeAppendTransaction(Transaction):
     - N manifest file reads + N manifest file writes (re-merge)
     - N = n_behind * manifests_per_concurrent_commit
     """
+
+    @property
+    def operation_type(self) -> str:
+        return "merge_append"
 
     def __init__(
         self,
@@ -481,6 +498,10 @@ class ValidatedOverwriteTransaction(Transaction):
     - 1 metadata read + 1 current ML read + 0-1 ML write
     - Real conflicts abort BEFORE paying ML write cost
     """
+
+    @property
+    def operation_type(self) -> str:
+        return "validated_overwrite"
 
     def can_have_real_conflict(self) -> bool:
         return True

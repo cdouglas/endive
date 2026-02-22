@@ -159,6 +159,25 @@ def _build_catalog(
 ):
     """Build Catalog from [catalog] config section."""
     mode = catalog_cfg.get("mode", "cas")
+    backend = catalog_cfg.get("backend", "storage")
+
+    # Handle catalog.backend = "service" with [catalog.service] section
+    if backend == "service":
+        service_cfg = catalog_cfg.get("service", {})
+        service_provider = service_cfg.get("provider", "")
+        if service_provider == "instant":
+            latency = service_cfg.get("latency_ms", 1.0)
+            return InstantCatalog(
+                num_tables=num_tables,
+                partitions_per_table=partitions_per_table,
+                latency_ms=latency,
+            )
+        # Service backend with non-instant provider — use CAS with storage
+        return CASCatalog(
+            storage=storage,
+            num_tables=num_tables,
+            partitions_per_table=partitions_per_table,
+        )
 
     if mode == "cas" and catalog_cfg.get("provider", "") == "instant":
         # Explicit instant catalog
@@ -170,17 +189,14 @@ def _build_catalog(
         )
 
     # Check if storage provider is instant → use InstantCatalog
-    provider_name = catalog_cfg.get("_storage_provider_name", "")
-    if not provider_name:
-        # Infer from storage section or check storage type
-        from endive.storage import InstantStorageProvider
-        if isinstance(storage, InstantStorageProvider):
-            latency = catalog_cfg.get("latency_ms", 1.0)
-            return InstantCatalog(
-                num_tables=num_tables,
-                partitions_per_table=partitions_per_table,
-                latency_ms=latency,
-            )
+    from endive.storage import InstantStorageProvider
+    if isinstance(storage, InstantStorageProvider):
+        latency = catalog_cfg.get("latency_ms", 1.0)
+        return InstantCatalog(
+            num_tables=num_tables,
+            partitions_per_table=partitions_per_table,
+            latency_ms=latency,
+        )
 
     # Default: CASCatalog with storage provider
     return CASCatalog(
