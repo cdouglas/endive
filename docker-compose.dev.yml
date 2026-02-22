@@ -21,6 +21,7 @@ services:
       - ~/.claude:/home/dev/.claude:rw
       # Experiments data (separate mount for clarity)
       - ./experiments:/app/experiments:rw
+      # Beads data directory is part of .:/app:rw mount (.beads/)
     environment:
       # Pass through API key if set in host environment
       - ANTHROPIC_API_KEY

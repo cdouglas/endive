@@ -9,6 +9,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     ca-certificates \
     gnupg \
+    libicu-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Node.js (required for Claude Code CLI)
@@ -18,6 +19,13 @@ RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
 
 # Install Claude Code CLI globally
 RUN npm install -g @anthropic-ai/claude-code
+
+# Install Beads issue tracker
+# The install script downloads a binary linked against ICU 74; create compat symlinks for ICU 76
+RUN curl -fsSL https://raw.githubusercontent.com/steveyegge/beads/main/scripts/install.sh | bash \
+    && for lib in libicui18n libicuuc libicudata; do \
+         ln -sf /usr/lib/x86_64-linux-gnu/${lib}.so.76 /usr/lib/x86_64-linux-gnu/${lib}.so.74; \
+       done
 
 # Create non-root user matching host UID/GID (set via build args)
 ARG USER_UID=1000

@@ -6,6 +6,7 @@
 #   ./scripts/dev-container.sh claude -y                # With --dangerously-skip-permissions
 #   ./scripts/dev-container.sh claude --resume ID      # Resume session
 #   ./scripts/dev-container.sh claude --resume ID -y   # Resume with skip-permissions
+#   ./scripts/dev-container.sh bd list                  # Run beads commands
 #   ./scripts/dev-container.sh --build                  # Rebuild and run
 
 set -e
@@ -72,6 +73,9 @@ if [[ "$1" == "claude" ]]; then
     done
     # Run Claude Code with arguments
     exec docker compose -f "$COMPOSE_FILE" run --rm dev claude "${CLAUDE_ARGS[@]}"
+elif [[ "$1" == "bd" || "$1" == "beads" ]]; then
+    # Run beads commands
+    exec docker compose -f "$COMPOSE_FILE" run --rm dev "$@"
 elif [[ "$1" == "install" ]]; then
     # Force reinstall dependencies
     docker compose -f "$COMPOSE_FILE" run --rm dev bash -c "
