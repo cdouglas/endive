@@ -499,10 +499,3 @@ class ValidatedOverwriteTransaction(Transaction):
             manifest_list_reads=1,
             manifest_list_writes=0 if ml_append_mode else 1,
         )
-
-
-# ---------------------------------------------------------------------------
-# Re-export legacy types for backward compatibility with main.py and tests
-# ---------------------------------------------------------------------------
-
-from endive._legacy import Txn, LogEntry  # noqa: F401
