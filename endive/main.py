@@ -12,10 +12,10 @@ import numpy as np
 from tqdm import tqdm
 from endive.capstats import Stats, truncated_zipf_pmf, lognormal_params_from_mean_and_sigma
 from endive.utils import get_git_sha, get_git_sha_short
-from endive.snapshot import CatalogSnapshot, CASResult
-from endive.transaction import Txn, LogEntry
-from endive.operation import OperationType, get_behavior
-from endive.conflict import ConflictResolverV2, resolve_conflict, ConflictResult
+from endive._legacy import CatalogSnapshot, CASResult
+from endive._legacy import Txn, LogEntry
+from endive._legacy import OperationType, get_behavior
+from endive._legacy import ConflictResolverV2, resolve_conflict, ConflictResult
 from endive.config import (
     PROVIDER_PROFILES,
     lognormal_mu_from_median,
@@ -26,14 +26,14 @@ from endive.config import (
     compute_experiment_hash,
     validate_config,
 )
-from endive.catalog_provider import (
+from endive._legacy import (
     CatalogProvider,
     InstantCatalog,
     ObjectStorageCatalog,
     create_catalog_provider,
 )
-from endive.storage_provider import (
-    StorageProvider,
+from endive._legacy import (
+    StorageProvider as StorageProvider,
     ObjectStorageProvider,
     create_storage_provider,
 )

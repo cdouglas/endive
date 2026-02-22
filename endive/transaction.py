@@ -502,55 +502,7 @@ class ValidatedOverwriteTransaction(Transaction):
 
 
 # ---------------------------------------------------------------------------
-# Legacy types (used by endive/main.py during migration, remove in cleanup)
+# Re-export legacy types for backward compatibility with main.py and tests
 # ---------------------------------------------------------------------------
 
-from collections import defaultdict
-from dataclasses import field
-
-if not hasattr(ConflictCost, '_legacy_marker'):
-    from typing import TYPE_CHECKING as _TC
-    if _TC:
-        from endive.snapshot import CatalogSnapshot as _LegacyCatalogSnapshot
-        from endive.operation import OperationType as _LegacyOperationType
-        from endive.operation import OperationBehavior as _LegacyOperationBehavior
-
-
-@dataclass
-class Txn:
-    """Legacy transaction state (used by old main.py during migration)."""
-    id: int
-    t_submit: int
-    t_runtime: int
-    v_catalog_seq: int
-    v_tblr: dict[int, int]
-    v_tblw: dict[int, int]
-    n_retries: int = 0
-    t_commit: int = field(default=-1)
-    t_abort: int = field(default=-1)
-    v_dirty: dict[int, int] = field(default_factory=lambda: defaultdict(dict))
-    v_log_offset: int = 0
-    v_ml_offset: dict[int, int] = field(default_factory=dict)
-    partitions_read: dict[int, set[int]] = field(default_factory=dict)
-    partitions_written: dict[int, set[int]] = field(default_factory=dict)
-    v_partition_seq: dict[int, dict[int, int]] = field(default_factory=dict)
-    v_partition_ml_offset: dict[int, dict[int, int]] = field(default_factory=dict)
-    start_snapshot: 'CatalogSnapshot | None' = None
-    current_snapshot: 'CatalogSnapshot | None' = None
-    operation_type: 'OperationType | None' = None
-    abort_reason: str | None = None
-
-    def get_behavior(self, manifests_per_commit: float = 1.0) -> 'OperationBehavior':
-        from endive.operation import OperationType, get_behavior, FAST_APPEND_BEHAVIOR
-        if self.operation_type is None:
-            return FAST_APPEND_BEHAVIOR
-        return get_behavior(self.operation_type, manifests_per_commit)
-
-
-@dataclass
-class LogEntry:
-    """Legacy log entry (used by old main.py during migration)."""
-    txn_id: int
-    tables_written: dict[int, int]
-    tables_read: dict[int, int]
-    sealed: bool = False
+from endive._legacy import Txn, LogEntry  # noqa: F401
