@@ -292,63 +292,30 @@ class TestExperimentGroups:
             config_path = CONFIG_DIR / config
             assert config_path.exists(), f"Missing config: {config_path}"
 
-    def test_metadata_group_configs_exist(self):
-        """Metadata group configs should exist."""
-        for config in EXPERIMENT_GROUPS.get("metadata", []):
+    def test_heatmap_group_configs_exist(self):
+        """Heatmap group configs should exist."""
+        for config in EXPERIMENT_GROUPS.get("heatmap", []):
             config_path = CONFIG_DIR / config
             assert config_path.exists(), f"Missing config: {config_path}"
 
-    def test_ml_append_group_configs_exist(self):
-        """ML append group configs should exist."""
-        for config in EXPERIMENT_GROUPS.get("ml_append", []):
+    def test_catalog_group_configs_exist(self):
+        """Catalog group configs should exist."""
+        for config in EXPERIMENT_GROUPS.get("catalog", []):
             config_path = CONFIG_DIR / config
             assert config_path.exists(), f"Missing config: {config_path}"
 
-    def test_combined_group_configs_exist(self):
-        """Combined group configs should exist."""
-        for config in EXPERIMENT_GROUPS.get("combined", []):
-            config_path = CONFIG_DIR / config
-            assert config_path.exists(), f"Missing config: {config_path}"
-
-    def test_optimization_configs_have_correct_settings(self):
-        """Optimization configs should have expected settings."""
+    def test_all_configs_have_experiment_label(self):
+        """All configs should have an [experiment] label."""
         import tomli
 
-        # Baseline: no optimizations
-        for config in EXPERIMENT_GROUPS.get("baseline", []):
-            config_path = CONFIG_DIR / config
-            if config_path.exists():
-                with open(config_path, "rb") as f:
-                    data = tomli.load(f)
-                assert data.get("catalog", {}).get("table_metadata_inlined") == False
-                assert data.get("transaction", {}).get("manifest_list_mode") == "rewrite"
-
-        # Metadata: inlining enabled
-        for config in EXPERIMENT_GROUPS.get("metadata", []):
-            config_path = CONFIG_DIR / config
-            if config_path.exists():
-                with open(config_path, "rb") as f:
-                    data = tomli.load(f)
-                assert data.get("catalog", {}).get("table_metadata_inlined") == True
-                assert data.get("transaction", {}).get("manifest_list_mode") == "rewrite"
-
-        # ML append: append mode, NOT inlined (to isolate ML+ effect)
-        for config in EXPERIMENT_GROUPS.get("ml_append", []):
-            config_path = CONFIG_DIR / config
-            if config_path.exists():
-                with open(config_path, "rb") as f:
-                    data = tomli.load(f)
-                assert data.get("catalog", {}).get("table_metadata_inlined") == False
-                assert data.get("transaction", {}).get("manifest_list_mode") == "append"
-
-        # Combined: both optimizations
-        for config in EXPERIMENT_GROUPS.get("combined", []):
-            config_path = CONFIG_DIR / config
-            if config_path.exists():
-                with open(config_path, "rb") as f:
-                    data = tomli.load(f)
-                assert data.get("catalog", {}).get("table_metadata_inlined") == True
-                assert data.get("transaction", {}).get("manifest_list_mode") == "append"
+        for group, configs in EXPERIMENT_GROUPS.items():
+            for config in configs:
+                config_path = CONFIG_DIR / config
+                if config_path.exists():
+                    with open(config_path, "rb") as f:
+                        data = tomli.load(f)
+                    assert "experiment" in data, f"{config} missing [experiment] section"
+                    assert "label" in data["experiment"], f"{config} missing experiment.label"
 
 
 class TestLoadSweepValues:

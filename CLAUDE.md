@@ -50,10 +50,7 @@ python -m endive.main my_config.toml --seed 42 --yes
 python scripts/run_all_experiments.py --quick --seeds 1
 
 # Run specific experiment groups
-python scripts/run_all_experiments.py --groups trivial,mixed --seeds 3
-
-# Run instant catalog experiments (1ms CAS, real S3 storage)
-python scripts/run_all_experiments.py --groups instant_trivial,instant_nontrivial --seeds 5
+python scripts/run_all_experiments.py --groups baseline,heatmap --seeds 3
 
 # Background with logging
 nohup python scripts/run_all_experiments.py --seeds 3 > experiments.log 2>&1 &
@@ -119,7 +116,7 @@ docker run -d \
 **`endive/capstats.py`** - Statistics collection during simulation
 
 **`scripts/run_all_experiments.py`** - Unified experiment runner
-- Supports experiment groups (trivial, mixed, multi_table, baseline, metadata, ml_append, combined, instant_trivial, instant_nontrivial)
+- Supports experiment groups (baseline, heatmap, catalog)
 - Parameter sweeps with deterministic seed generation (nonce-based)
 - Progress tracking, resume capability, status checking
 - Parallel execution with configurable concurrency
@@ -358,15 +355,9 @@ python -c "import pyarrow.parquet as pq; meta = pq.read_metadata('experiments/co
 ## Current Experiment Coverage
 
 **Experiment Groups (run via `--groups`):**
-- **trivial**: Single-table trivial conflicts (baseline saturation)
-- **mixed**: Single-table with real conflicts (conflict cost impact)
-- **multi_table**: Multi-table experiments (scaling analysis)
-- **baseline**: Provider comparison (S3, S3X, Azure, AzureX)
-- **metadata**: Metadata not inlined experiments
-- **ml_append**: Manifest list append mode (ML+)
-- **combined**: All optimizations combined
-- **instant_trivial**: Instant catalog (1ms CAS), trivial conflicts
-- **instant_nontrivial**: Instant catalog, non-trivial conflicts
+- **baseline**: 100% FastAppend with instant catalog (`exp1_fa_baseline`)
+- **heatmap**: FA/VO operation mix 2D sweep (`exp2_mix_heatmap`)
+- **catalog**: Catalog latency impact on FA and mixed workloads (`exp3a_catalog_fa`, `exp3b_catalog_mix`)
 
 **Plotting Approach:**
 - Each experiment config declares `[plots]` section with positive list of graphs
