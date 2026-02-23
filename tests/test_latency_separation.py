@@ -216,7 +216,7 @@ max_parallel = 4
 
     def test_exp1_config_uses_s3_storage_not_instant(self):
         """Direct TOML check: exp1 config has storage=s3 and catalog.backend=service."""
-        config_path = "experiment_configs/exp1_fastappend_baseline.toml"
+        config_path = "experiment_configs/exp1_fa_baseline.toml"
         with open(config_path, "rb") as f:
             config = tomllib.load(f)
 
