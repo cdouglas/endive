@@ -70,7 +70,7 @@ EXPERIMENT_GROUPS = {
 
 # Parameter sweeps
 # Note: scale=10ms excluded - system saturates completely and can't make progress
-LOAD_SWEEP = [20, 50, 100, 200, 500, 1000, 2000, 5000]
+LOAD_SWEEP = [20, 50, 100, 200, 300, 400, 500, 1000, 2000, 5000]
 
 # Operation type experiments
 FA_RATIO_SWEEP = [1.0, 0.9, 0.8, 0.7, 0.5, 0.3, 0.1, 0.0]  # fast_append fraction

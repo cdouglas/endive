@@ -94,6 +94,5 @@ fmt = ".1f"
 # x_param, y_param, metrics: must be set per-experiment
 
 [operation_types]
-# generate_operation_type_plots(base_dir, pattern, output_dir, load_levels, config)
-figsize = [12, 8]
-load_levels = [20, 100, 500, 2000]
+# generate_operation_type_plots(base_dir, pattern, output_dir, load_levels, config, group_by)
+figsize = [16, 10]

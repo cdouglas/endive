@@ -88,7 +88,8 @@ type = "heatmap"
 x_param = "inter_arrival_scale"
 y_param = "fast_append_ratio"
 metrics = ["success_rate", "throughput", "mean_latency", "p99_latency"]
+per_type_metrics = ["success_rate", "mean_latency"]
 
 [[plots.graphs]]
 type = "operation_types"
-load_levels = [20, 100, 500, 2000]
+group_by = "fa_ratio"

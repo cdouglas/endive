@@ -251,6 +251,7 @@ def process_config(config_path: Path, plotting_defaults: dict,
                     kwargs["config"] = merged
                 elif graph_type == "operation_types":
                     kwargs["load_levels"] = merged.get("load_levels")
+                    kwargs["group_by"] = merged.get("group_by")
                     kwargs["config"] = merged
 
                 func(input_dir, pattern, graph_output_dir, **kwargs)

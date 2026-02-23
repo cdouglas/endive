@@ -1817,8 +1817,17 @@ def _extract_param_value(cfg: dict, param_name: str):
 
 
 def _load_heatmap_results(params_df: pd.DataFrame,
-                          x_param: str, y_param: str) -> pd.DataFrame:
-    """Load and aggregate results for heatmap generation."""
+                          x_param: str, y_param: str,
+                          op_type_filter: str = None) -> pd.DataFrame:
+    """Load and aggregate results for heatmap generation.
+
+    Args:
+        params_df: DataFrame with experiment directories and parameters.
+        x_param: Parameter name for X axis.
+        y_param: Parameter name for Y axis.
+        op_type_filter: If set, filter to this operation_type before computing metrics.
+                        E.g. 'fast_append' or 'validated_overwrite'.
+    """
     all_results = []
 
     for _, row in params_df.iterrows():
@@ -1833,6 +1842,15 @@ def _load_heatmap_results(params_df: pd.DataFrame,
                 continue
 
             df = pd.read_parquet(results_path)
+
+            # Filter by operation type if requested
+            if op_type_filter:
+                if "operation_type" not in df.columns:
+                    continue
+                df = df[df["operation_type"] == op_type_filter]
+                if len(df) == 0:
+                    continue
+
             total = len(df)
             committed = (df["status"].str.lower() == "committed").sum()
 
@@ -1978,13 +1996,52 @@ def generate_heatmap_plots(base_dir: str, pattern: str, output_dir: str,
             figsize=figsize, dpi=dpi,
         )
 
+    # Per-operation-type heatmaps
+    per_type_metrics = config.get("per_type_metrics", [])
+    if per_type_metrics:
+        for op_type in ["fast_append", "validated_overwrite"]:
+            prefix = "fa" if op_type == "fast_append" else "vo"
+            print(f"  Loading per-type heatmap data for {op_type}...")
+            type_results = _load_heatmap_results(params_df, x_param, y_param,
+                                                  op_type_filter=op_type)
+            if len(type_results) == 0:
+                print(f"    No data for {op_type}")
+                continue
+
+            op_label = "FastAppend" if op_type == "fast_append" else "ValidatedOverwrite"
+            for metric in per_type_metrics:
+                if metric not in type_results.columns:
+                    print(f"    Skipping metric '{metric}' for {op_type}")
+                    continue
+
+                title_suffix, m_cmap, m_vmin, m_vmax = metric_configs.get(
+                    metric, (metric.replace("_", " ").title(), cmap, None, None)
+                )
+                m_fmt = ".0f" if metric in ("throughput", "mean_latency", "p99_latency", "p95_latency", "p50_latency") else fmt
+
+                _create_single_heatmap(
+                    type_results, x_param, y_param, metric,
+                    title=f"{op_label} {title_suffix}",
+                    output_path=os.path.join(output_dir, f"heatmap_{prefix}_{metric}.png"),
+                    cmap=m_cmap, vmin=m_vmin, vmax=m_vmax, fmt=m_fmt,
+                    figsize=figsize, dpi=dpi,
+                )
+
 
 # ---------------------------------------------------------------------------
 # Operation type analysis (moved from scripts/analyze_operation_types.py)
 # ---------------------------------------------------------------------------
 
-def _analyze_op_type_experiments(experiments_dir: str, pattern: str) -> pd.DataFrame:
-    """Extract per-operation-type metrics from experiment directories."""
+def _analyze_op_type_experiments(experiments_dir: str, pattern: str,
+                                  group_by: str = None) -> pd.DataFrame:
+    """Extract per-operation-type metrics from experiment directories.
+
+    Args:
+        experiments_dir: Base directory containing experiment results.
+        pattern: Glob pattern to match experiment directories.
+        group_by: Additional config parameter to extract (e.g. 'catalog_service_latency_ms').
+                  If None, defaults to 'fa_ratio'.
+    """
     import tomli
     records = []
 
@@ -2000,6 +2057,11 @@ def _analyze_op_type_experiments(experiments_dir: str, pattern: str) -> pd.DataF
         txn = cfg.get("transaction", {})
         fa_ratio = txn.get("operation_types", {}).get("fast_append", 0.5)
         scale = txn.get("inter_arrival", {}).get("scale", 100.0)
+
+        # Extract additional group_by parameter if requested
+        group_val = None
+        if group_by and group_by not in ("fa_ratio", "inter_arrival_scale"):
+            group_val = _extract_param_value(cfg, group_by)
 
         for seed_dir in exp_dir.iterdir():
             if not seed_dir.is_dir() or not seed_dir.name.isdigit():
@@ -2017,7 +2079,7 @@ def _analyze_op_type_experiments(experiments_dir: str, pattern: str) -> pd.DataF
 
                 committed = op_df[op_df["status"].str.lower() == "committed"]
 
-                records.append({
+                record = {
                     "seed": seed_dir.name,
                     "fa_ratio": fa_ratio,
                     "inter_arrival_scale": scale,
@@ -2029,35 +2091,56 @@ def _analyze_op_type_experiments(experiments_dir: str, pattern: str) -> pd.DataF
                     "mean_latency": committed["commit_latency"].mean() if len(committed) > 0 else np.nan,
                     "p95_latency": committed["commit_latency"].quantile(0.95) if len(committed) > 0 else np.nan,
                     "mean_retries": committed["n_retries"].mean() if len(committed) > 0 else np.nan,
-                })
+                }
+                if group_by and group_by not in ("fa_ratio", "inter_arrival_scale"):
+                    record[group_by] = group_val
+                records.append(record)
 
     return pd.DataFrame(records)
 
 
 def generate_operation_type_plots(base_dir: str, pattern: str, output_dir: str,
-                                  load_levels: list = None, config: dict = None):
-    """Generate per-operation-type comparison plots.
+                                  load_levels: list = None, config: dict = None,
+                                  group_by: str = None):
+    """Generate per-operation-type comparison plots as a 2x2 grid.
+
+    Layout:
+        Top-left:     FA success rate vs load
+        Top-right:    VO success rate vs load
+        Bottom-left:  FA mean latency vs load
+        Bottom-right: VO mean latency vs load
+
+    X-axis is inter_arrival_scale (log scale, reversed — high load on left).
+    Lines are per group_by value (fa_ratio for exp2, catalog_service_latency_ms for exp3b).
 
     Args:
         base_dir: Directory containing experiment results.
         pattern: Glob pattern to match experiment directories.
         output_dir: Directory to write plots.
-        load_levels: Inter-arrival scale values to plot (default: [20, 100, 500, 2000]).
+        load_levels: Unused (kept for backward compatibility). All available loads are plotted.
         config: Optional plotting config overrides.
+        group_by: Parameter to group lines by. Defaults to 'fa_ratio'.
     """
     config = config or {}
-    load_levels = load_levels or config.get("load_levels", [20, 100, 500, 2000])
+    group_by = group_by or "fa_ratio"
     os.makedirs(output_dir, exist_ok=True)
     dpi = config.get("dpi", 300)
+    figsize = config.get("figsize", [16, 10])
 
     print(f"Analyzing operation types for {pattern}...")
-    df = _analyze_op_type_experiments(base_dir, pattern)
+    df = _analyze_op_type_experiments(base_dir, pattern, group_by=group_by)
     if len(df) == 0:
         print(f"  No operation type data found for {pattern}")
         return
 
     # Aggregate across seeds
-    agg = df.groupby(["fa_ratio", "inter_arrival_scale", "operation_type"]).agg({
+    group_cols = [group_by, "inter_arrival_scale", "operation_type"]
+    # Ensure group_by column exists; for fa_ratio it's always there
+    if group_by not in df.columns:
+        print(f"  group_by column '{group_by}' not found in data")
+        return
+
+    agg = df.groupby(group_cols).agg({
         "total": "sum",
         "committed": "sum",
         "aborted": "sum",
@@ -2069,93 +2152,76 @@ def generate_operation_type_plots(base_dir: str, pattern: str, output_dir: str,
     agg["success_rate"] = agg["committed"] / agg["total"] * 100
 
     # Save detailed data
-    agg.to_csv(os.path.join(output_dir, "operation_type_metrics.csv"), index=False)
-    print(f"  Saved: {os.path.join(output_dir, 'operation_type_metrics.csv')}")
+    csv_path = os.path.join(output_dir, "operation_type_metrics.csv")
+    agg.to_csv(csv_path, index=False)
+    print(f"  Saved: {csv_path}")
 
-    # Limit to available load levels
-    available_loads = sorted(agg["inter_arrival_scale"].unique())
-    plot_loads = [l for l in load_levels if l in available_loads]
-    if not plot_loads:
-        plot_loads = available_loads[:4]
+    # Get group values and sort them
+    group_values = sorted(agg[group_by].unique())
 
-    n_plots = min(len(plot_loads), 4)
-    if n_plots == 0:
-        return
+    # Color map for group values
+    cmap = plt.cm.tab10
+    colors = {val: cmap(i / max(len(group_values) - 1, 1)) for i, val in enumerate(group_values)}
+    markers = ["o", "s", "^", "D", "v", "<", ">", "p", "*", "h"]
 
-    # Success rate comparison
-    rows = (n_plots + 1) // 2
-    fig, axes = plt.subplots(rows, 2, figsize=(14, 5 * rows))
-    if n_plots == 1:
-        axes = np.array([[axes, plt.subplot(1, 2, 2)]])
-    elif rows == 1:
-        axes = axes.reshape(1, -1)
+    # Format group label for legend
+    group_label = group_by.replace("_", " ").title()
 
-    for idx, scale in enumerate(plot_loads[:n_plots]):
-        ax = axes[idx // 2, idx % 2]
-        subset = agg[agg["inter_arrival_scale"] == scale]
+    # 2x2 grid: [FA success, VO success] / [FA latency, VO latency]
+    fig, axes = plt.subplots(2, 2, figsize=figsize)
 
-        for op_type, color, marker in [("fast_append", "blue", "o"), ("validated_overwrite", "red", "s")]:
-            op_data = subset[subset["operation_type"] == op_type].sort_values("fa_ratio")
-            if len(op_data) > 0:
-                ax.plot(op_data["fa_ratio"], op_data["success_rate"],
-                        color=color, marker=marker,
-                        label=op_type.replace("_", " ").title(),
-                        linewidth=2, markersize=6)
+    panels = [
+        (0, 0, "fast_append", "success_rate", "FA Success Rate (%)", False),
+        (0, 1, "validated_overwrite", "success_rate", "VO Success Rate (%)", False),
+        (1, 0, "fast_append", "mean_latency", "FA Mean Commit Latency (ms)", True),
+        (1, 1, "validated_overwrite", "mean_latency", "VO Mean Commit Latency (ms)", True),
+    ]
 
-        ax.set_xlabel("FastAppend Ratio")
-        ax.set_ylabel("Success Rate (%)")
-        ax.set_title(f"Scale = {scale}ms (TPS ~ {1000/scale:.1f})")
-        ax.set_xlim(-0.05, 1.05)
-        ax.set_ylim(50, 105)
-        ax.legend()
+    for row, col, op_type, metric, ylabel, use_log_y in panels:
+        ax = axes[row, col]
+        op_data = agg[agg["operation_type"] == op_type]
+
+        has_data = False
+        for i, gval in enumerate(group_values):
+            # Skip group values with no transactions of this type
+            # fa_ratio=0.0 has no FA transactions; fa_ratio=1.0 has no VO transactions
+            if group_by == "fa_ratio":
+                if op_type == "fast_append" and gval == 0.0:
+                    continue
+                if op_type == "validated_overwrite" and gval == 1.0:
+                    continue
+
+            subset = op_data[op_data[group_by] == gval].sort_values("inter_arrival_scale")
+            if len(subset) == 0:
+                continue
+
+            marker = markers[i % len(markers)]
+            label = f"{group_label}={gval}"
+            ax.plot(subset["inter_arrival_scale"], subset[metric],
+                    color=colors[gval], marker=marker, label=label,
+                    linewidth=2, markersize=6, alpha=0.8)
+            has_data = True
+
+        ax.set_xlabel("Inter-Arrival Scale (ms)")
+        ax.set_ylabel(ylabel)
+        ax.set_title(ylabel, fontsize=12, fontweight="bold")
+        ax.set_xscale("log")
+        ax.invert_xaxis()  # High load (small scale) on left
+        if use_log_y and has_data:
+            ax.set_yscale("log")
+        if metric == "success_rate":
+            ax.set_ylim(-5, 105)
         ax.grid(True, alpha=0.3)
+        if has_data:
+            ax.legend(fontsize=8, loc="best")
 
-    # Hide unused subplots
-    for idx in range(n_plots, rows * 2):
-        axes[idx // 2, idx % 2].set_visible(False)
-
-    plt.suptitle("Success Rate by Operation Type Across Different Loads",
+    plt.suptitle(f"Per-Operation-Type Metrics vs Load (grouped by {group_label})",
                  fontsize=14, fontweight="bold")
     plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, "op_type_success_by_load.png"), dpi=dpi)
+    output_path = os.path.join(output_dir, "op_type_vs_load.png")
+    plt.savefig(output_path, dpi=dpi)
     plt.close()
-    print(f"  Saved: {os.path.join(output_dir, 'op_type_success_by_load.png')}")
-
-    # Latency comparison
-    fig, axes = plt.subplots(rows, 2, figsize=(14, 5 * rows))
-    if n_plots == 1:
-        axes = np.array([[axes, plt.subplot(1, 2, 2)]])
-    elif rows == 1:
-        axes = axes.reshape(1, -1)
-
-    for idx, scale in enumerate(plot_loads[:n_plots]):
-        ax = axes[idx // 2, idx % 2]
-        subset = agg[agg["inter_arrival_scale"] == scale]
-
-        for op_type, color, marker in [("fast_append", "blue", "o"), ("validated_overwrite", "red", "s")]:
-            op_data = subset[subset["operation_type"] == op_type].sort_values("fa_ratio")
-            if len(op_data) > 0:
-                ax.plot(op_data["fa_ratio"], op_data["mean_latency"],
-                        color=color, marker=marker,
-                        label=op_type.replace("_", " ").title(),
-                        linewidth=2, markersize=6)
-
-        ax.set_xlabel("FastAppend Ratio")
-        ax.set_ylabel("Mean Commit Latency (ms)")
-        ax.set_title(f"Scale = {scale}ms (TPS ~ {1000/scale:.1f})")
-        ax.set_xlim(-0.05, 1.05)
-        ax.legend()
-        ax.grid(True, alpha=0.3)
-
-    for idx in range(n_plots, rows * 2):
-        axes[idx // 2, idx % 2].set_visible(False)
-
-    plt.suptitle("Commit Latency by Operation Type Across Different Loads",
-                 fontsize=14, fontweight="bold")
-    plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, "op_type_latency_by_load.png"), dpi=dpi)
-    plt.close()
-    print(f"  Saved: {os.path.join(output_dir, 'op_type_latency_by_load.png')}")
+    print(f"  Saved: {output_path}")
 
 
 def cli():

@@ -84,3 +84,7 @@ group_by = "catalog_service_latency_ms"
 
 [[plots.graphs]]
 type = "commit_rate_over_time"
+
+[[plots.graphs]]
+type = "operation_types"
+group_by = "catalog_service_latency_ms"
