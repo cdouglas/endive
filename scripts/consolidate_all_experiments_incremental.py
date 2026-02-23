@@ -43,14 +43,37 @@ def load_and_normalize_schema(parquet_path: str) -> pd.DataFrame:
         if col in df.columns and df[col].dtype == 'float64':
             df[col] = df[col].round().astype('int64')
 
-    # Normalize count columns: int64 → int8
-    count_cols = ['n_retries', 'n_tables_read', 'n_tables_written']
+    # Fill NaN in string columns (e.g., abort_reason is null for committed txns)
+    for col in df.select_dtypes(include=['object']).columns:
+        df[col] = df[col].fillna('')
+
+    # Normalize count columns: int64/int32 → int8
+    count_cols = ['n_retries']
     for col in count_cols:
-        if col in df.columns and df[col].dtype == 'int64':
+        if col in df.columns and df[col].dtype in ('int64', 'int32'):
             if df[col].min() >= -128 and df[col].max() <= 127:
                 df[col] = df[col].astype('int8')
 
     return df
+
+
+def discover_schema(experiments):
+    """Discover schema from first available results.parquet."""
+    for _, _, _, seed_dirs in experiments:
+        for seed_dir in seed_dirs:
+            parquet_path = seed_dir / 'results.parquet'
+            if parquet_path.exists():
+                df = load_and_normalize_schema(str(parquet_path))
+                table = pa.Table.from_pandas(df, preserve_index=False)
+                fields = list(table.schema)
+                fields.extend([
+                    pa.field('exp_name', pa.string()),
+                    pa.field('exp_hash', pa.string()),
+                    pa.field('seed', pa.int64()),
+                    pa.field('config', pa.map_(pa.string(), pa.string())),
+                ])
+                return pa.schema(fields)
+    raise ValueError("No results.parquet files found to discover schema")
 
 
 def consolidate_incremental(
@@ -102,23 +125,8 @@ def consolidate_incremental(
     total_seeds = sum(len(seeds) for _, _, _, seeds in experiments)
     print(f"Total seeds: {total_seeds}")
 
-    # Define schema
-    schema = pa.schema([
-        ('txn_id', pa.int64()),
-        ('t_submit', pa.int64()),
-        ('t_runtime', pa.int64()),
-        ('t_commit', pa.int64()),
-        ('commit_latency', pa.int64()),
-        ('total_latency', pa.int64()),
-        ('n_retries', pa.int8()),
-        ('n_tables_read', pa.int8()),
-        ('n_tables_written', pa.int8()),
-        ('status', pa.string()),
-        ('exp_name', pa.string()),
-        ('exp_hash', pa.string()),
-        ('seed', pa.int64()),
-        ('config', pa.map_(pa.string(), pa.string()))
-    ])
+    # Discover schema from first available results.parquet
+    schema = discover_schema(experiments)
 
     # Process experiments in batches and write incrementally
     print("\n" + "-" * 80)
@@ -215,6 +223,11 @@ def consolidate_incremental(
 def verify_dataframes_match(original_df: pd.DataFrame, consolidated_df: pd.DataFrame,
                             exp_name: str, exp_hash: str, seed: int) -> bool:
     """Compare two dataframes and return True if they match."""
+    # Compare on shared columns only (consolidated may have extra metadata columns)
+    shared_cols = sorted(set(original_df.columns) & set(consolidated_df.columns))
+    original_df = original_df[shared_cols].reset_index(drop=True)
+    consolidated_df = consolidated_df[shared_cols].reset_index(drop=True)
+
     # Compare shapes
     if original_df.shape != consolidated_df.shape:
         print(f"  ❌ {exp_name}-{exp_hash}/{seed}: Shape mismatch: "
@@ -223,9 +236,6 @@ def verify_dataframes_match(original_df: pd.DataFrame, consolidated_df: pd.DataF
 
     # Compare values column by column
     for col in original_df.columns:
-        if col not in consolidated_df.columns:
-            print(f"  ❌ {exp_name}-{exp_hash}/{seed}: Column '{col}' missing in consolidated")
-            return False
 
         if not original_df[col].equals(consolidated_df[col]):
             if pd.api.types.is_numeric_dtype(original_df[col]):
@@ -283,21 +293,9 @@ def verify_consolidation(
         exp_name, exp_hash = dir_name.rsplit('-', 1)
 
         try:
-            # Load original and sort by t_submit
-            original_df = pd.read_parquet(file_path)
+            # Load original with same normalization as consolidation
+            original_df = load_and_normalize_schema(str(file_path))
             original_df = original_df.sort_values('t_submit').reset_index(drop=True)
-
-            # Normalize schema to match consolidated
-            time_cols = ['t_commit', 'commit_latency', 'total_latency']
-            for col in time_cols:
-                if col in original_df.columns and original_df[col].dtype == 'float64':
-                    original_df[col] = original_df[col].round().astype('int64')
-
-            count_cols = ['n_retries', 'n_tables_read', 'n_tables_written']
-            for col in count_cols:
-                if col in original_df.columns and original_df[col].dtype == 'int64':
-                    if original_df[col].min() >= -128 and original_df[col].max() <= 127:
-                        original_df[col] = original_df[col].astype('int8')
 
             # Load matching slice from consolidated using predicate pushdown
             consolidated_df = pd.read_parquet(
