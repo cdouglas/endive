@@ -152,6 +152,11 @@ class Statistics:
                 "manifest_list_writes": r.manifest_list_writes,
                 "manifest_file_reads": r.manifest_file_reads,
                 "manifest_file_writes": r.manifest_file_writes,
+                # Timing decomposition (audit telemetry)
+                "catalog_read_ms": round(r.catalog_read_ms, 2),
+                "per_attempt_io_ms": round(r.per_attempt_io_ms, 2),
+                "conflict_io_ms": round(r.conflict_io_ms, 2),
+                "catalog_commit_ms": round(r.catalog_commit_ms, 2),
             })
 
         df = pd.DataFrame(rows)
@@ -172,6 +177,14 @@ class Statistics:
         for col in small_int_cols:
             if col in df.columns:
                 df[col] = df[col].astype("int32")
+
+        float_cols = [
+            "catalog_read_ms", "per_attempt_io_ms",
+            "conflict_io_ms", "catalog_commit_ms",
+        ]
+        for col in float_cols:
+            if col in df.columns:
+                df[col] = df[col].astype("float32")
 
         return df
 

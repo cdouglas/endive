@@ -77,6 +77,12 @@ class TransactionResult:
     manifest_file_reads: int
     manifest_file_writes: int
 
+    # Timing decomposition (ms) — audit telemetry
+    catalog_read_ms: float = 0.0       # Time to read initial catalog snapshot
+    per_attempt_io_ms: float = 0.0     # Total time in per-attempt storage I/O
+    conflict_io_ms: float = 0.0        # Total time in retry-specific I/O
+    catalog_commit_ms: float = 0.0     # Total time in catalog.commit() calls
+
 
 # ---------------------------------------------------------------------------
 # Conflict detection interface (implementations in endive-f34)
@@ -143,6 +149,12 @@ class Transaction(ABC):
         self._ml_writes = 0
         self._mf_reads = 0
         self._mf_writes = 0
+
+        # Timing decomposition accumulators (ms)
+        self._catalog_read_ms = 0.0
+        self._per_attempt_io_ms = 0.0
+        self._conflict_io_ms = 0.0
+        self._catalog_commit_ms = 0.0
 
     @property
     def status(self) -> TransactionStatus:
@@ -232,9 +244,11 @@ class Transaction(ABC):
         All I/O operations yield latency timeouts (floats).
         """
         # Phase 1: Read catalog snapshot
+        before = self._elapsed
         self._start_snapshot = yield from self._yield_from(
             catalog.read(self.submit_time)
         )
+        self._catalog_read_ms = self._elapsed - before
         self._status = TransactionStatus.EXECUTING
 
         # Phase 2: Execute transaction work
@@ -295,6 +309,10 @@ class Transaction(ABC):
             manifest_list_writes=self._ml_writes,
             manifest_file_reads=self._mf_reads,
             manifest_file_writes=self._mf_writes,
+            catalog_read_ms=self._catalog_read_ms,
+            per_attempt_io_ms=self._per_attempt_io_ms,
+            conflict_io_ms=self._conflict_io_ms,
+            catalog_commit_ms=self._catalog_commit_ms,
         )
 
     def _commit_loop(
@@ -319,10 +337,13 @@ class Transaction(ABC):
             writes = self._compute_writes(last_snapshot)
 
             # Mandatory per-attempt I/O: ML read + MF write + ML write
+            before = self._elapsed
             per_attempt = self.get_per_attempt_cost(ml_append_mode)
             yield from self._pay_conflict_cost(per_attempt, storage)
+            self._per_attempt_io_ms += self._elapsed - before
 
             # CAS
+            before = self._elapsed
             commit_result = yield from self._yield_from(
                 catalog.commit(
                     expected_seq=last_snapshot.seq,
@@ -330,6 +351,7 @@ class Transaction(ABC):
                     timestamp_ms=self.submit_time + self._elapsed,
                 )
             )
+            self._catalog_commit_ms += self._elapsed - before
 
             if commit_result.success:
                 self._status = TransactionStatus.COMMITTED
@@ -355,9 +377,11 @@ class Transaction(ABC):
                 break
 
             # Pay additional retry-specific I/O cost (type-dependent)
+            before = self._elapsed
             n_behind = current_snapshot.seq - last_snapshot.seq
             cost = self.get_conflict_cost(n_behind, ml_append_mode)
             yield from self._pay_conflict_cost(cost, storage)
+            self._conflict_io_ms += self._elapsed - before
 
             # Update state for retry
             last_snapshot = current_snapshot
@@ -406,14 +430,14 @@ class Transaction(ABC):
         # Manifest file writes
         for _ in range(cost.manifest_file_writes):
             yield from self._yield_from(
-                storage.write(key="manifest_file", size_bytes=102400)
+                storage.write_metadata(key="manifest_file", size_bytes=102400)
             )
             self._mf_writes += 1
 
         # ML writes
         for _ in range(cost.manifest_list_writes):
             yield from self._yield_from(
-                storage.write(key="manifest_list", size_bytes=10240)
+                storage.write_metadata(key="manifest_list", size_bytes=10240)
             )
             self._ml_writes += 1
 
