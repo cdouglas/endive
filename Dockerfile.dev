@@ -27,20 +27,27 @@ RUN curl -fsSL https://raw.githubusercontent.com/steveyegge/beads/main/scripts/i
          ln -sf /usr/lib/x86_64-linux-gnu/${lib}.so.76 /usr/lib/x86_64-linux-gnu/${lib}.so.74; \
        done
 
-# Create non-root user matching host UID/GID (set via build args)
+# Copy entrypoint script (runs as root, before USER switch)
+COPY scripts/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+
+# Create non-root user matching the host user so that absolute paths
+# (e.g. in Claude Code plugin JSON files) resolve identically inside
+# and outside the container. Only used locally, never published.
 ARG USER_UID=1000
 ARG USER_GID=1000
-RUN groupadd --gid ${USER_GID} dev \
-    && useradd --uid ${USER_UID} --gid ${USER_GID} -m dev \
-    && mkdir -p /home/dev/.claude /app \
-    && chown -R dev:dev /home/dev /app \
-    && chmod 1777 /home
+ARG USER_NAME=dev
+ARG USER_HOME=/home/dev
+RUN groupadd --gid ${USER_GID} ${USER_NAME} \
+    && useradd --uid ${USER_UID} --gid ${USER_GID} -m -d ${USER_HOME} ${USER_NAME} \
+    && mkdir -p ${USER_HOME}/.claude /app \
+    && chown -R ${USER_NAME}:${USER_NAME} ${USER_HOME} /app
 
 # Set working directory
 WORKDIR /app
 
 # Switch to non-root user
-USER dev
+USER ${USER_NAME}
 
 # Configure git to trust the mounted directory
 RUN git config --global --add safe.directory /app
@@ -48,10 +55,6 @@ RUN git config --global --add safe.directory /app
 # Use the project's venv (bind-mounted from host)
 ENV VIRTUAL_ENV=/app/.venv
 ENV PATH="/app/.venv/bin:$PATH"
-
-# Copy entrypoint script
-COPY --chown=dev:dev scripts/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
-RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 CMD ["bash"]

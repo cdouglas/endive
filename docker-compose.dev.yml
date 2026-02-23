@@ -12,22 +12,21 @@ services:
       args:
         USER_UID: ${USER_UID:-1000}
         USER_GID: ${USER_GID:-1000}
+        USER_NAME: ${USER_NAME:-dev}
+        USER_HOME: ${HOST_HOME:-/home/dev}
     volumes:
       # Code directory (read-write for development)
       - .:/app:rw
       # Git configuration (read-only)
-      - ~/.gitconfig:/home/dev/.gitconfig:ro
+      - ~/.gitconfig:${HOST_HOME:-/home/dev}/.gitconfig:ro
       # Claude Code config and API keys
-      - ~/.claude:/home/dev/.claude:rw
+      - ~/.claude:${HOST_HOME:-/home/dev}/.claude:rw
       # Experiments data (separate mount for clarity)
       - ./experiments:/app/experiments:rw
       # Beads data directory is part of .:/app:rw mount (.beads/)
     environment:
       # Pass through API key if set in host environment
       - ANTHROPIC_API_KEY
-      # Host home directory — used to create a symlink so absolute paths
-      # in plugin JSON files (written on the host) resolve inside the container
-      - HOST_HOME=${HOME}
       # Ensure Python output is unbuffered
       - PYTHONUNBUFFERED=1
       # Limit threads to avoid oversubscription

@@ -16,9 +16,13 @@ PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 
 cd "$PROJECT_DIR"
 
-# Export UID/GID for docker-compose
+# Export host identity for docker-compose build args and volume mounts.
+# The container user is created to match the host user so that absolute
+# paths in Claude Code plugin configs resolve identically on both sides.
 export USER_UID=$(id -u)
 export USER_GID=$(id -g)
+export USER_NAME=$(id -un)
+export HOST_HOME="$HOME"
 
 COMPOSE_FILE="docker-compose.dev.yml"
 
