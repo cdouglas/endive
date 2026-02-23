@@ -61,19 +61,21 @@ nohup python scripts/run_all_experiments.py --seeds 3 > experiments.log 2>&1 &
 
 ### Analysis
 ```bash
-# Generate plots for single experiment set
-python -m endive.saturation_analysis -i experiments -p "exp2_1_*" -o plots/exp2_1
+# Regenerate all plots (reads [plots] sections from experiment configs)
+python scripts/regenerate_plots.py
 
-# With grouping (composite multi-line plots by parameter)
-python -m endive.saturation_analysis -i experiments -p "exp2_2_*" -o plots/exp2_2 --group-by num_tables
-python -m endive.saturation_analysis -i experiments -p "exp3_1_*" -o plots/exp3_1 --group-by real_conflict_probability
+# Dry run (show what would be generated)
+python scripts/regenerate_plots.py --dry-run
 
-# With filtering and grouping (for multi-dimensional sweeps)
-# IMPORTANT: Use separate --filter arguments (NOT "&&" operator)
-python -m endive.saturation_analysis -i experiments -p "exp3_3_*" -o plots/exp3_3_t10 --group-by real_conflict_probability --filter "num_tables==10"
+# Single experiment config
+python scripts/regenerate_plots.py --config experiment_configs/exp1_fa_baseline.toml
 
-# Regenerate all plots (parallel, ~5 minutes)
-./scripts/regenerate_all_plots.sh --parallel 4
+# Only configs matching pattern
+python scripts/regenerate_plots.py --pattern "exp3*"
+
+# Direct saturation_analysis CLI (for ad-hoc analysis)
+python -m endive.saturation_analysis -i experiments -p "exp1_fa_baseline-*" -o plots/exp1_fa_baseline
+python -m endive.saturation_analysis -i experiments -p "exp2_mix_heatmap-*" -o plots/exp2_mix_heatmap --group-by fast_append_ratio
 
 # Consolidate results (reduces storage by ~60% with compression)
 python scripts/consolidate_all_experiments_incremental.py
@@ -122,10 +124,10 @@ docker run -d \
 - Progress tracking, resume capability, status checking
 - Parallel execution with configurable concurrency
 
-**`scripts/regenerate_all_plots.sh`** - Batch analysis with parallel execution
-- Generates composite plots for exp3.1, exp3.3, exp3.4 (multi-line plots grouped by parameter)
-- Uses `--group-by` for parameter variations within each experiment
-- Filters multi-dimensional sweeps with separate `--filter` arguments (NOT `&&`)
+**`scripts/regenerate_plots.py`** - Unified plot regeneration
+- Reads `[plots]` sections from experiment configs, dispatches to plotting functions
+- Merges `plotting.toml` defaults with per-graph overrides
+- Supports `--dry-run`, `--pattern`, `--config` for targeted regeneration
 
 ### Critical Design Patterns
 
@@ -277,7 +279,7 @@ real_conflict_probability = 0.0
 
 2. Add to `EXPERIMENT_GROUPS` in `scripts/run_all_experiments.py` if doing parameter sweeps
 
-3. Update `scripts/regenerate_all_plots.sh` to include new experiment pattern
+3. Add `[plots]` section to the config file declaring which graphs to generate
 
 ### Debugging Test Failures
 
@@ -367,6 +369,7 @@ python -c "import pyarrow.parquet as pq; meta = pq.read_metadata('experiments/co
 - **instant_nontrivial**: Instant catalog, non-trivial conflicts
 
 **Plotting Approach:**
-- Composite plots with `--group-by` for parameter variations
-- Filtered views for multi-dimensional sweeps using separate `--filter` arguments
-- Automatic generation via `./scripts/regenerate_all_plots.sh`
+- Each experiment config declares `[plots]` section with positive list of graphs
+- `plotting.toml` provides function-mapped defaults; experiment configs override per-graph
+- Automatic generation via `python scripts/regenerate_plots.py`
+- Direct CLI via `python -m endive.saturation_analysis` for ad-hoc analysis

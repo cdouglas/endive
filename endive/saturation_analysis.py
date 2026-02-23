@@ -1750,6 +1750,414 @@ def apply_filters(df: pd.DataFrame, filter_expressions: List[str]) -> pd.DataFra
     return result
 
 
+# ---------------------------------------------------------------------------
+# Heatmap generation (moved from scripts/plot_heatmap.py)
+# ---------------------------------------------------------------------------
+
+def _extract_heatmap_params(experiments_dir: str, pattern: str,
+                            x_param: str, y_param: str) -> pd.DataFrame:
+    """Extract parameters for heatmap from experiment directories."""
+    import tomli
+    records = []
+
+    base_dir = Path(experiments_dir)
+    for exp_dir in sorted(base_dir.glob(pattern)):
+        cfg_path = exp_dir / "cfg.toml"
+        if not cfg_path.exists():
+            continue
+
+        with open(cfg_path, "rb") as f:
+            cfg = tomli.load(f)
+
+        txn = cfg.get("transaction", {})
+
+        # Extract x and y parameter values from config
+        x_val = _extract_param_value(cfg, x_param)
+        y_val = _extract_param_value(cfg, y_param)
+        if x_val is None or y_val is None:
+            continue
+
+        seed_dirs = [d for d in exp_dir.iterdir() if d.is_dir() and d.name.isdigit()]
+        records.append({
+            "exp_dir": str(exp_dir),
+            x_param: x_val,
+            y_param: y_val,
+            "num_seeds": len(seed_dirs),
+        })
+
+    return pd.DataFrame(records)
+
+
+def _extract_param_value(cfg: dict, param_name: str):
+    """Extract a parameter value from a config dict.
+
+    Supports flattened names like 'inter_arrival_scale' and 'fast_append_ratio'.
+    """
+    txn = cfg.get("transaction", {})
+    catalog = cfg.get("catalog", {})
+
+    # Map commonly used flattened names to config paths
+    param_map = {
+        "inter_arrival_scale": lambda: txn.get("inter_arrival", {}).get("scale"),
+        "fast_append_ratio": lambda: txn.get("operation_types", {}).get("fast_append"),
+        "real_conflict_probability": lambda: txn.get("real_conflict_probability"),
+        "num_tables": lambda: catalog.get("num_tables"),
+        "catalog_service_latency_ms": lambda: catalog.get("service", {}).get("latency_ms"),
+    }
+
+    if param_name in param_map:
+        return param_map[param_name]()
+
+    # Fallback: try direct lookup in common sections
+    for section in [txn, catalog, cfg.get("storage", {}), cfg.get("simulation", {})]:
+        if param_name in section:
+            return section[param_name]
+
+    return None
+
+
+def _load_heatmap_results(params_df: pd.DataFrame,
+                          x_param: str, y_param: str) -> pd.DataFrame:
+    """Load and aggregate results for heatmap generation."""
+    all_results = []
+
+    for _, row in params_df.iterrows():
+        exp_dir = Path(row["exp_dir"])
+        seed_results = []
+
+        for seed_dir in exp_dir.iterdir():
+            if not seed_dir.is_dir() or not seed_dir.name.isdigit():
+                continue
+            results_path = seed_dir / "results.parquet"
+            if not results_path.exists():
+                continue
+
+            df = pd.read_parquet(results_path)
+            total = len(df)
+            committed = (df["status"].str.lower() == "committed").sum()
+
+            # Filter to steady state (middle 80%)
+            duration = df["t_commit"].max() - df["t_submit"].min()
+            warmup = duration * 0.1
+            t_min = df["t_submit"].min() + warmup
+            t_max = df["t_commit"].max() - duration * 0.1
+            df_steady = df[(df["t_submit"] >= t_min) & (df["t_commit"] <= t_max)]
+
+            steady_committed = df_steady[df_steady["status"].str.lower() == "committed"]
+            if len(steady_committed) == 0:
+                continue
+
+            throughput = len(steady_committed) / (duration / 1000 / 3600)
+            latency = steady_committed["commit_latency"]
+
+            seed_results.append({
+                "success_rate": committed / total * 100 if total > 0 else 0,
+                "throughput": throughput,
+                "mean_latency": latency.mean(),
+                "p50_latency": latency.median(),
+                "p95_latency": latency.quantile(0.95),
+                "p99_latency": latency.quantile(0.99),
+            })
+
+        if seed_results:
+            seed_df = pd.DataFrame(seed_results)
+            all_results.append({
+                x_param: row[x_param],
+                y_param: row[y_param],
+                "num_seeds": len(seed_results),
+                "success_rate": seed_df["success_rate"].mean(),
+                "throughput": seed_df["throughput"].mean(),
+                "mean_latency": seed_df["mean_latency"].mean(),
+                "p50_latency": seed_df["p50_latency"].mean(),
+                "p95_latency": seed_df["p95_latency"].mean(),
+                "p99_latency": seed_df["p99_latency"].mean(),
+            })
+
+    return pd.DataFrame(all_results)
+
+
+def _create_single_heatmap(data: pd.DataFrame, x_param: str, y_param: str,
+                           value_col: str, title: str, output_path,
+                           cmap: str = "viridis", vmin=None, vmax=None,
+                           fmt: str = ".1f", figsize=None, dpi: int = 300):
+    """Create a single heatmap from 2D parameter sweep data."""
+    pivot = data.pivot_table(
+        index=y_param, columns=x_param,
+        values=value_col, aggfunc="mean"
+    )
+    pivot = pivot.sort_index(ascending=False)
+
+    fig, ax = plt.subplots(figsize=figsize or (12, 8))
+    im = ax.imshow(pivot.values, aspect="auto", cmap=cmap, vmin=vmin, vmax=vmax)
+
+    ax.set_xticks(range(len(pivot.columns)))
+    ax.set_xticklabels([f"{c:.0f}" if isinstance(c, float) and c == int(c) else f"{c}" for c in pivot.columns])
+    ax.set_yticks(range(len(pivot.index)))
+    ax.set_yticklabels([f"{r:.1f}" if isinstance(r, float) else f"{r}" for r in pivot.index])
+
+    ax.set_xlabel(x_param.replace("_", " ").title())
+    ax.set_ylabel(y_param.replace("_", " ").title())
+    ax.set_title(title, fontsize=14, fontweight="bold")
+
+    fig.colorbar(im, ax=ax)
+
+    for i in range(len(pivot.index)):
+        for j in range(len(pivot.columns)):
+            val = pivot.values[i, j]
+            if not np.isnan(val):
+                threshold = (vmax or np.nanmax(pivot.values)) * 0.5
+                text_color = "white" if val < threshold else "black"
+                ax.text(j, i, f"{val:{fmt}}", ha="center", va="center",
+                        color=text_color, fontsize=8)
+
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=dpi)
+    plt.close()
+    print(f"Saved: {output_path}")
+
+
+def generate_heatmap_plots(base_dir: str, pattern: str, output_dir: str,
+                           x_param: str, y_param: str, metrics: list,
+                           config: dict = None):
+    """Generate heatmap plots for a 2D parameter sweep.
+
+    Args:
+        base_dir: Directory containing experiment results.
+        pattern: Glob pattern to match experiment directories.
+        output_dir: Directory to write plots.
+        x_param: Parameter name for X axis.
+        y_param: Parameter name for Y axis.
+        metrics: List of metric names to generate heatmaps for.
+        config: Optional plotting config overrides.
+    """
+    config = config or {}
+    os.makedirs(output_dir, exist_ok=True)
+    figsize = config.get("figsize", [12, 8])
+    cmap = config.get("cmap", "viridis")
+    fmt = config.get("fmt", ".1f")
+    dpi = config.get("dpi", 300)
+
+    print(f"Generating heatmaps for {pattern}...")
+    params_df = _extract_heatmap_params(base_dir, pattern, x_param, y_param)
+    if len(params_df) == 0:
+        print(f"  No experiments found matching {pattern}")
+        return
+
+    results_df = _load_heatmap_results(params_df, x_param, y_param)
+    if len(results_df) == 0:
+        print(f"  No results loaded for {pattern}")
+        return
+
+    # Save combined data
+    results_df.to_csv(os.path.join(output_dir, "heatmap_data.csv"), index=False)
+
+    metric_configs = {
+        "success_rate": ("Success Rate (%)", "RdYlGn", 60, 100),
+        "throughput": ("Throughput (commits/hour)", "plasma", None, None),
+        "mean_latency": ("Mean Commit Latency (ms)", "inferno_r", None, None),
+        "p99_latency": ("P99 Commit Latency (ms)", "inferno_r", None, None),
+        "p95_latency": ("P95 Commit Latency (ms)", "inferno_r", None, None),
+        "p50_latency": ("P50 Commit Latency (ms)", "inferno_r", None, None),
+    }
+
+    for metric in metrics:
+        if metric not in results_df.columns:
+            print(f"  Skipping metric '{metric}' (not in results)")
+            continue
+
+        title_suffix, m_cmap, m_vmin, m_vmax = metric_configs.get(
+            metric, (metric.replace("_", " ").title(), cmap, None, None)
+        )
+        m_fmt = ".0f" if metric in ("throughput", "mean_latency", "p99_latency", "p95_latency", "p50_latency") else fmt
+
+        _create_single_heatmap(
+            results_df, x_param, y_param, metric,
+            title=f"{title_suffix} by {y_param.replace('_', ' ').title()} and {x_param.replace('_', ' ').title()}",
+            output_path=os.path.join(output_dir, f"heatmap_{metric}.png"),
+            cmap=m_cmap, vmin=m_vmin, vmax=m_vmax, fmt=m_fmt,
+            figsize=figsize, dpi=dpi,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Operation type analysis (moved from scripts/analyze_operation_types.py)
+# ---------------------------------------------------------------------------
+
+def _analyze_op_type_experiments(experiments_dir: str, pattern: str) -> pd.DataFrame:
+    """Extract per-operation-type metrics from experiment directories."""
+    import tomli
+    records = []
+
+    base_dir = Path(experiments_dir)
+    for exp_dir in sorted(base_dir.glob(pattern)):
+        cfg_path = exp_dir / "cfg.toml"
+        if not cfg_path.exists():
+            continue
+
+        with open(cfg_path, "rb") as f:
+            cfg = tomli.load(f)
+
+        txn = cfg.get("transaction", {})
+        fa_ratio = txn.get("operation_types", {}).get("fast_append", 0.5)
+        scale = txn.get("inter_arrival", {}).get("scale", 100.0)
+
+        for seed_dir in exp_dir.iterdir():
+            if not seed_dir.is_dir() or not seed_dir.name.isdigit():
+                continue
+            results_path = seed_dir / "results.parquet"
+            if not results_path.exists():
+                continue
+
+            df = pd.read_parquet(results_path)
+
+            for op_type in df["operation_type"].dropna().unique():
+                op_df = df[df["operation_type"] == op_type]
+                if len(op_df) == 0:
+                    continue
+
+                committed = op_df[op_df["status"].str.lower() == "committed"]
+
+                records.append({
+                    "seed": seed_dir.name,
+                    "fa_ratio": fa_ratio,
+                    "inter_arrival_scale": scale,
+                    "operation_type": op_type,
+                    "total": len(op_df),
+                    "committed": len(committed),
+                    "aborted": len(op_df) - len(committed),
+                    "success_rate": len(committed) / len(op_df) * 100 if len(op_df) > 0 else 0,
+                    "mean_latency": committed["commit_latency"].mean() if len(committed) > 0 else np.nan,
+                    "p95_latency": committed["commit_latency"].quantile(0.95) if len(committed) > 0 else np.nan,
+                    "mean_retries": committed["n_retries"].mean() if len(committed) > 0 else np.nan,
+                })
+
+    return pd.DataFrame(records)
+
+
+def generate_operation_type_plots(base_dir: str, pattern: str, output_dir: str,
+                                  load_levels: list = None, config: dict = None):
+    """Generate per-operation-type comparison plots.
+
+    Args:
+        base_dir: Directory containing experiment results.
+        pattern: Glob pattern to match experiment directories.
+        output_dir: Directory to write plots.
+        load_levels: Inter-arrival scale values to plot (default: [20, 100, 500, 2000]).
+        config: Optional plotting config overrides.
+    """
+    config = config or {}
+    load_levels = load_levels or config.get("load_levels", [20, 100, 500, 2000])
+    os.makedirs(output_dir, exist_ok=True)
+    dpi = config.get("dpi", 300)
+
+    print(f"Analyzing operation types for {pattern}...")
+    df = _analyze_op_type_experiments(base_dir, pattern)
+    if len(df) == 0:
+        print(f"  No operation type data found for {pattern}")
+        return
+
+    # Aggregate across seeds
+    agg = df.groupby(["fa_ratio", "inter_arrival_scale", "operation_type"]).agg({
+        "total": "sum",
+        "committed": "sum",
+        "aborted": "sum",
+        "success_rate": "mean",
+        "mean_latency": "mean",
+        "p95_latency": "mean",
+        "mean_retries": "mean",
+    }).reset_index()
+    agg["success_rate"] = agg["committed"] / agg["total"] * 100
+
+    # Save detailed data
+    agg.to_csv(os.path.join(output_dir, "operation_type_metrics.csv"), index=False)
+    print(f"  Saved: {os.path.join(output_dir, 'operation_type_metrics.csv')}")
+
+    # Limit to available load levels
+    available_loads = sorted(agg["inter_arrival_scale"].unique())
+    plot_loads = [l for l in load_levels if l in available_loads]
+    if not plot_loads:
+        plot_loads = available_loads[:4]
+
+    n_plots = min(len(plot_loads), 4)
+    if n_plots == 0:
+        return
+
+    # Success rate comparison
+    rows = (n_plots + 1) // 2
+    fig, axes = plt.subplots(rows, 2, figsize=(14, 5 * rows))
+    if n_plots == 1:
+        axes = np.array([[axes, plt.subplot(1, 2, 2)]])
+    elif rows == 1:
+        axes = axes.reshape(1, -1)
+
+    for idx, scale in enumerate(plot_loads[:n_plots]):
+        ax = axes[idx // 2, idx % 2]
+        subset = agg[agg["inter_arrival_scale"] == scale]
+
+        for op_type, color, marker in [("fast_append", "blue", "o"), ("validated_overwrite", "red", "s")]:
+            op_data = subset[subset["operation_type"] == op_type].sort_values("fa_ratio")
+            if len(op_data) > 0:
+                ax.plot(op_data["fa_ratio"], op_data["success_rate"],
+                        color=color, marker=marker,
+                        label=op_type.replace("_", " ").title(),
+                        linewidth=2, markersize=6)
+
+        ax.set_xlabel("FastAppend Ratio")
+        ax.set_ylabel("Success Rate (%)")
+        ax.set_title(f"Scale = {scale}ms (TPS ~ {1000/scale:.1f})")
+        ax.set_xlim(-0.05, 1.05)
+        ax.set_ylim(50, 105)
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+
+    # Hide unused subplots
+    for idx in range(n_plots, rows * 2):
+        axes[idx // 2, idx % 2].set_visible(False)
+
+    plt.suptitle("Success Rate by Operation Type Across Different Loads",
+                 fontsize=14, fontweight="bold")
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, "op_type_success_by_load.png"), dpi=dpi)
+    plt.close()
+    print(f"  Saved: {os.path.join(output_dir, 'op_type_success_by_load.png')}")
+
+    # Latency comparison
+    fig, axes = plt.subplots(rows, 2, figsize=(14, 5 * rows))
+    if n_plots == 1:
+        axes = np.array([[axes, plt.subplot(1, 2, 2)]])
+    elif rows == 1:
+        axes = axes.reshape(1, -1)
+
+    for idx, scale in enumerate(plot_loads[:n_plots]):
+        ax = axes[idx // 2, idx % 2]
+        subset = agg[agg["inter_arrival_scale"] == scale]
+
+        for op_type, color, marker in [("fast_append", "blue", "o"), ("validated_overwrite", "red", "s")]:
+            op_data = subset[subset["operation_type"] == op_type].sort_values("fa_ratio")
+            if len(op_data) > 0:
+                ax.plot(op_data["fa_ratio"], op_data["mean_latency"],
+                        color=color, marker=marker,
+                        label=op_type.replace("_", " ").title(),
+                        linewidth=2, markersize=6)
+
+        ax.set_xlabel("FastAppend Ratio")
+        ax.set_ylabel("Mean Commit Latency (ms)")
+        ax.set_title(f"Scale = {scale}ms (TPS ~ {1000/scale:.1f})")
+        ax.set_xlim(-0.05, 1.05)
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+
+    for idx in range(n_plots, rows * 2):
+        axes[idx // 2, idx % 2].set_visible(False)
+
+    plt.suptitle("Commit Latency by Operation Type Across Different Loads",
+                 fontsize=14, fontweight="bold")
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, "op_type_latency_by_load.png"), dpi=dpi)
+    plt.close()
+    print(f"  Saved: {os.path.join(output_dir, 'op_type_latency_by_load.png')}")
+
+
 def cli():
     global CONFIG
 
@@ -1758,7 +2166,7 @@ def cli():
     )
     parser.add_argument(
         "-c", "--config",
-        help="Path to analysis.toml configuration file"
+        help="Path to TOML configuration file (optional)"
     )
     parser.add_argument(
         "-i", "--input-dir",

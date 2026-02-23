@@ -307,7 +307,7 @@ def compute_experiment_hash(config: dict) -> str:
     Returns:
         8-character hex hash string
     """
-    # 1. Hash configuration (excluding seed and label)
+    # 1. Hash configuration (excluding seed, label, and plots)
     config_for_hash = dict(config)
 
     # Remove seed from simulation section
@@ -320,6 +320,11 @@ def compute_experiment_hash(config: dict) -> str:
     if 'experiment' in config_for_hash:
         config_for_hash = dict(config_for_hash)
         del config_for_hash['experiment']
+
+    # Remove plots section (plot config doesn't affect simulation results)
+    if 'plots' in config_for_hash:
+        config_for_hash = dict(config_for_hash)
+        del config_for_hash['plots']
 
     # Serialize config deterministically
     config_str = json.dumps(config_for_hash, sort_keys=True)

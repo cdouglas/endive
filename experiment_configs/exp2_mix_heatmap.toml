@@ -64,3 +64,31 @@ manifest_list_mode = "rewrite"
 [storage]
 provider = "s3"  # Real storage I/O (was "instant" — that was the bug)
 max_parallel = 4
+
+[plots]
+output_dir = "plots/exp2_mix_heatmap"
+
+[[plots.graphs]]
+type = "latency_vs_throughput"
+group_by = "fast_append_ratio"
+
+[[plots.graphs]]
+type = "latency_vs_throughput_table"
+group_by = "fast_append_ratio"
+
+[[plots.graphs]]
+type = "success_rate_vs_throughput"
+group_by = "fast_append_ratio"
+
+[[plots.graphs]]
+type = "commit_rate_over_time"
+
+[[plots.graphs]]
+type = "heatmap"
+x_param = "inter_arrival_scale"
+y_param = "fast_append_ratio"
+metrics = ["success_rate", "throughput", "mean_latency", "p99_latency"]
+
+[[plots.graphs]]
+type = "operation_types"
+load_levels = [20, 100, 500, 2000]

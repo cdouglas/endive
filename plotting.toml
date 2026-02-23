@@ -1,0 +1,99 @@
+# Plotting configuration for Endive experiments.
+#
+# Each section corresponds to one Python plotting function.
+# Experiment configs can override any parameter per-graph in [[plots.graphs]].
+
+# Global defaults shared by all graph types
+[defaults]
+dpi = 300
+input_dir = "experiments"
+bbox_inches = "tight"
+
+[defaults.fonts]
+title = 16
+axis_label = 14
+legend = 10
+annotation = 10
+axis_value = 13
+
+[defaults.font_weights]
+title = "bold"
+axis_label = "bold"
+
+[defaults.styles]
+markers = ["o", "s", "^", "D", "v", "<", ">", "p", "*", "h"]
+linestyles = ["-", "--", "-.", ":"]
+linewidth = 2
+markersize = 8
+alpha = 0.7
+
+[defaults.grid]
+enabled = true
+alpha = 0.3
+
+[defaults.stddev]
+enabled = true
+alpha = 0.2
+
+[defaults.legend]
+loc = "best"
+framealpha = 0.9
+
+# Warmup detection parameters (shared by all analysis)
+[warmup]
+k_min_cycles = 5
+min_warmup_ms = 300000
+max_warmup_ms = 900000
+
+# --- Per-function sections ---
+# Each section name = graph type name = Python function suffix
+# e.g. [latency_vs_throughput] -> plot_latency_vs_throughput()
+
+[latency_vs_throughput]
+# plot_latency_vs_throughput(index_df, output_path, title, group_by)
+title = "Latency vs Throughput"
+figsize = [12, 8]
+percentiles = [50, 95, 99]
+
+[latency_vs_throughput_table]
+# generate_latency_vs_throughput_table(index_df, output_path, group_by)
+title = "Commit Latency vs Throughput"
+
+[success_rate_vs_load]
+# plot_success_rate_vs_load(index_df, output_path, title)
+title = "Success Rate vs Offered Load"
+figsize = [16, 6]
+
+[success_rate_vs_throughput]
+# plot_success_rate_vs_throughput(index_df, output_path, title, group_by)
+title = "Transaction Success Rate vs Throughput"
+figsize = [12, 8]
+
+[overhead_vs_throughput]
+# plot_overhead_vs_throughput(index_df, output_path, title, group_by)
+title = "Commit Overhead vs Throughput"
+figsize = [12, 8]
+
+[commit_rate_over_time]
+# plot_commit_rate_over_time(base_dir, pattern, output_path, title, window_size_sec)
+title = "Commit Rate Over Time"
+figsize = [12, 8]
+window_size_sec = 60
+
+[sustainable_throughput]
+# plot_sustainable_throughput(index_df, output_path, title, success_threshold, group_by)
+title = "Sustainable Throughput (99%+ Success Rate)"
+figsize = [12, 8]
+success_threshold = 99.0
+
+[heatmap]
+# generate_heatmap_plots(base_dir, pattern, output_dir, x_param, y_param, metrics, config)
+figsize = [12, 8]
+cmap = "viridis"
+fmt = ".1f"
+# x_param, y_param, metrics: must be set per-experiment
+
+[operation_types]
+# generate_operation_type_plots(base_dir, pattern, output_dir, load_levels, config)
+figsize = [12, 8]
+load_levels = [20, 100, 500, 2000]

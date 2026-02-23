@@ -53,3 +53,18 @@ manifest_list_mode = "rewrite"
 [storage]
 provider = "s3"  # Real storage I/O (was "instant" — that was the bug)
 max_parallel = 4
+
+[plots]
+output_dir = "plots/exp1_fa_baseline"
+
+[[plots.graphs]]
+type = "latency_vs_throughput"
+
+[[plots.graphs]]
+type = "latency_vs_throughput_table"
+
+[[plots.graphs]]
+type = "success_rate_vs_throughput"
+
+[[plots.graphs]]
+type = "commit_rate_over_time"

@@ -113,14 +113,14 @@ EXPERIMENT_GROUPS = {
     # Operation type experiments (FastAppend, ValidatedOverwrite, etc.)
     # Tests accurate conflict resolution per operation type
     "op_type_baseline": [
-        "exp1_fastappend_baseline.toml",  # 100% FA baseline
+        "exp1_fa_baseline.toml",  # 100% FA baseline
     ],
     "op_type_heatmap": [
         "exp2_mix_heatmap.toml",  # FA/VO mix × arrival rate
     ],
     "op_type_catalog": [
-        "exp3a_catalog_latency_fa.toml",   # Catalog latency × 100% FA
-        "exp3b_catalog_latency_mix.toml",  # Catalog latency × 90/10 mix
+        "exp3a_catalog_fa.toml",   # Catalog latency × 100% FA
+        "exp3b_catalog_mix.toml",  # Catalog latency × 90/10 mix
     ],
 }
 
@@ -510,7 +510,7 @@ def generate_all_runs(groups: list, num_seeds: int, quick: bool = False) -> list
                             ))
 
             # Operation type experiments
-            elif "exp1_fastappend_baseline" in config_name:
+            elif "exp1_fa_baseline" in config_name:
                 # 100% FastAppend baseline: sweep load only
                 for load in loads:
                     for seed_num in range(1, num_seeds + 1):
@@ -541,7 +541,7 @@ def generate_all_runs(groups: list, num_seeds: int, quick: bool = False) -> list
                                 }
                             ))
 
-            elif "exp3a_catalog_latency_fa" in config_name:
+            elif "exp3a_catalog_fa" in config_name:
                 # 100% FA with catalog CAS latency sweep (storage fixed at S3)
                 latencies = [1.0, 43.0, 118.0] if quick else CATALOG_LATENCY_SWEEP
                 catalog_loads = [100, 500] if quick else [50, 100, 200, 500]
@@ -559,7 +559,7 @@ def generate_all_runs(groups: list, num_seeds: int, quick: bool = False) -> list
                                 }
                             ))
 
-            elif "exp3b_catalog_latency_mix" in config_name:
+            elif "exp3b_catalog_mix" in config_name:
                 # 90/10 mix with catalog CAS latency sweep (storage fixed at S3)
                 latencies = [1.0, 43.0, 118.0] if quick else CATALOG_LATENCY_SWEEP
                 catalog_loads = [100, 500] if quick else [50, 100, 200, 500]

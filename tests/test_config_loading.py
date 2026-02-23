@@ -17,6 +17,7 @@ import pytest
 from endive.catalog import CASCatalog, InstantCatalog
 from endive.config import (
     ConfigurationError,
+    compute_experiment_hash,
     load_simulation_config,
     validate_config,
 )
@@ -564,7 +565,7 @@ provider = "instant"
         """Can load an actual experiment config file."""
         from endive.simulation import Simulation
 
-        config_path = "/app/experiment_configs/exp1_fastappend_baseline.toml"
+        config_path = "/app/experiment_configs/exp1_fa_baseline.toml"
         if not os.path.exists(config_path):
             pytest.skip("Experiment config not found")
 
@@ -572,3 +573,59 @@ provider = "instant"
         # Just verify it builds without error
         assert isinstance(config, SimulationConfig)
         assert config.seed == 42
+
+
+# ---------------------------------------------------------------------------
+# Experiment hash
+# ---------------------------------------------------------------------------
+
+class TestExperimentHash:
+    def test_plots_section_excluded_from_hash(self):
+        """Adding [plots] section does not change experiment hash."""
+        config_without_plots = {
+            "simulation": {"duration_ms": 3600000, "seed": 42},
+            "catalog": {"num_tables": 1},
+            "transaction": {
+                "inter_arrival": {"scale": 100.0},
+                "runtime": {"mean": 180000},
+            },
+            "storage": {"provider": "s3"},
+            "experiment": {"label": "test"},
+        }
+        config_with_plots = {
+            **config_without_plots,
+            "plots": {
+                "output_dir": "plots/test",
+                "graphs": [
+                    {"type": "latency_vs_throughput"},
+                    {"type": "success_rate_vs_throughput", "group_by": "num_tables"},
+                ],
+            },
+        }
+        hash_without = compute_experiment_hash(config_without_plots)
+        hash_with = compute_experiment_hash(config_with_plots)
+        assert hash_without == hash_with
+
+    def test_seed_excluded_from_hash(self):
+        """Different seeds produce the same hash."""
+        base = {
+            "simulation": {"duration_ms": 3600000},
+            "catalog": {"num_tables": 1},
+            "transaction": {"inter_arrival": {"scale": 100.0}},
+            "storage": {"provider": "s3"},
+        }
+        config_a = {**base, "simulation": {**base["simulation"], "seed": 42}}
+        config_b = {**base, "simulation": {**base["simulation"], "seed": 99}}
+        assert compute_experiment_hash(config_a) == compute_experiment_hash(config_b)
+
+    def test_param_change_changes_hash(self):
+        """Changing a simulation parameter changes the hash."""
+        base = {
+            "simulation": {"duration_ms": 3600000},
+            "catalog": {"num_tables": 1},
+            "transaction": {"inter_arrival": {"scale": 100.0}},
+            "storage": {"provider": "s3"},
+        }
+        config_a = {**base}
+        config_b = {**base, "transaction": {"inter_arrival": {"scale": 200.0}}}
+        assert compute_experiment_hash(config_a) != compute_experiment_hash(config_b)
