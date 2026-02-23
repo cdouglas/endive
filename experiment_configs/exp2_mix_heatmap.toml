@@ -8,19 +8,19 @@
 #   Y-axis: operation_types.fast_append = [1.0, 0.9, 0.8, 0.7, 0.5, 0.3, 0.1, 0.0]
 #           (validated_overwrite = 1.0 - fast_append)
 #
-# Real conflict probability: 0.1 (10% of VO conflicts are data overlap -> abort)
+# Real conflict probability: 0.0 (isolates operation-type cost without real-conflict aborts)
 #
 # Heatmaps to generate:
 #   1. VO transaction success rate
 #   2. FastAppend transaction success rate
 #   3. Overall mean commit latency
 #   4. VO P99 commit latency
-#   5. Validation exception count (as % of VO transactions)
 #
 # Expected patterns:
 #   - VO success rate degrades faster than FastAppend as load increases
 #   - At high FA ratio (0.9), VO transactions face massive I/O convoy
 #   - FastAppend success rate relatively stable across mix ratios
+#   - All aborts from max_retries_exceeded (no validation_exception)
 
 [simulation]
 duration_ms = 3600000  # 1 hour
@@ -47,8 +47,8 @@ inter_arrival.scale = 100.0  # Swept parameter
 operation_types.fast_append = 0.5
 operation_types.validated_overwrite = 0.5
 
-# 10% of VO conflicts are real (data overlap) -> ValidationException abort
-real_conflict_probability = 0.1
+# No real conflicts — isolates operation-type cost (FA retry vs VO I/O convoy)
+real_conflict_probability = 0.0
 
 conflicting_manifests.distribution = "exponential"
 conflicting_manifests.mean = 3.0

@@ -12,7 +12,7 @@
 # Arrival rate sweep: [50, 100, 200, 500] ms
 #
 # Operation types: 90% FastAppend, 10% ValidatedOverwrite
-# Real conflict probability: 0.1 (10% of VO conflicts -> ValidationException abort)
+# Real conflict probability: 0.0 (isolates catalog latency + operation-type cost)
 #
 # Expected patterns:
 #   - VO success rate degrades more than FA as catalog latency increases
@@ -21,7 +21,7 @@
 #
 # Validation:
 #   - Operation type distribution matches ~90/10 (within sampling variance)
-#   - validation_exception aborts only for validated_overwrite transactions
+#   - No validation_exception aborts (all aborts from max_retries_exceeded)
 #   - Clear ordering of throughput: instant > s3x > azure_premium > s3 > gcp
 
 [simulation]
@@ -49,8 +49,8 @@ inter_arrival.scale = 100.0  # Swept parameter
 operation_types.fast_append = 0.9
 operation_types.validated_overwrite = 0.1
 
-# 10% of VO conflicts are real (data overlap) -> ValidationException abort
-real_conflict_probability = 0.1
+# No real conflicts — isolates catalog latency + operation-type cost
+real_conflict_probability = 0.0
 
 conflicting_manifests.distribution = "exponential"
 conflicting_manifests.mean = 3.0
