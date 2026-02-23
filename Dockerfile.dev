@@ -33,7 +33,8 @@ ARG USER_GID=1000
 RUN groupadd --gid ${USER_GID} dev \
     && useradd --uid ${USER_UID} --gid ${USER_GID} -m dev \
     && mkdir -p /home/dev/.claude /app \
-    && chown -R dev:dev /home/dev /app
+    && chown -R dev:dev /home/dev /app \
+    && chmod 1777 /home
 
 # Set working directory
 WORKDIR /app

@@ -25,6 +25,9 @@ services:
     environment:
       # Pass through API key if set in host environment
       - ANTHROPIC_API_KEY
+      # Host home directory — used to create a symlink so absolute paths
+      # in plugin JSON files (written on the host) resolve inside the container
+      - HOST_HOME=${HOME}
       # Ensure Python output is unbuffered
       - PYTHONUNBUFFERED=1
       # Limit threads to avoid oversubscription
