@@ -1,0 +1,35 @@
+# Azure Premium Block Blob
+# Source: YCSB benchmark measurements (June 2025)
+
+[provider]
+name = "azurex"
+class = "AzureBlobStorageProvider"
+min_latency_ms = 40
+
+[read]
+median_ms = 70
+sigma = 0.23
+
+[write]
+base_latency_ms = 30
+latency_per_mib_ms = 15
+sigma = 0.40
+
+[cas]
+median_ms = 64
+sigma = 0.73
+
+[append]
+median_ms = 70
+sigma = 0.23
+
+# Unused data preserved for future use:
+# [cas.failure]
+# median_ms = 82
+# sigma = 0.85
+# [append.failure]
+# median_ms = 2534
+# sigma = 0.65
+# [contention_scaling]
+# cas = 6.0
+# append = 1.02

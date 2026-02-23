@@ -1,0 +1,29 @@
+# Google Cloud Storage
+# Source: YCSB benchmark measurements (June 2025)
+
+[provider]
+name = "gcp"
+class = "GCPStorageProvider"
+min_latency_ms = 118
+
+[read]
+median_ms = 170
+sigma = 0.91
+
+[write]
+base_latency_ms = 40
+latency_per_mib_ms = 17
+sigma = 0.60
+
+[cas]
+median_ms = 170
+sigma = 0.91
+
+# GCP does not support conditional append
+
+# Unused data preserved for future use:
+# [cas.failure]
+# median_ms = 4500
+# sigma = 1.0
+# [contention_scaling]
+# cas = 0.70

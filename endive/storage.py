@@ -22,11 +22,44 @@ Concrete providers:
 
 from __future__ import annotations
 
+import tomllib
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Generator
 
 import numpy as np
+
+
+# ---------------------------------------------------------------------------
+# Provider profile loading
+# ---------------------------------------------------------------------------
+
+_PROVIDERS_DIR = Path(__file__).parent / "providers"
+_PROFILE_CACHE: dict[str, dict] = {}
+_ALIASES: dict[str, str] = {"aws": "s3x"}
+
+_VALID_PROVIDERS = frozenset({"s3", "s3x", "azure", "azurex", "gcp", "instant"})
+
+
+def _load_provider_profile(name: str) -> dict:
+    """Load a provider profile from TOML, with caching and alias resolution."""
+    resolved = _ALIASES.get(name, name)
+    if resolved in _PROFILE_CACHE:
+        return _PROFILE_CACHE[resolved]
+
+    toml_path = _PROVIDERS_DIR / f"{resolved}.toml"
+    if not toml_path.exists():
+        raise ValueError(
+            f"Unknown provider: {name!r}. "
+            f"Valid: {sorted(_VALID_PROVIDERS | set(_ALIASES))}"
+        )
+
+    with open(toml_path, "rb") as f:
+        profile = tomllib.load(f)
+
+    _PROFILE_CACHE[resolved] = profile
+    return profile
 
 
 # ---------------------------------------------------------------------------
@@ -576,39 +609,35 @@ class InstantStorageProvider(StorageProvider):
 # Factory
 # ---------------------------------------------------------------------------
 
-def _build_lognormal(profile: dict, op: str, sub_op: str | None = None,
+def _build_lognormal(profile: dict, section_name: str,
                      min_latency: float = 1.0) -> LognormalLatency:
-    """Build a LognormalLatency from a PROVIDER_PROFILES entry."""
-    section = profile[op]
-    if sub_op:
-        section = section[sub_op]
+    """Build a LognormalLatency from a provider TOML section."""
+    section = profile[section_name]
     return LognormalLatency.from_median(
-        median_ms=section["median"],
+        median_ms=section["median_ms"],
         sigma=section["sigma"],
         min_latency_ms=min_latency,
     )
 
 
 def _build_size_latency(profile: dict, min_latency: float = 1.0) -> SizeBasedLatency:
-    """Build a SizeBasedLatency from a PROVIDER_PROFILES 'put' entry."""
-    put = profile["put"]
+    """Build a SizeBasedLatency from a provider TOML [write] section."""
+    w = profile["write"]
     return SizeBasedLatency(
-        base_latency_ms=put["base_latency_ms"],
-        latency_per_mib_ms=put["latency_per_mib_ms"],
-        sigma=put["sigma"],
+        base_latency_ms=w["base_latency_ms"],
+        latency_per_mib_ms=w["latency_per_mib_ms"],
+        sigma=w["sigma"],
         min_latency_ms=min_latency,
     )
 
 
 def create_provider(provider_name: str,
-                    rng: np.random.RandomState | None = None,
-                    profiles: dict | None = None) -> StorageProvider:
+                    rng: np.random.RandomState | None = None) -> StorageProvider:
     """Factory function to create a StorageProvider from a provider name.
 
     Args:
-        provider_name: One of 'instant', 's3', 's3x', 'azure', 'azurex', 'gcp'.
+        provider_name: One of 'instant', 's3', 's3x', 'azure', 'azurex', 'gcp', 'aws'.
         rng: Seeded random state. If None, creates unseeded one.
-        profiles: Provider profiles dict. If None, imports from config.py.
 
     Returns:
         Configured StorageProvider instance.
@@ -616,28 +645,16 @@ def create_provider(provider_name: str,
     if rng is None:
         rng = np.random.RandomState()
 
-    if profiles is None:
-        from endive.config import PROVIDER_PROFILES
-        profiles = PROVIDER_PROFILES
-
-    # Resolve aliases
-    _ALIASES = {"aws": "s3x"}
+    profile = _load_provider_profile(provider_name)
     resolved_name = _ALIASES.get(provider_name, provider_name)
-
-    if provider_name not in profiles:
-        raise ValueError(
-            f"Unknown provider: {provider_name!r}. "
-            f"Valid: {sorted(profiles.keys())}"
-        )
-
-    profile = profiles[provider_name]
-    min_lat = profile["min_latency"]
+    prov = profile["provider"]
+    min_lat = prov["min_latency_ms"]
 
     if resolved_name == "instant":
         return InstantStorageProvider(rng=rng, latency_ms=min_lat)
 
     # Build common distributions
-    read_latency = _build_lognormal(profile, "manifest_list", "read", min_lat)
+    read_latency = _build_lognormal(profile, "read", min_lat)
     write_latency = _build_size_latency(profile, min_lat)
 
     if resolved_name == "s3":

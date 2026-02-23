@@ -1,0 +1,35 @@
+# Azure Blob Storage (Standard tier)
+# Source: YCSB benchmark measurements (June 2025)
+
+[provider]
+name = "azure"
+class = "AzureBlobStorageProvider"
+min_latency_ms = 51
+
+[read]
+median_ms = 87
+sigma = 0.28
+
+[write]
+base_latency_ms = 50
+latency_per_mib_ms = 25
+sigma = 0.50
+
+[cas]
+median_ms = 93
+sigma = 0.82
+
+[append]
+median_ms = 87
+sigma = 0.28
+
+# Unused data preserved for future use:
+# [cas.failure]
+# median_ms = 75
+# sigma = 0.90
+# [append.failure]
+# median_ms = 2072
+# sigma = 0.68
+# [contention_scaling]
+# cas = 5.4
+# append = 1.07

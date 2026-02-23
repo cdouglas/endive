@@ -1,0 +1,29 @@
+# AWS S3 Standard
+# Source: YCSB benchmark measurements (June 2025)
+
+[provider]
+name = "s3"
+class = "S3StorageProvider"
+min_latency_ms = 43
+
+[read]
+median_ms = 61
+sigma = 0.14
+
+[write]
+base_latency_ms = 30
+latency_per_mib_ms = 20
+sigma = 0.30
+
+[cas]
+median_ms = 61
+sigma = 0.14
+
+# S3 Standard does not support conditional append
+
+# Unused data preserved for future use:
+# [cas.failure]
+# median_ms = 65
+# sigma = 0.38
+# [contention_scaling]
+# cas = 0.97

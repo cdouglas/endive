@@ -24,3 +24,6 @@ endive-analysis = "endive.analysis:cli"
 
 [tool.setuptools]
 packages = ["endive"]
+
+[tool.setuptools.package-data]
+endive = ["providers/*.toml"]

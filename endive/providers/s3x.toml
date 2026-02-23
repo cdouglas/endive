@@ -1,0 +1,32 @@
+# AWS S3 Express One Zone
+# Source: YCSB benchmark measurements (June 2025)
+
+[provider]
+name = "s3x"
+class = "S3ExpressStorageProvider"
+min_latency_ms = 10
+
+[read]
+median_ms = 22
+sigma = 0.22
+
+[write]
+base_latency_ms = 10
+latency_per_mib_ms = 10
+sigma = 0.25
+
+[cas]
+median_ms = 22
+sigma = 0.22
+
+[append]
+median_ms = 21
+sigma = 0.25
+
+# Unused data preserved for future use:
+# [cas.failure]
+# median_ms = 21
+# sigma = 0.22
+# [contention_scaling]
+# cas = 1.77
+# append = 1.85
