@@ -20,6 +20,8 @@ from typing import Generator, List, Optional
 
 import numpy as np
 import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 import simpy
 
 from endive.catalog import Catalog
@@ -69,31 +71,105 @@ class SimulationConfig:
 # Statistics
 # ---------------------------------------------------------------------------
 
-@dataclass
+# Arrow schema for parquet output (shared between streaming and in-memory paths)
+_ARROW_SCHEMA = pa.schema([
+    ("txn_id", pa.int64()),
+    ("t_submit", pa.int64()),
+    ("t_runtime", pa.int64()),
+    ("t_commit", pa.int64()),
+    ("commit_latency", pa.int64()),
+    ("total_latency", pa.int64()),
+    ("n_retries", pa.int32()),
+    ("status", pa.string()),
+    ("operation_type", pa.string()),
+    ("abort_reason", pa.string()),
+    ("manifest_list_reads", pa.int32()),
+    ("manifest_list_writes", pa.int32()),
+    ("manifest_file_reads", pa.int32()),
+    ("manifest_file_writes", pa.int32()),
+    ("catalog_read_ms", pa.float32()),
+    ("per_attempt_io_ms", pa.float32()),
+    ("conflict_io_ms", pa.float32()),
+    ("catalog_commit_ms", pa.float32()),
+])
+
+
+def _result_to_row(r: TransactionResult) -> dict:
+    """Convert a TransactionResult to a dict matching the Arrow schema."""
+    is_committed = r.status == TransactionStatus.COMMITTED
+    return {
+        "txn_id": r.txn_id,
+        "t_submit": int(round(r.commit_time_ms - r.total_latency_ms))
+            if is_committed
+            else int(round(r.abort_time_ms - r.total_latency_ms)),
+        "t_runtime": int(round(r.runtime_ms)),
+        "t_commit": int(round(r.commit_time_ms)) if is_committed else -1,
+        "commit_latency": int(round(r.commit_latency_ms)) if is_committed else -1,
+        "total_latency": int(round(r.total_latency_ms)),
+        "n_retries": r.total_retries,
+        "status": "committed" if is_committed else "aborted",
+        "operation_type": r.operation_type,
+        "abort_reason": r.abort_reason,
+        "manifest_list_reads": r.manifest_list_reads,
+        "manifest_list_writes": r.manifest_list_writes,
+        "manifest_file_reads": r.manifest_file_reads,
+        "manifest_file_writes": r.manifest_file_writes,
+        "catalog_read_ms": round(r.catalog_read_ms, 2),
+        "per_attempt_io_ms": round(r.per_attempt_io_ms, 2),
+        "conflict_io_ms": round(r.conflict_io_ms, 2),
+        "catalog_commit_ms": round(r.catalog_commit_ms, 2),
+    }
+
+
+def _rows_to_arrow_table(rows: list[dict]) -> pa.Table:
+    """Convert a list of row dicts to a pyarrow Table with the shared schema."""
+    arrays = {}
+    for field in _ARROW_SCHEMA:
+        arrays[field.name] = pa.array(
+            [row[field.name] for row in rows],
+            type=field.type,
+        )
+    return pa.table(arrays, schema=_ARROW_SCHEMA)
+
+
 class Statistics:
-    """Collected simulation statistics.
+    """Collected simulation statistics with optional streaming parquet export.
 
-    Records per-transaction results and maintains aggregate counters.
-    Thread-safe within SimPy (single-threaded event loop).
+    When output_path is provided, results are written incrementally to parquet
+    in row groups of buffer_size, keeping memory at O(buffer_size) per process.
+
+    When output_path is None (tests, in-memory use), results are accumulated
+    in a list as before.
     """
-    transactions: List[TransactionResult] = field(default_factory=list)
 
-    # Aggregate counters
-    committed: int = 0
-    aborted: int = 0
-    total_retries: int = 0
-    validation_exceptions: int = 0
+    def __init__(
+        self,
+        output_path: str | None = None,
+        buffer_size: int = 1000,
+    ):
+        self._output_path = output_path
+        self._buffer_size = buffer_size
+        self._buffer: list[dict] = []
+        self._writer: pq.ParquetWriter | None = None
 
-    # I/O counters
-    manifest_list_reads: int = 0
-    manifest_list_writes: int = 0
-    manifest_file_reads: int = 0
-    manifest_file_writes: int = 0
+        # In-memory fallback (when no output_path)
+        self.transactions: list[TransactionResult] = []
+
+        # Aggregate counters
+        self.committed: int = 0
+        self.aborted: int = 0
+        self.total_retries: int = 0
+        self.validation_exceptions: int = 0
+
+        # I/O counters
+        self.manifest_list_reads: int = 0
+        self.manifest_list_writes: int = 0
+        self.manifest_file_reads: int = 0
+        self.manifest_file_writes: int = 0
 
     def record_transaction(self, result: TransactionResult) -> None:
         """Record completed transaction result."""
-        self.transactions.append(result)
-
+        # Update aggregate counters
         if result.status == TransactionStatus.COMMITTED:
             self.committed += 1
         elif result.status == TransactionStatus.ABORTED:
@@ -106,6 +182,34 @@ class Statistics:
         self.manifest_list_writes += result.manifest_list_writes
         self.manifest_file_reads += result.manifest_file_reads
         self.manifest_file_writes += result.manifest_file_writes
+
+        if self._output_path:
+            # Streaming: buffer row dict, flush when full
+            self._buffer.append(_result_to_row(result))
+            if len(self._buffer) >= self._buffer_size:
+                self._flush()
+        else:
+            # In-memory: keep TransactionResult for test access
+            self.transactions.append(result)
+
+    def _flush(self) -> None:
+        """Write buffered rows as a parquet row group."""
+        if not self._buffer:
+            return
+        table = _rows_to_arrow_table(self._buffer)
+        if self._writer is None:
+            self._writer = pq.ParquetWriter(
+                self._output_path, _ARROW_SCHEMA, compression="snappy",
+            )
+        self._writer.write_table(table)
+        self._buffer.clear()
+
+    def close(self) -> None:
+        """Flush remaining buffer and close the parquet writer."""
+        self._flush()
+        if self._writer:
+            self._writer.close()
+            self._writer = None
 
     @property
     def total(self) -> int:
@@ -122,76 +226,45 @@ class Statistics:
     def to_dataframe(self) -> pd.DataFrame:
         """Export transactions to DataFrame for analysis.
 
-        Column names are compatible with the existing analysis pipeline.
+        If streaming to a file, reads back the written parquet.
+        If in-memory, converts the accumulated transactions list.
         """
+        if self._output_path:
+            # Ensure everything is flushed
+            self.close()
+            if self.total == 0:
+                return pd.DataFrame()
+            return pd.read_parquet(self._output_path)
+
         if not self.transactions:
             return pd.DataFrame()
 
-        rows = []
-        for r in self.transactions:
-            rows.append({
-                "txn_id": r.txn_id,
-                "t_submit": int(round(r.commit_time_ms - r.total_latency_ms))
-                    if r.status == TransactionStatus.COMMITTED
-                    else int(round(r.abort_time_ms - r.total_latency_ms)),
-                "t_runtime": int(round(r.runtime_ms)),
-                "t_commit": int(round(r.commit_time_ms))
-                    if r.status == TransactionStatus.COMMITTED
-                    else -1,
-                "commit_latency": int(round(r.commit_latency_ms))
-                    if r.status == TransactionStatus.COMMITTED
-                    else -1,
-                "total_latency": int(round(r.total_latency_ms)),
-                "n_retries": r.total_retries,
-                "status": "committed"
-                    if r.status == TransactionStatus.COMMITTED
-                    else "aborted",
-                "operation_type": r.operation_type,
-                "abort_reason": r.abort_reason,
-                "manifest_list_reads": r.manifest_list_reads,
-                "manifest_list_writes": r.manifest_list_writes,
-                "manifest_file_reads": r.manifest_file_reads,
-                "manifest_file_writes": r.manifest_file_writes,
-                # Timing decomposition (audit telemetry)
-                "catalog_read_ms": round(r.catalog_read_ms, 2),
-                "per_attempt_io_ms": round(r.per_attempt_io_ms, 2),
-                "conflict_io_ms": round(r.conflict_io_ms, 2),
-                "catalog_commit_ms": round(r.catalog_commit_ms, 2),
-            })
-
-        df = pd.DataFrame(rows)
-
-        # Optimize dtypes
-        int_cols = [
-            "txn_id", "t_submit", "t_runtime", "t_commit",
-            "commit_latency", "total_latency",
-        ]
-        for col in int_cols:
-            if col in df.columns:
-                df[col] = df[col].astype("int64")
-
-        small_int_cols = [
-            "n_retries", "manifest_list_reads", "manifest_list_writes",
-            "manifest_file_reads", "manifest_file_writes",
-        ]
-        for col in small_int_cols:
-            if col in df.columns:
-                df[col] = df[col].astype("int32")
-
-        float_cols = [
-            "catalog_read_ms", "per_attempt_io_ms",
-            "conflict_io_ms", "catalog_commit_ms",
-        ]
-        for col in float_cols:
-            if col in df.columns:
-                df[col] = df[col].astype("float32")
-
-        return df
+        rows = [_result_to_row(r) for r in self.transactions]
+        table = _rows_to_arrow_table(rows)
+        return table.to_pandas()
 
     def export_parquet(self, path: str) -> None:
-        """Export to parquet file."""
-        df = self.to_dataframe()
-        df.to_parquet(path, engine="pyarrow", compression="snappy", index=False)
+        """Export to parquet file.
+
+        If already streaming to output_path, this closes the writer.
+        If in-memory, writes a new file at path.
+        """
+        if self._output_path:
+            self.close()
+            return
+
+        if not self.transactions:
+            # Write empty file with correct schema
+            pq.write_table(
+                pa.table({f.name: pa.array([], type=f.type) for f in _ARROW_SCHEMA},
+                         schema=_ARROW_SCHEMA),
+                path, compression="snappy",
+            )
+            return
+
+        rows = [_result_to_row(r) for r in self.transactions]
+        table = _rows_to_arrow_table(rows)
+        pq.write_table(table, path, compression="snappy")
 
 
 # ---------------------------------------------------------------------------
@@ -209,11 +282,19 @@ class Simulation:
         sim = Simulation(config)
         stats = sim.run()
         stats.export_parquet("results.parquet")
+
+    For streaming export (lower memory):
+        sim = Simulation(config, output_path="results.parquet")
+        stats = sim.run()  # results written incrementally
     """
 
-    def __init__(self, config: SimulationConfig):
+    def __init__(
+        self,
+        config: SimulationConfig,
+        output_path: str | None = None,
+    ):
         self._config = config
-        self._stats = Statistics()
+        self._stats = Statistics(output_path=output_path)
         self._rng: Optional[np.random.RandomState] = None
 
     def run(self) -> Statistics:
@@ -229,6 +310,7 @@ class Simulation:
         env.process(self._run_workload(env))
         env.run(until=self._config.duration_ms)
 
+        self._stats.close()
         return self._stats
 
     def _run_workload(self, env: simpy.Environment) -> Generator:

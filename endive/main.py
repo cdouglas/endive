@@ -20,8 +20,6 @@ import tomllib
 from pathlib import Path
 
 import numpy as np
-from tqdm import tqdm
-
 from endive.config import (
     ConfigurationError,
     compute_experiment_hash,
@@ -293,26 +291,16 @@ def cli():
         print(f"Configuration error: {e}")
         sys.exit(1)
 
-    # Run simulation
+    # Run simulation with streaming export to temp file
     logger.info("Starting simulation...")
-    sim = Simulation(sim_config)
-
-    show_progress = not args.no_progress and not args.verbose and not args.quiet
-    if show_progress:
-        # Use progress bar — run the simulation internally and export
-        stats = sim.run()
-    else:
-        stats = sim.run()
-
-    logger.info("Simulation complete")
-
-    # Export results to temporary file first, then rename to final path
     output_dir = Path(final_output_path).parent
     output_dir.mkdir(parents=True, exist_ok=True)
     temp_output_path = output_dir / ".running.parquet"
 
-    logger.info(f"Exporting results to temporary file {temp_output_path}")
-    stats.export_parquet(str(temp_output_path))
+    sim = Simulation(sim_config, output_path=str(temp_output_path))
+    stats = sim.run()
+
+    logger.info("Simulation complete")
 
     # Rename to final output path on success
     logger.info(f"Moving results to {final_output_path}")
