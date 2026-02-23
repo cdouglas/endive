@@ -430,14 +430,14 @@ class Transaction(ABC):
         # Manifest file writes
         for _ in range(cost.manifest_file_writes):
             yield from self._yield_from(
-                storage.write_metadata(key="manifest_file", size_bytes=102400)
+                storage.write(key="manifest_file", size_bytes=102400)
             )
             self._mf_writes += 1
 
         # ML writes
         for _ in range(cost.manifest_list_writes):
             yield from self._yield_from(
-                storage.write_metadata(key="manifest_list", size_bytes=10240)
+                storage.write(key="manifest_list", size_bytes=10240)
             )
             self._ml_writes += 1
 

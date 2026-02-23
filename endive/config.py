@@ -355,6 +355,10 @@ PROVIDER_PROFILES = {
             "sigma": 0.30,               # Variance estimate from Fig 3 (25-95 MiB/s range)
             "_provenance": "Durner et al. VLDB 2023, Section 2.3, 2.8"
         },
+        # NOTE: "write" entries are YCSB-measured conditional write latencies,
+        # not plain PUT latencies. Manifest writes in the commit protocol are
+        # plain PUTs modeled by the "put" entry above. The "read" entries are
+        # used by storage.read() for manifest reads in the commit protocol.
         "manifest_list": {
             "read": {"median": 61, "sigma": 0.14},
             "write": {"median": 63, "sigma": 0.14}

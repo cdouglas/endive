@@ -163,17 +163,7 @@ class StorageProvider(ABC):
     def write(self, key: str, size_bytes: int) -> Generator[float, None, StorageResult]:
         """Write object to storage (unconditional PUT).
 
-        Uses size-based latency model (Durner et al.) for data writes.
-        For manifest/metadata writes, use write_metadata() instead.
-        """
-        ...
-
-    @abstractmethod
-    def write_metadata(self, key: str, size_bytes: int) -> Generator[float, None, StorageResult]:
-        """Write a metadata object (manifest list or manifest file).
-
-        Uses YCSB-measured latency distributions for metadata objects,
-        which differ from the generic PUT model used by write().
+        Uses size-based latency model (Durner et al.).
         """
         ...
 
@@ -255,14 +245,12 @@ class S3StorageProvider(StorageProvider):
         write_latency: SizeBasedLatency,
         cas_latency: LatencyDistribution,
         min_latency: float = 43.0,
-        metadata_write_latency: LatencyDistribution = None,
     ):
         super().__init__(rng)
         self._read_latency = read_latency
         self._write_latency = write_latency
         self._cas_latency = cas_latency
         self._min_latency = min_latency
-        self._metadata_write_latency = metadata_write_latency or read_latency
 
     def read(self, key: str, expected_size_bytes: int) -> Generator[float, None, StorageResult]:
         latency = self._read_latency.sample(self._rng)
@@ -272,12 +260,6 @@ class S3StorageProvider(StorageProvider):
 
     def write(self, key: str, size_bytes: int) -> Generator[float, None, StorageResult]:
         latency = self._write_latency.with_size(size_bytes).sample(self._rng)
-        yield latency
-        return StorageResult(success=True, latency_ms=latency,
-                             data_size_bytes=size_bytes)
-
-    def write_metadata(self, key: str, size_bytes: int) -> Generator[float, None, StorageResult]:
-        latency = self._metadata_write_latency.sample(self._rng)
         yield latency
         return StorageResult(success=True, latency_ms=latency,
                              data_size_bytes=size_bytes)
@@ -330,7 +312,6 @@ class S3ExpressStorageProvider(StorageProvider):
         cas_latency: LatencyDistribution,
         append_latency: LatencyDistribution,
         min_latency: float = 10.0,
-        metadata_write_latency: LatencyDistribution = None,
     ):
         super().__init__(rng)
         self._read_latency = read_latency
@@ -338,7 +319,6 @@ class S3ExpressStorageProvider(StorageProvider):
         self._cas_latency = cas_latency
         self._append_latency = append_latency
         self._min_latency = min_latency
-        self._metadata_write_latency = metadata_write_latency or read_latency
 
     def read(self, key: str, expected_size_bytes: int) -> Generator[float, None, StorageResult]:
         latency = self._read_latency.sample(self._rng)
@@ -348,12 +328,6 @@ class S3ExpressStorageProvider(StorageProvider):
 
     def write(self, key: str, size_bytes: int) -> Generator[float, None, StorageResult]:
         latency = self._write_latency.with_size(size_bytes).sample(self._rng)
-        yield latency
-        return StorageResult(success=True, latency_ms=latency,
-                             data_size_bytes=size_bytes)
-
-    def write_metadata(self, key: str, size_bytes: int) -> Generator[float, None, StorageResult]:
-        latency = self._metadata_write_latency.sample(self._rng)
         yield latency
         return StorageResult(success=True, latency_ms=latency,
                              data_size_bytes=size_bytes)
@@ -413,7 +387,6 @@ class AzureBlobStorageProvider(StorageProvider):
         append_latency: LatencyDistribution,
         min_latency: float = 51.0,
         provider_name: str = "azure",
-        metadata_write_latency: LatencyDistribution = None,
     ):
         super().__init__(rng)
         self._read_latency = read_latency
@@ -422,7 +395,6 @@ class AzureBlobStorageProvider(StorageProvider):
         self._append_latency = append_latency
         self._min_latency = min_latency
         self._name = provider_name
-        self._metadata_write_latency = metadata_write_latency or read_latency
 
     def read(self, key: str, expected_size_bytes: int) -> Generator[float, None, StorageResult]:
         latency = self._read_latency.sample(self._rng)
@@ -432,12 +404,6 @@ class AzureBlobStorageProvider(StorageProvider):
 
     def write(self, key: str, size_bytes: int) -> Generator[float, None, StorageResult]:
         latency = self._write_latency.with_size(size_bytes).sample(self._rng)
-        yield latency
-        return StorageResult(success=True, latency_ms=latency,
-                             data_size_bytes=size_bytes)
-
-    def write_metadata(self, key: str, size_bytes: int) -> Generator[float, None, StorageResult]:
-        latency = self._metadata_write_latency.sample(self._rng)
         yield latency
         return StorageResult(success=True, latency_ms=latency,
                              data_size_bytes=size_bytes)
@@ -495,14 +461,12 @@ class GCPStorageProvider(StorageProvider):
         write_latency: SizeBasedLatency,
         cas_latency: LatencyDistribution,
         min_latency: float = 118.0,
-        metadata_write_latency: LatencyDistribution = None,
     ):
         super().__init__(rng)
         self._read_latency = read_latency
         self._write_latency = write_latency
         self._cas_latency = cas_latency
         self._min_latency = min_latency
-        self._metadata_write_latency = metadata_write_latency or read_latency
 
     def read(self, key: str, expected_size_bytes: int) -> Generator[float, None, StorageResult]:
         latency = self._read_latency.sample(self._rng)
@@ -512,12 +476,6 @@ class GCPStorageProvider(StorageProvider):
 
     def write(self, key: str, size_bytes: int) -> Generator[float, None, StorageResult]:
         latency = self._write_latency.with_size(size_bytes).sample(self._rng)
-        yield latency
-        return StorageResult(success=True, latency_ms=latency,
-                             data_size_bytes=size_bytes)
-
-    def write_metadata(self, key: str, size_bytes: int) -> Generator[float, None, StorageResult]:
-        latency = self._metadata_write_latency.sample(self._rng)
         yield latency
         return StorageResult(success=True, latency_ms=latency,
                              data_size_bytes=size_bytes)
@@ -578,10 +536,6 @@ class InstantStorageProvider(StorageProvider):
         return self._make_result(expected_size_bytes)
 
     def write(self, key: str, size_bytes: int) -> Generator[float, None, StorageResult]:
-        yield self._latency
-        return self._make_result(size_bytes)
-
-    def write_metadata(self, key: str, size_bytes: int) -> Generator[float, None, StorageResult]:
         yield self._latency
         return self._make_result(size_bytes)
 
@@ -685,7 +639,6 @@ def create_provider(provider_name: str,
     # Build common distributions
     read_latency = _build_lognormal(profile, "manifest_list", "read", min_lat)
     write_latency = _build_size_latency(profile, min_lat)
-    metadata_write_latency = _build_lognormal(profile, "manifest_list", "write", min_lat)
 
     if resolved_name == "s3":
         return S3StorageProvider(
@@ -694,7 +647,6 @@ def create_provider(provider_name: str,
             write_latency=write_latency,
             cas_latency=_build_lognormal(profile, "cas", min_latency=min_lat),
             min_latency=min_lat,
-            metadata_write_latency=metadata_write_latency,
         )
 
     if resolved_name == "s3x":
@@ -705,7 +657,6 @@ def create_provider(provider_name: str,
             cas_latency=_build_lognormal(profile, "cas", min_latency=min_lat),
             append_latency=_build_lognormal(profile, "append", min_latency=min_lat),
             min_latency=min_lat,
-            metadata_write_latency=metadata_write_latency,
         )
 
     if resolved_name in ("azure", "azurex"):
@@ -717,7 +668,6 @@ def create_provider(provider_name: str,
             append_latency=_build_lognormal(profile, "append", min_latency=min_lat),
             min_latency=min_lat,
             provider_name=resolved_name,
-            metadata_write_latency=metadata_write_latency,
         )
 
     if resolved_name == "gcp":
@@ -727,7 +677,6 @@ def create_provider(provider_name: str,
             write_latency=write_latency,
             cas_latency=_build_lognormal(profile, "cas", min_latency=min_lat),
             min_latency=min_lat,
-            metadata_write_latency=metadata_write_latency,
         )
 
     raise ValueError(f"No provider implementation for {provider_name!r}")
