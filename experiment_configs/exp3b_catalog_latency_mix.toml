@@ -35,6 +35,11 @@ label = "exp3b_catalog_mix"
 num_tables = 1
 num_groups = 1
 table_metadata_inlined = true
+backend = "service"
+
+[catalog.service]
+provider = "instant"
+latency_ms = 1.0  # Swept parameter (replaces storage.provider sweep)
 
 [transaction]
 retry = 10
@@ -59,5 +64,5 @@ conflicting_manifests.max = 10
 manifest_list_mode = "rewrite"
 
 [storage]
-provider = "s3"  # Swept parameter: instant, s3x, azure_premium, s3, gcp
+provider = "s3"  # Fixed S3 storage (catalog latency swept separately)
 max_parallel = 4

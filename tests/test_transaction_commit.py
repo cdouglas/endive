@@ -246,21 +246,21 @@ class TestConflictRetry:
         assert result.total_retries == 1
         assert catalog.seq == 2
 
-    def test_fast_append_no_io_counters_on_clean_commit(self):
-        """No conflict resolution I/O on clean commit."""
+    def test_fast_append_per_attempt_io_on_clean_commit(self):
+        """Clean commit pays per-attempt I/O: 1 ML read + 1 MF write + 1 ML write."""
         catalog = make_instant_catalog()
         storage = InstantStorageProvider(rng=np.random.RandomState(42))
         detector = NeverRealConflictDetector()
         txn = make_fast_append()
 
         result = drive_generator(txn.execute(catalog, storage, detector))
-        assert result.manifest_list_reads == 0
-        assert result.manifest_list_writes == 0
-        assert result.manifest_file_reads == 0
-        assert result.manifest_file_writes == 0
+        assert result.manifest_list_reads == 1   # Read current ML
+        assert result.manifest_file_writes == 1  # Write new MF
+        assert result.manifest_list_writes == 1  # Write new ML
+        assert result.manifest_file_reads == 0   # No MF reads needed
 
     def test_fast_append_io_counters_on_retry(self):
-        """Conflict resolution produces I/O for ML reads/writes."""
+        """Retry I/O: per-attempt cost on each of 2 attempts, no extra retry cost."""
         catalog = make_instant_catalog()
         storage = InstantStorageProvider(rng=np.random.RandomState(42))
         detector = NeverRealConflictDetector()
@@ -278,9 +278,11 @@ class TestConflictRetry:
         # T2 retries
         result = drive_generator(gen)
         assert result.total_retries == 1
-        # FastAppend cost: 1 ML read + 1 ML write (standard mode)
-        assert result.manifest_list_reads == 1
-        assert result.manifest_list_writes == 1
+        # 2 attempts × per-attempt cost (1 ML read + 1 MF write + 1 ML write each)
+        # FastAppend has no additional retry cost
+        assert result.manifest_list_reads == 2
+        assert result.manifest_file_writes == 2
+        assert result.manifest_list_writes == 2
 
 
 # ---------------------------------------------------------------------------
@@ -384,9 +386,13 @@ class TestValidatedOverwriteAbort:
         result = drive_generator(gen)
         assert result.status == TransactionStatus.COMMITTED
         assert result.total_retries == 1
-        # ValidatedOverwrite cost: 2 historical + 1 current = 3 ML reads
-        assert result.manifest_list_reads == 3
-        assert result.manifest_list_writes == 1
+        # 2 attempts × per-attempt (1 ML read each) = 2 ML reads
+        # + 2 historical ML reads (I/O convoy) = 4 total ML reads
+        assert result.manifest_list_reads == 4
+        # 2 attempts × per-attempt (1 ML write each) = 2 ML writes
+        assert result.manifest_list_writes == 2
+        # 2 attempts × per-attempt (1 MF write each) = 2 MF writes
+        assert result.manifest_file_writes == 2
 
 
 # ---------------------------------------------------------------------------
@@ -419,8 +425,14 @@ class TestMergeAppendRetry:
         result = drive_generator(gen)
         assert result.status == TransactionStatus.COMMITTED
         assert result.total_retries == 1
+        # MF reads: 2 (re-merge only, from retry cost)
         assert result.manifest_file_reads == 2
-        assert result.manifest_file_writes == 2
+        # MF writes: 2 (per-attempt) + 2 (re-merge) = 4
+        assert result.manifest_file_writes == 4
+        # ML reads: 2 (per-attempt, one per attempt)
+        assert result.manifest_list_reads == 2
+        # ML writes: 2 (per-attempt, one per attempt)
+        assert result.manifest_list_writes == 2
 
     def test_merge_append_never_aborts(self):
         """MergeAppend always retries, never aborts on conflict."""
@@ -530,16 +542,18 @@ class TestMaxRetriesExceeded:
 
 class TestTimingTracking:
     def test_total_latency_includes_all_phases(self):
-        """Total latency = read + runtime + commit."""
+        """Total latency = read + runtime + per-attempt I/O + CAS."""
         catalog = make_instant_catalog(latency_ms=2.0)
         storage = InstantStorageProvider(rng=np.random.RandomState(42))
         detector = NeverRealConflictDetector()
         txn = make_fast_append(runtime=50.0)
 
         result = drive_generator(txn.execute(catalog, storage, detector))
-        # Read: 2.0ms, Runtime: 50.0ms, Commit: 2.0ms
-        assert result.total_latency_ms == pytest.approx(54.0)
-        assert result.commit_latency_ms == pytest.approx(2.0)
+        # Read: 2.0ms, Runtime: 50.0ms
+        # Per-attempt I/O: 3 × 1.0ms (ML read + MF write + ML write, all 1ms instant)
+        # CAS: 2.0ms (catalog commit)
+        assert result.total_latency_ms == pytest.approx(57.0)
+        assert result.commit_latency_ms == pytest.approx(5.0)
 
     def test_commit_time_is_absolute(self):
         """commit_time_ms = submit_time + total_latency."""
@@ -554,8 +568,8 @@ class TestTimingTracking:
             tables_written=frozenset({0}),
         )
         result = drive_generator(txn.execute(catalog, storage, detector))
-        # submit=1000, read=1, runtime=100, commit=1 → total_latency=102
-        assert result.commit_time_ms == pytest.approx(1102.0)
+        # submit=1000, read=1, runtime=100, per-attempt=3×1, commit=1 → total_latency=105
+        assert result.commit_time_ms == pytest.approx(1105.0)
 
     def test_yields_are_latencies(self):
         """The generator yields latency floats."""

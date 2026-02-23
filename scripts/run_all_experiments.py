@@ -136,7 +136,8 @@ NUM_PARTITIONS_COMPARE_SWEEP = [2, 5, 10, 20]  # Match num_tables for comparison
 
 # Operation type experiments
 FA_RATIO_SWEEP = [1.0, 0.9, 0.8, 0.7, 0.5, 0.3, 0.1, 0.0]  # fast_append fraction
-CATALOG_PROVIDERS = ["instant", "s3x", "azurex", "s3", "gcp"]
+# Catalog CAS latencies in ms (from PROVIDER_PROFILES min_latency)
+CATALOG_LATENCY_SWEEP = [1.0, 10.0, 40.0, 43.0, 118.0]  # instant, s3x, azurex, s3, gcp
 
 # Quick mode parameters
 QUICK_LOADS = [100, 500, 2000]
@@ -255,9 +256,25 @@ def create_config_variant(base_config: Path, params: dict, seed: int,
     for key, value in params.items():
         formatted_value = format_toml_value(value)
         if '.' in key:
-            # Handle nested keys like "partition.num_partitions"
+            # Handle nested keys like "partition.num_partitions" or "catalog.service.latency_ms"
             parts = key.split('.')
-            if len(parts) == 2:
+            if len(parts) == 3:
+                # 3-level key: e.g. "catalog.service.latency_ms"
+                # Look for param within [section.subsection] block
+                section, subsection, param = parts
+                subsection_header = f"{section}.{subsection}"
+                section_pattern = rf'(\[{re.escape(subsection_header)}\][^\[]*?)({re.escape(param)}\s*=\s*)[^\n]+'
+                replacement = rf'\g<1>\g<2>{formatted_value}'
+                new_content = re.sub(section_pattern, replacement, content, flags=re.DOTALL)
+                if new_content != content:
+                    content = new_content
+                else:
+                    # Fallback: try flat key pattern
+                    escaped_key = re.escape(key)
+                    pattern = rf'^{escaped_key}\s*=\s*.*$'
+                    replacement = f'{key} = {formatted_value}'
+                    content = re.sub(pattern, replacement, content, flags=re.MULTILINE)
+            elif len(parts) == 2:
                 section, param = parts
                 # Look for param within [section] block
                 # Match: [section] ... param = value (before next section or EOF)
@@ -273,7 +290,7 @@ def create_config_variant(base_config: Path, params: dict, seed: int,
                     replacement = f'{key} = {formatted_value}'
                     content = re.sub(pattern, replacement, content, flags=re.MULTILINE)
             else:
-                # More than 2 levels not supported, try flat
+                # More than 3 levels not supported, try flat
                 escaped_key = re.escape(key)
                 pattern = rf'^{escaped_key}\s*=\s*.*$'
                 replacement = f'{key} = {formatted_value}'
@@ -525,38 +542,38 @@ def generate_all_runs(groups: list, num_seeds: int, quick: bool = False) -> list
                             ))
 
             elif "exp3a_catalog_latency_fa" in config_name:
-                # 100% FA with catalog latency sweep
-                providers = ["instant", "s3", "gcp"] if quick else CATALOG_PROVIDERS
+                # 100% FA with catalog CAS latency sweep (storage fixed at S3)
+                latencies = [1.0, 43.0, 118.0] if quick else CATALOG_LATENCY_SWEEP
                 catalog_loads = [100, 500] if quick else [50, 100, 200, 500]
-                for provider in providers:
+                for cat_latency in latencies:
                     for load in catalog_loads:
                         for seed_num in range(1, num_seeds + 1):
-                            seed = generate_seed(nonce, base_name, {"provider": provider, "load": load}, seed_num)
+                            seed = generate_seed(nonce, base_name, {"cat_latency": cat_latency, "load": load}, seed_num)
                             runs.append(ExperimentRun(
                                 config_path=config_name,
                                 label=base_name,
                                 seed=seed,
                                 params={
                                     "inter_arrival.scale": float(load),
-                                    "storage.provider": provider,
+                                    "catalog.service.latency_ms": cat_latency,
                                 }
                             ))
 
             elif "exp3b_catalog_latency_mix" in config_name:
-                # 90/10 mix with catalog latency sweep
-                providers = ["instant", "s3", "gcp"] if quick else CATALOG_PROVIDERS
+                # 90/10 mix with catalog CAS latency sweep (storage fixed at S3)
+                latencies = [1.0, 43.0, 118.0] if quick else CATALOG_LATENCY_SWEEP
                 catalog_loads = [100, 500] if quick else [50, 100, 200, 500]
-                for provider in providers:
+                for cat_latency in latencies:
                     for load in catalog_loads:
                         for seed_num in range(1, num_seeds + 1):
-                            seed = generate_seed(nonce, base_name, {"provider": provider, "load": load}, seed_num)
+                            seed = generate_seed(nonce, base_name, {"cat_latency": cat_latency, "load": load}, seed_num)
                             runs.append(ExperimentRun(
                                 config_path=config_name,
                                 label=base_name,
                                 seed=seed,
                                 params={
                                     "inter_arrival.scale": float(load),
-                                    "storage.provider": provider,
+                                    "catalog.service.latency_ms": cat_latency,
                                 }
                             ))
 

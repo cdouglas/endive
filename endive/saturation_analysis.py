@@ -348,6 +348,12 @@ def extract_key_parameters(config: Dict) -> Dict:
         params['catalog_backend'] = config['catalog'].get('backend', 'storage')
         params['table_metadata_inlined'] = config['catalog'].get('table_metadata_inlined', True)
 
+        # Extract catalog service latency (for catalog latency sweep experiments)
+        if 'service' in config['catalog']:
+            service = config['catalog']['service']
+            if isinstance(service, dict):
+                params['catalog_service_latency_ms'] = service.get('latency_ms', None)
+
     # Extract manifest list mode
     if 'transaction' in config:
         params['manifest_list_mode'] = config['transaction'].get('manifest_list_mode', 'rewrite')

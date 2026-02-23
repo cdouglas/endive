@@ -23,6 +23,11 @@ label = "exp1_fa_baseline"
 num_tables = 1
 num_groups = 1
 table_metadata_inlined = true
+backend = "service"
+
+[catalog.service]
+provider = "instant"
+latency_ms = 1.0
 
 [transaction]
 retry = 10
@@ -46,5 +51,5 @@ conflicting_manifests.max = 10
 manifest_list_mode = "rewrite"
 
 [storage]
-provider = "instant"  # 1ms CAS to isolate storage effects
+provider = "s3"  # Real storage I/O (was "instant" — that was the bug)
 max_parallel = 4

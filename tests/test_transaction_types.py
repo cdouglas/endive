@@ -227,19 +227,15 @@ class TestFastAppendTransaction:
         assert txn.should_abort_on_real_conflict() is False
 
     def test_conflict_cost_standard_mode(self):
+        """FastAppend has no additional retry cost (per-attempt covers everything)."""
         txn = make_txn(FastAppendTransaction)
         cost = txn.get_conflict_cost(n_snapshots_behind=3, ml_append_mode=False)
-        assert cost.metadata_reads == 1
-        assert cost.manifest_list_reads == 1
-        assert cost.manifest_list_writes == 1
-        assert cost.historical_ml_reads == 0
-        assert cost.manifest_file_reads == 0
-        assert cost.manifest_file_writes == 0
+        assert cost == ConflictCost()  # Empty — no additional retry cost
 
     def test_conflict_cost_ml_append_mode(self):
         txn = make_txn(FastAppendTransaction)
         cost = txn.get_conflict_cost(n_snapshots_behind=3, ml_append_mode=True)
-        assert cost.manifest_list_writes == 0
+        assert cost == ConflictCost()  # Still empty in ML+ mode
 
     def test_conflict_cost_independent_of_n_behind(self):
         """FastAppend retry cost is constant regardless of how far behind."""
@@ -270,17 +266,21 @@ class TestMergeAppendTransaction:
         assert txn.should_abort_on_real_conflict() is False
 
     def test_conflict_cost_standard_mode(self):
+        """MergeAppend retry cost is only re-merge manifests (per-attempt is separate)."""
         txn = make_txn(MergeAppendTransaction)
         cost = txn.get_conflict_cost(n_snapshots_behind=2, ml_append_mode=False)
-        assert cost.metadata_reads == 1
-        assert cost.manifest_list_reads == 1
-        assert cost.manifest_list_writes == 1
+        assert cost.metadata_reads == 0    # Moved to per-attempt
+        assert cost.manifest_list_reads == 0  # Moved to per-attempt
+        assert cost.manifest_list_writes == 0  # Moved to per-attempt
         assert cost.historical_ml_reads == 0
+        # Re-merge: int(2 * 1.5) = 3 manifests
+        assert cost.manifest_file_reads == 3
+        assert cost.manifest_file_writes == 3
 
     def test_conflict_cost_ml_append_mode(self):
         txn = make_txn(MergeAppendTransaction)
         cost = txn.get_conflict_cost(n_snapshots_behind=2, ml_append_mode=True)
-        assert cost.manifest_list_writes == 0
+        assert cost.manifest_list_writes == 0  # ML+ doesn't affect retry cost
 
     def test_manifest_file_io_scales_with_n_behind(self):
         """MergeAppend manifest file I/O scales with snapshots behind."""
@@ -336,19 +336,20 @@ class TestValidatedOverwriteTransaction:
         assert txn.should_abort_on_real_conflict() is True
 
     def test_conflict_cost_standard_mode(self):
+        """ValidatedOverwrite retry cost is only I/O convoy (per-attempt is separate)."""
         txn = make_txn(ValidatedOverwriteTransaction)
         cost = txn.get_conflict_cost(n_snapshots_behind=3, ml_append_mode=False)
-        assert cost.metadata_reads == 1
-        assert cost.manifest_list_reads == 1
-        assert cost.manifest_list_writes == 1
-        assert cost.historical_ml_reads == 3  # I/O convoy
+        assert cost.metadata_reads == 0       # Moved to per-attempt
+        assert cost.manifest_list_reads == 0  # Moved to per-attempt
+        assert cost.manifest_list_writes == 0  # Moved to per-attempt
+        assert cost.historical_ml_reads == 3  # I/O convoy (stays here)
         assert cost.manifest_file_reads == 0
         assert cost.manifest_file_writes == 0
 
     def test_conflict_cost_ml_append_mode(self):
         txn = make_txn(ValidatedOverwriteTransaction)
         cost = txn.get_conflict_cost(n_snapshots_behind=3, ml_append_mode=True)
-        assert cost.manifest_list_writes == 0
+        assert cost.manifest_list_writes == 0  # ML+ doesn't affect retry cost
 
     def test_historical_ml_reads_scale_with_n_behind(self):
         """I/O convoy: historical ML reads = n_snapshots_behind."""
@@ -383,19 +384,21 @@ class TestMLAppendMode:
         ValidatedOverwriteTransaction,
     ])
     def test_ml_append_mode_no_ml_writes(self, cls):
+        """ML+ mode skips ML writes in per-attempt cost."""
         txn = make_txn(cls)
-        cost = txn.get_conflict_cost(n_snapshots_behind=3, ml_append_mode=True)
-        assert cost.manifest_list_writes == 0
+        per_attempt = txn.get_per_attempt_cost(ml_append_mode=True)
+        assert per_attempt.manifest_list_writes == 0
 
     @pytest.mark.parametrize("cls", [
         FastAppendTransaction,
         MergeAppendTransaction,
         ValidatedOverwriteTransaction,
     ])
-    def test_standard_mode_has_ml_writes(self, cls):
+    def test_standard_mode_per_attempt_has_ml_writes(self, cls):
+        """ML writes are in per-attempt cost (not retry cost) in standard mode."""
         txn = make_txn(cls)
-        cost = txn.get_conflict_cost(n_snapshots_behind=3, ml_append_mode=False)
-        assert cost.manifest_list_writes == 1
+        per_attempt = txn.get_per_attempt_cost(ml_append_mode=False)
+        assert per_attempt.manifest_list_writes == 1
 
 
 # ---------------------------------------------------------------------------

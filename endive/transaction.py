@@ -153,13 +153,32 @@ class Transaction(ABC):
         """Whether this operation type can encounter real conflicts."""
         ...
 
+    def get_per_attempt_cost(self, ml_append_mode: bool) -> ConflictCost:
+        """I/O cost paid on every commit attempt (before CAS).
+
+        Every attempt must:
+        - Read the current manifest list (1 ML read)
+        - Write a new manifest file (1 MF write)
+        - Write a new manifest list (1 ML write) unless in ML+ mode
+        """
+        return ConflictCost(
+            manifest_list_reads=1,
+            manifest_file_writes=1,
+            manifest_list_writes=0 if ml_append_mode else 1,
+        )
+
     @abstractmethod
     def get_conflict_cost(
         self,
         n_snapshots_behind: int,
         ml_append_mode: bool,
     ) -> ConflictCost:
-        """Calculate I/O cost for resolving a conflict."""
+        """Calculate additional I/O cost for conflict resolution on retry.
+
+        This returns only the retry-specific cost (e.g., re-merge, I/O convoy).
+        Per-attempt cost (ML read, MF write, ML write) is handled separately
+        by get_per_attempt_cost().
+        """
         ...
 
     @abstractmethod
@@ -299,6 +318,11 @@ class Transaction(ABC):
         for attempt in range(max_retries + 1):
             writes = self._compute_writes(last_snapshot)
 
+            # Mandatory per-attempt I/O: ML read + MF write + ML write
+            per_attempt = self.get_per_attempt_cost(ml_append_mode)
+            yield from self._pay_conflict_cost(per_attempt, storage)
+
+            # CAS
             commit_result = yield from self._yield_from(
                 catalog.commit(
                     expected_seq=last_snapshot.seq,
@@ -330,7 +354,7 @@ class Transaction(ABC):
             if attempt >= max_retries:
                 break
 
-            # Pay conflict resolution I/O cost
+            # Pay additional retry-specific I/O cost (type-dependent)
             n_behind = current_snapshot.seq - last_snapshot.seq
             cost = self.get_conflict_cost(n_behind, ml_append_mode)
             yield from self._pay_conflict_cost(cost, storage)
@@ -407,10 +431,10 @@ class FastAppendTransaction(Transaction):
     - Conflicts are always "false" (merge manifest pointers)
     - Never aborts on conflict; always retries
 
-    Conflict Cost:
-    - 1 metadata read
-    - 1 manifest list read (current state)
-    - 1 manifest list write (rewrite mode) or 0 (ML+ mode)
+    Per-attempt cost (paid every attempt):
+    - 1 ML read + 1 MF write + 1 ML write (0 in ML+ mode)
+
+    Additional retry cost: none
     """
 
     @property
@@ -428,11 +452,8 @@ class FastAppendTransaction(Transaction):
         n_snapshots_behind: int,
         ml_append_mode: bool,
     ) -> ConflictCost:
-        return ConflictCost(
-            metadata_reads=1,
-            manifest_list_reads=1,
-            manifest_list_writes=0 if ml_append_mode else 1,
-        )
+        # No additional retry cost — per-attempt cost covers everything
+        return ConflictCost()
 
 
 class MergeAppendTransaction(Transaction):
@@ -444,8 +465,10 @@ class MergeAppendTransaction(Transaction):
     - On conflict: must re-merge with concurrent commits
     - Never aborts; always retries
 
-    Conflict Cost:
-    - 1 metadata read + 1 ML read + 0-1 ML write
+    Per-attempt cost (paid every attempt):
+    - 1 ML read + 1 MF write + 1 ML write (0 in ML+ mode)
+
+    Additional retry cost:
     - N manifest file reads + N manifest file writes (re-merge)
     - N = n_behind * manifests_per_concurrent_commit
     """
@@ -474,11 +497,9 @@ class MergeAppendTransaction(Transaction):
         n_snapshots_behind: int,
         ml_append_mode: bool,
     ) -> ConflictCost:
+        # Only re-merge cost — per-attempt cost (ML read/MF write/ML write) is separate
         n_manifests = int(n_snapshots_behind * self._manifests_per_commit)
         return ConflictCost(
-            metadata_reads=1,
-            manifest_list_reads=1,
-            manifest_list_writes=0 if ml_append_mode else 1,
             manifest_file_reads=n_manifests,
             manifest_file_writes=n_manifests,
         )
@@ -493,10 +514,11 @@ class ValidatedOverwriteTransaction(Transaction):
     - Can have real conflicts (data overlap)
     - Aborts with ValidationException on real conflict
 
-    Conflict Cost (I/O Convoy):
+    Per-attempt cost (paid every attempt):
+    - 1 ML read + 1 MF write + 1 ML write (0 in ML+ mode)
+
+    Additional retry cost (I/O Convoy):
     - N historical manifest list reads (one per missed snapshot)
-    - 1 metadata read + 1 current ML read + 0-1 ML write
-    - Real conflicts abort BEFORE paying ML write cost
     """
 
     @property
@@ -514,9 +536,7 @@ class ValidatedOverwriteTransaction(Transaction):
         n_snapshots_behind: int,
         ml_append_mode: bool,
     ) -> ConflictCost:
+        # Only I/O convoy cost — per-attempt cost (ML read/MF write/ML write) is separate
         return ConflictCost(
-            metadata_reads=1,
-            historical_ml_reads=n_snapshots_behind,  # I/O convoy
-            manifest_list_reads=1,
-            manifest_list_writes=0 if ml_append_mode else 1,
+            historical_ml_reads=n_snapshots_behind,
         )
