@@ -417,3 +417,111 @@ class TestConflictDetectorInterface:
 
         detector = MyDetector()
         assert detector.is_real_conflict(None, None, None) is False
+
+
+# ---------------------------------------------------------------------------
+# has_write_overlap()
+# ---------------------------------------------------------------------------
+
+from endive.catalog import CatalogSnapshot, TableMetadata
+
+
+def _make_snapshot(seq, table_versions, partition_versions_map):
+    """Build a CatalogSnapshot with given table/partition versions.
+
+    Args:
+        seq: Catalog sequence number
+        table_versions: list of table version ints
+        partition_versions_map: dict {table_id: tuple of partition versions}
+    """
+    tables = []
+    for tid, tv in enumerate(table_versions):
+        pvs = partition_versions_map.get(tid, (0,))
+        tables.append(TableMetadata(
+            table_id=tid,
+            version=tv,
+            num_partitions=len(pvs),
+            partition_versions=pvs,
+        ))
+    return CatalogSnapshot(seq=seq, tables=tuple(tables), timestamp_ms=0.0)
+
+
+class TestHasWriteOverlap:
+    """Tests for Transaction.has_write_overlap() per SPEC.md §3.3."""
+
+    def test_cross_table_no_overlap(self):
+        """T writes table 1, intervening commit was to table 0 → False."""
+        txn = make_txn(
+            FastAppendTransaction,
+            tables_written=frozenset({1}),
+            partitions_written={1: frozenset({0})},
+        )
+        old = _make_snapshot(0, [0, 0], {0: (0,), 1: (0,)})
+        new = _make_snapshot(1, [1, 0], {0: (1,), 1: (0,)})  # table 0 modified
+        assert txn.has_write_overlap(old, new) is False
+
+    def test_same_table_disjoint_partitions(self):
+        """T writes table 0 p1, intervening commit to table 0 p0 → False."""
+        txn = make_txn(
+            FastAppendTransaction,
+            tables_written=frozenset({0}),
+            partitions_written={0: frozenset({1})},
+        )
+        old = _make_snapshot(0, [0], {0: (0, 0)})
+        new = _make_snapshot(1, [1], {0: (1, 0)})  # p0 changed, p1 unchanged
+        assert txn.has_write_overlap(old, new) is False
+
+    def test_same_table_overlapping_partitions(self):
+        """Both write table 0 p0 → True."""
+        txn = make_txn(
+            FastAppendTransaction,
+            tables_written=frozenset({0}),
+            partitions_written={0: frozenset({0})},
+        )
+        old = _make_snapshot(0, [0], {0: (0,)})
+        new = _make_snapshot(1, [1], {0: (1,)})  # p0 changed
+        assert txn.has_write_overlap(old, new) is True
+
+    def test_multi_table_partial_overlap_disjoint(self):
+        """T writes {0, 1}, table 0 modified but disjoint partitions → False."""
+        txn = make_txn(
+            FastAppendTransaction,
+            tables_written=frozenset({0, 1}),
+            partitions_written={0: frozenset({1}), 1: frozenset({0})},
+        )
+        old = _make_snapshot(0, [0, 0], {0: (0, 0), 1: (0,)})
+        new = _make_snapshot(1, [1, 0], {0: (1, 0), 1: (0,)})  # table 0 p0 changed
+        assert txn.has_write_overlap(old, new) is False
+
+    def test_multi_table_partial_overlap_overlapping(self):
+        """T writes {0, 1}, table 0 modified with overlapping partition → True."""
+        txn = make_txn(
+            FastAppendTransaction,
+            tables_written=frozenset({0, 1}),
+            partitions_written={0: frozenset({0}), 1: frozenset({0})},
+        )
+        old = _make_snapshot(0, [0, 0], {0: (0,), 1: (0,)})
+        new = _make_snapshot(1, [1, 0], {0: (1,), 1: (0,)})  # table 0 p0 changed
+        assert txn.has_write_overlap(old, new) is True
+
+    def test_no_table_modified(self):
+        """Intervening commit to unrelated table → False."""
+        txn = make_txn(
+            FastAppendTransaction,
+            tables_written=frozenset({0}),
+            partitions_written={0: frozenset({0})},
+        )
+        old = _make_snapshot(0, [0, 0], {0: (0,), 1: (0,)})
+        new = _make_snapshot(1, [0, 1], {0: (0,), 1: (1,)})  # only table 1 changed
+        assert txn.has_write_overlap(old, new) is False
+
+    def test_multiple_snapshots_behind(self):
+        """seq advances by 3, any overlap → True."""
+        txn = make_txn(
+            FastAppendTransaction,
+            tables_written=frozenset({0}),
+            partitions_written={0: frozenset({0})},
+        )
+        old = _make_snapshot(0, [0], {0: (0,)})
+        new = _make_snapshot(3, [3], {0: (3,)})  # 3 commits to same table/partition
+        assert txn.has_write_overlap(old, new) is True

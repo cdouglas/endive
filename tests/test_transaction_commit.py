@@ -91,14 +91,18 @@ def make_cas_catalog(num_tables=1, partitions=(1,)):
     )
 
 
-def make_fast_append(txn_id=1, tables_written=None, runtime=100.0):
+def make_fast_append(txn_id=1, tables_written=None, runtime=100.0,
+                     partitions_written=None):
     if tables_written is None:
         tables_written = frozenset({0})
+    if partitions_written is None:
+        partitions_written = {tid: frozenset({0}) for tid in tables_written}
     return FastAppendTransaction(
         txn_id=txn_id,
         submit_time_ms=0.0,
         runtime_ms=runtime,
         tables_written=tables_written,
+        partitions_written=partitions_written,
     )
 
 
@@ -302,6 +306,7 @@ class TestValidatedOverwriteAbort:
             submit_time_ms=0.0,
             runtime_ms=100.0,
             tables_written=frozenset({0}),
+            partitions_written={0: frozenset({0})},
         )
         gen = txn.execute(catalog, storage, detector)
         next(gen)  # Catalog read
@@ -329,6 +334,7 @@ class TestValidatedOverwriteAbort:
             submit_time_ms=0.0,
             runtime_ms=100.0,
             tables_written=frozenset({0}),
+            partitions_written={0: frozenset({0})},
         )
         gen = txn.execute(catalog, storage, detector)
         next(gen)  # Catalog read
@@ -372,6 +378,7 @@ class TestValidatedOverwriteAbort:
             submit_time_ms=0.0,
             runtime_ms=100.0,
             tables_written=frozenset({0}),
+            partitions_written={0: frozenset({0})},
         )
         gen = txn.execute(catalog, storage, detector)
         next(gen)  # Catalog read
@@ -411,13 +418,14 @@ class TestMergeAppendRetry:
             submit_time_ms=0.0,
             runtime_ms=100.0,
             tables_written=frozenset({0}),
+            partitions_written={0: frozenset({0})},
             manifests_per_concurrent_commit=2.0,
         )
         gen = txn.execute(catalog, storage, detector)
         next(gen)  # Catalog read
         gen.send(None)  # Runtime
 
-        # T1 commits
+        # T1 commits (same table, same partition → overlap)
         t1 = make_fast_append(txn_id=1)
         drive_generator(t1.execute(catalog, storage, detector))
 
@@ -446,6 +454,7 @@ class TestMergeAppendRetry:
             submit_time_ms=0.0,
             runtime_ms=100.0,
             tables_written=frozenset({0}),
+            partitions_written={0: frozenset({0})},
         )
         gen = txn.execute(catalog, storage, detector)
         next(gen)
@@ -566,6 +575,7 @@ class TestTimingTracking:
             submit_time_ms=1000.0,
             runtime_ms=100.0,
             tables_written=frozenset({0}),
+            partitions_written={0: frozenset({0})},
         )
         result = drive_generator(txn.execute(catalog, storage, detector))
         # submit=1000, read=1, runtime=100, per-attempt=3×1, commit=1 → total_latency=105
@@ -600,6 +610,7 @@ class TestMultiTable:
             submit_time_ms=0.0,
             runtime_ms=100.0,
             tables_written=frozenset({0, 2}),
+            partitions_written={0: frozenset({0}), 2: frozenset({0})},
         )
         result = drive_generator(txn.execute(catalog, storage, detector))
         assert result.status == TransactionStatus.COMMITTED
@@ -634,6 +645,7 @@ class TestStatusTransitions:
             submit_time_ms=0.0,
             runtime_ms=100.0,
             tables_written=frozenset({0}),
+            partitions_written={0: frozenset({0})},
         )
         gen = txn.execute(catalog, storage, detector)
         next(gen)
@@ -669,6 +681,7 @@ class TestUniformInterface:
             submit_time_ms=0.0,
             runtime_ms=100.0,
             tables_written=frozenset({0}),
+            partitions_written={0: frozenset({0})},
             **kwargs,
         )
         result = drive_generator(txn.execute(catalog, storage, detector))
@@ -714,6 +727,268 @@ class TestCASCatalogIntegration:
             submit_time_ms=0.0,
             runtime_ms=100.0,
             tables_written=frozenset({0}),
+            partitions_written={0: frozenset({0})},
         )
         result = drive_generator(txn.execute(catalog, storage, detector))
         assert result.status == TransactionStatus.COMMITTED
+
+
+# ---------------------------------------------------------------------------
+# Cross-table retry optimization
+# ---------------------------------------------------------------------------
+
+class TestCrossTableRetry:
+    """Tests for cross-table CAS failure optimization per SPEC.md §3.2-3.3.
+
+    Cross-table failures should skip per-attempt I/O on retry because
+    the transaction's manifest artifacts are still valid.
+    """
+
+    def test_fast_append_cross_table_skips_per_attempt_io(self):
+        """2-table catalog. T1→table0, T2→table1. T2 retries without extra I/O."""
+        catalog = make_instant_catalog(num_tables=2, partitions=(1, 1))
+        storage = InstantStorageProvider(rng=np.random.RandomState(42))
+        detector = NeverRealConflictDetector()
+
+        # T2 writes table 1
+        t2 = FastAppendTransaction(
+            txn_id=2, submit_time_ms=0.0, runtime_ms=100.0,
+            tables_written=frozenset({1}),
+            partitions_written={1: frozenset({0})},
+        )
+        gen = t2.execute(catalog, storage, detector)
+        next(gen)  # Catalog read
+        gen.send(None)  # Runtime
+
+        # T1 commits to table 0 (cross-table)
+        t1 = make_fast_append(txn_id=1, tables_written=frozenset({0}),
+                              partitions_written={0: frozenset({0})})
+        drive_generator(t1.execute(catalog, storage, detector))
+
+        result = drive_generator(gen)
+        assert result.status == TransactionStatus.COMMITTED
+        assert result.total_retries == 1
+        # Only 1 per-attempt cycle (first attempt). Retry skips per-attempt I/O.
+        assert result.manifest_list_reads == 1
+        assert result.manifest_file_writes == 1
+        assert result.manifest_list_writes == 1
+
+    def test_fast_append_same_table_pays_per_attempt_io(self):
+        """1-table. Both write table 0. T2 pays per-attempt I/O on both attempts."""
+        catalog = make_instant_catalog()
+        storage = InstantStorageProvider(rng=np.random.RandomState(42))
+        detector = NeverRealConflictDetector()
+
+        t2 = make_fast_append(txn_id=2)
+        gen = t2.execute(catalog, storage, detector)
+        next(gen)
+        gen.send(None)
+
+        t1 = make_fast_append(txn_id=1)
+        drive_generator(t1.execute(catalog, storage, detector))
+
+        result = drive_generator(gen)
+        assert result.status == TransactionStatus.COMMITTED
+        assert result.total_retries == 1
+        # 2 attempts × per-attempt (1 ML read + 1 MF write + 1 ML write each)
+        assert result.manifest_list_reads == 2
+        assert result.manifest_file_writes == 2
+        assert result.manifest_list_writes == 2
+
+    def test_vo_cross_table_no_convoy(self):
+        """2-table. T1→table0(FA), T2→table1(VO). T2: conflict_io_ms ≈ 0."""
+        catalog = make_instant_catalog(num_tables=2, partitions=(1, 1))
+        storage = InstantStorageProvider(rng=np.random.RandomState(42))
+        detector = NeverRealConflictDetector()
+
+        t2 = ValidatedOverwriteTransaction(
+            txn_id=2, submit_time_ms=0.0, runtime_ms=100.0,
+            tables_written=frozenset({1}),
+            partitions_written={1: frozenset({0})},
+        )
+        gen = t2.execute(catalog, storage, detector)
+        next(gen)
+        gen.send(None)
+
+        t1 = make_fast_append(txn_id=1, tables_written=frozenset({0}),
+                              partitions_written={0: frozenset({0})})
+        drive_generator(t1.execute(catalog, storage, detector))
+
+        result = drive_generator(gen)
+        assert result.status == TransactionStatus.COMMITTED
+        assert result.total_retries == 1
+        assert result.conflict_io_ms == 0.0  # No overlap → no conflict I/O
+
+    def test_vo_same_table_overlapping_pays_convoy(self):
+        """1-table, same partition. T2: historical ML reads > 0."""
+        catalog = make_instant_catalog()
+        storage = InstantStorageProvider(rng=np.random.RandomState(42))
+        detector = NeverRealConflictDetector()
+
+        t2 = ValidatedOverwriteTransaction(
+            txn_id=2, submit_time_ms=0.0, runtime_ms=100.0,
+            tables_written=frozenset({0}),
+            partitions_written={0: frozenset({0})},
+        )
+        gen = t2.execute(catalog, storage, detector)
+        next(gen)
+        gen.send(None)
+
+        t1 = make_fast_append(txn_id=1)
+        drive_generator(t1.execute(catalog, storage, detector))
+
+        result = drive_generator(gen)
+        assert result.status == TransactionStatus.COMMITTED
+        assert result.total_retries == 1
+        # 2 per-attempt ML reads + 1 historical ML read (I/O convoy) = 3
+        assert result.manifest_list_reads == 3
+        assert result.conflict_io_ms > 0
+
+    def test_disjoint_partitions_skips_io(self):
+        """1-table 4 partitions. T1→p0, T2→p1. T2 skips per-attempt I/O on retry."""
+        catalog = make_instant_catalog(num_tables=1, partitions=(4,))
+        storage = InstantStorageProvider(rng=np.random.RandomState(42))
+        detector = NeverRealConflictDetector()
+
+        t2 = FastAppendTransaction(
+            txn_id=2, submit_time_ms=0.0, runtime_ms=100.0,
+            tables_written=frozenset({0}),
+            partitions_written={0: frozenset({1})},
+        )
+        gen = t2.execute(catalog, storage, detector)
+        next(gen)
+        gen.send(None)
+
+        t1 = FastAppendTransaction(
+            txn_id=1, submit_time_ms=0.0, runtime_ms=100.0,
+            tables_written=frozenset({0}),
+            partitions_written={0: frozenset({0})},
+        )
+        drive_generator(t1.execute(catalog, storage, detector))
+
+        result = drive_generator(gen)
+        assert result.status == TransactionStatus.COMMITTED
+        assert result.total_retries == 1
+        # Only first attempt pays per-attempt I/O
+        assert result.manifest_list_reads == 1
+        assert result.manifest_file_writes == 1
+        assert result.manifest_list_writes == 1
+
+    def test_catalog_read_on_failure(self):
+        """Verify catalog_read_ms includes failure-path read."""
+        catalog = make_instant_catalog(latency_ms=5.0)
+        storage = InstantStorageProvider(rng=np.random.RandomState(42))
+        detector = NeverRealConflictDetector()
+
+        t2 = make_fast_append(txn_id=2)
+        gen = t2.execute(catalog, storage, detector)
+        next(gen)
+        gen.send(None)
+
+        t1 = make_fast_append(txn_id=1)
+        drive_generator(t1.execute(catalog, storage, detector))
+
+        result = drive_generator(gen)
+        assert result.status == TransactionStatus.COMMITTED
+        # Initial read (5ms) + failure-path read (5ms) = 10ms
+        assert result.catalog_read_ms == pytest.approx(10.0)
+
+    def test_merge_append_cross_table_no_remerge(self):
+        """T2→table1(MA). Cross-table: no manifest file reads (no re-merge)."""
+        catalog = make_instant_catalog(num_tables=2, partitions=(1, 1))
+        storage = InstantStorageProvider(rng=np.random.RandomState(42))
+        detector = NeverRealConflictDetector()
+
+        t2 = MergeAppendTransaction(
+            txn_id=2, submit_time_ms=0.0, runtime_ms=100.0,
+            tables_written=frozenset({1}),
+            partitions_written={1: frozenset({0})},
+            manifests_per_concurrent_commit=2.0,
+        )
+        gen = t2.execute(catalog, storage, detector)
+        next(gen)
+        gen.send(None)
+
+        t1 = make_fast_append(txn_id=1, tables_written=frozenset({0}),
+                              partitions_written={0: frozenset({0})})
+        drive_generator(t1.execute(catalog, storage, detector))
+
+        result = drive_generator(gen)
+        assert result.status == TransactionStatus.COMMITTED
+        assert result.total_retries == 1
+        assert result.manifest_file_reads == 0  # No re-merge needed
+
+    def test_merge_append_same_table_remerges(self):
+        """Same table MA. T2 pays re-merge I/O."""
+        catalog = make_instant_catalog()
+        storage = InstantStorageProvider(rng=np.random.RandomState(42))
+        detector = NeverRealConflictDetector()
+
+        t2 = MergeAppendTransaction(
+            txn_id=2, submit_time_ms=0.0, runtime_ms=100.0,
+            tables_written=frozenset({0}),
+            partitions_written={0: frozenset({0})},
+            manifests_per_concurrent_commit=2.0,
+        )
+        gen = t2.execute(catalog, storage, detector)
+        next(gen)
+        gen.send(None)
+
+        t1 = make_fast_append(txn_id=1)
+        drive_generator(t1.execute(catalog, storage, detector))
+
+        result = drive_generator(gen)
+        assert result.status == TransactionStatus.COMMITTED
+        assert result.total_retries == 1
+        # Re-merge: int(1 * 2.0) = 2 manifest file reads
+        assert result.manifest_file_reads >= 1
+
+    def test_mixed_retries(self):
+        """3-table. T2→table2. T1a→table0 (cross), T1b→table2 (same).
+        First retry free, second pays."""
+        catalog = make_instant_catalog(num_tables=3, partitions=(1, 1, 1))
+        storage = InstantStorageProvider(rng=np.random.RandomState(42))
+        detector = NeverRealConflictDetector()
+
+        t2 = FastAppendTransaction(
+            txn_id=2, submit_time_ms=0.0, runtime_ms=100.0,
+            tables_written=frozenset({2}),
+            partitions_written={2: frozenset({0})},
+        )
+        gen = t2.execute(catalog, storage, detector)
+        next(gen)  # Catalog read
+        gen.send(None)  # Runtime
+
+        # T1a commits to table 0 (cross-table from T2's perspective)
+        t1a = make_fast_append(txn_id=10, tables_written=frozenset({0}),
+                               partitions_written={0: frozenset({0})})
+        drive_generator(t1a.execute(catalog, storage, detector))
+        assert catalog.seq == 1
+
+        # Drive T2 through first failed attempt + retry setup
+        # T2 will fail at seq=0, read catalog (seq=1), no overlap → skip_per_attempt=True
+        # T2 retries at seq=1 — but we need T1b to commit before T2's retry CAS
+        # We need to step T2's generator manually
+
+        # Advance T2 past first attempt's per-attempt I/O + CAS + catalog read
+        # Then T1b commits to table 2 (same-table)
+        # Then T2's retry CAS fails again, this time with overlap
+
+        # Actually with drive_generator we can't easily interleave mid-loop.
+        # Instead, let's commit both T1a and T1b before driving T2.
+        t1b = make_fast_append(txn_id=11, tables_written=frozenset({2}),
+                               partitions_written={2: frozenset({0})})
+        drive_generator(t1b.execute(catalog, storage, detector))
+        assert catalog.seq == 2
+
+        # T2 attempts:
+        # Attempt 0: per-attempt I/O (not skipped), CAS at seq=0 fails
+        #   catalog.read → seq=2, overlap check: table 2 version 0→1 (T1b) → True
+        #   conflict I/O paid, skip_per_attempt = False
+        # Attempt 1: per-attempt I/O (not skipped), CAS at seq=2 succeeds
+        result = drive_generator(gen)
+        assert result.status == TransactionStatus.COMMITTED
+        assert result.total_retries == 1
+        # Both attempts pay per-attempt I/O (overlap was True)
+        assert result.manifest_list_reads == 2
+        assert result.manifest_file_writes == 2

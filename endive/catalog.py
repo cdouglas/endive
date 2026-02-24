@@ -6,7 +6,7 @@ do not know whether the underlying mechanism is CAS or append.
 Key types (public):
 - TableMetadata: Immutable per-table metadata with partition versions
 - CatalogSnapshot: Immutable snapshot of catalog state at a point in time
-- CommitResult: Uniform result of Catalog.commit() (success/failure)
+- CommitResult: Uniform result of Catalog.commit() (success/failure + latency)
 - IntentionRecord: Intention record for append-based commits
 - Catalog: ABC with read() and commit()
 
@@ -23,7 +23,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Dict, Generator, Optional, Tuple
+from typing import Dict, FrozenSet, Generator, Optional, Tuple
 
 import numpy as np
 
@@ -89,14 +89,12 @@ class CommitResult:
     Returned by Catalog.commit(). The transaction does not know whether
     the underlying mechanism was CAS or append.
 
-    On success: snapshot is None. The transaction knows its state was
-    installed (it wrote the data, and the commit succeeded atomically).
-
-    On failure: snapshot contains current catalog state for conflict
-    resolution without an additional read round-trip.
+    On success: the transaction's writes were installed atomically.
+    On failure: the caller must call catalog.read() to get current state.
+    No catalog implementation returns state on failure — neither CAS nor
+    intention-record catalogs learn the current state from a failed commit.
     """
     success: bool
-    snapshot: Optional[CatalogSnapshot]  # Present ONLY on failure
     latency_ms: float
 
 
@@ -188,6 +186,7 @@ class Catalog(ABC):
         writes: Dict[int, int],
         timestamp_ms: float = 0.0,
         intention: Optional[IntentionRecord] = None,
+        partitions_written: Optional[Dict[int, FrozenSet[int]]] = None,
     ) -> Generator[float, None, CommitResult]:
         """Attempt atomic commit.
 
@@ -199,13 +198,14 @@ class Catalog(ABC):
             writes: table_id -> new_version mapping
             timestamp_ms: Current simulation time (for snapshot timestamps)
             intention: Optional intention record (used by append-based catalogs)
+            partitions_written: table_id -> set of written partition IDs.
+                On success, partition versions are advanced.
 
         Yields:
             Latency timeout(s)
 
         Returns:
-            CommitResult. On success: snapshot=None. On failure: snapshot for
-            conflict resolution.
+            CommitResult with success/failure and latency.
         """
         ...
 
@@ -267,6 +267,7 @@ class CASCatalog(Catalog):
         writes: Dict[int, int],
         timestamp_ms: float = 0.0,
         intention: Optional[IntentionRecord] = None,
+        partitions_written: Optional[Dict[int, FrozenSet[int]]] = None,
     ) -> Generator[float, None, CommitResult]:
         # Single CAS round-trip
         result = yield from self._storage.cas(
@@ -283,11 +284,14 @@ class CASCatalog(Catalog):
             # Apply writes atomically
             for table_id, version in writes.items():
                 self._tables[table_id].version = version
+            if partitions_written:
+                for table_id, pids in partitions_written.items():
+                    for pid in pids:
+                        self._tables[table_id].partition_versions[pid] += 1
             self._seq += 1
-            return CommitResult(success=True, snapshot=None, latency_ms=latency)
+            return CommitResult(success=True, latency_ms=latency)
         else:
-            snapshot = self._create_snapshot(timestamp_ms)
-            return CommitResult(success=False, snapshot=snapshot, latency_ms=latency)
+            return CommitResult(success=False, latency_ms=latency)
 
     @property
     def seq(self) -> int:
@@ -343,10 +347,18 @@ class AppendCatalog(Catalog):
         """Check whether intention's preconditions are satisfied."""
         return self._seq == intention.expected_seq
 
-    def _apply_writes(self, writes: Dict[int, int]) -> None:
+    def _apply_writes(
+        self,
+        writes: Dict[int, int],
+        partitions_written: Optional[Dict[int, FrozenSet[int]]] = None,
+    ) -> None:
         """Apply writes atomically."""
         for table_id, version in writes.items():
             self._tables[table_id].version = version
+        if partitions_written:
+            for table_id, pids in partitions_written.items():
+                for pid in pids:
+                    self._tables[table_id].partition_versions[pid] += 1
         self._seq += 1
 
     def read(self, timestamp_ms: float = 0.0) -> Generator[float, None, CatalogSnapshot]:
@@ -362,6 +374,7 @@ class AppendCatalog(Catalog):
         writes: Dict[int, int],
         timestamp_ms: float = 0.0,
         intention: Optional[IntentionRecord] = None,
+        partitions_written: Optional[Dict[int, FrozenSet[int]]] = None,
     ) -> Generator[float, None, CommitResult]:
         # Build intention if not provided
         if intention is None:
@@ -386,7 +399,7 @@ class AppendCatalog(Catalog):
         # In simulation, the append always physically succeeds because we
         # control the offset. The server evaluates preconditions:
         if self._check_preconditions(intention):
-            self._apply_writes(writes)
+            self._apply_writes(writes, partitions_written)
         self._log_offset += intention.size_bytes
 
         # Step 2: Discovery read (always needed for uniform CommitResult)
@@ -405,7 +418,6 @@ class AppendCatalog(Catalog):
 
         return CommitResult(
             success=committed,
-            snapshot=None if committed else snapshot,
             latency_ms=total_latency,
         )
 
@@ -459,17 +471,21 @@ class InstantCatalog(Catalog):
         writes: Dict[int, int],
         timestamp_ms: float = 0.0,
         intention: Optional[IntentionRecord] = None,
+        partitions_written: Optional[Dict[int, FrozenSet[int]]] = None,
     ) -> Generator[float, None, CommitResult]:
         yield self._latency
         success = (self._seq == expected_seq)
         if success:
             for table_id, version in writes.items():
                 self._tables[table_id].version = version
+            if partitions_written:
+                for table_id, pids in partitions_written.items():
+                    for pid in pids:
+                        self._tables[table_id].partition_versions[pid] += 1
             self._seq += 1
-            return CommitResult(success=True, snapshot=None, latency_ms=self._latency)
+            return CommitResult(success=True, latency_ms=self._latency)
         else:
-            snapshot = self._create_snapshot(timestamp_ms)
-            return CommitResult(success=False, snapshot=snapshot, latency_ms=self._latency)
+            return CommitResult(success=False, latency_ms=self._latency)
 
     @property
     def seq(self) -> int:

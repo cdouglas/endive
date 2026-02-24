@@ -135,7 +135,7 @@ class Transaction(ABC):
         self.submit_time = submit_time_ms
         self.runtime = runtime_ms
         self.tables_written = tables_written
-        self.partitions_written = partitions_written or {}
+        self.partitions_written: Dict[int, FrozenSet[int]] = partitions_written if partitions_written is not None else {}
 
         # Internal mutable state
         self._status = TransactionStatus.PENDING
@@ -220,6 +220,32 @@ class Transaction(ABC):
                 latency = gen.send(sent)
             except StopIteration as e:
                 return e.value
+
+    # ------------------------------------------------------------------
+    # Write overlap detection
+    # ------------------------------------------------------------------
+
+    def has_write_overlap(
+        self,
+        old_snapshot: CatalogSnapshot,
+        new_snapshot: CatalogSnapshot,
+    ) -> bool:
+        """Check if any table+partition this transaction wrote was also
+        modified between old_snapshot and new_snapshot.
+
+        Returns False for cross-table CAS failures and disjoint-partition
+        conflicts, enabling the commit loop to skip per-attempt I/O on retry.
+        """
+        for table_id in self.tables_written:
+            old_table = old_snapshot.get_table(table_id)
+            new_table = new_snapshot.get_table(table_id)
+            if old_table.version == new_table.version:
+                continue
+            # Table was modified — check partition-level overlap
+            for pid in self.partitions_written.get(table_id, ()):
+                if old_table.partition_versions[pid] != new_table.partition_versions[pid]:
+                    return True
+        return False
 
     # ------------------------------------------------------------------
     # Execute (main entry point)
@@ -326,21 +352,25 @@ class Transaction(ABC):
         """Execute commit loop with retries.
 
         On each attempt:
-        1. Compute writes from current snapshot
-        2. Call catalog.commit() (uniform interface)
-        3. On success: return COMMITTED result
-        4. On failure: check real conflict, pay I/O cost, retry
+        1. Pay per-attempt I/O (skipped if prior CAS failure was cross-table)
+        2. Compute writes from current snapshot
+        3. Call catalog.commit() (uniform interface)
+        4. On success: return COMMITTED result
+        5. On failure: read catalog, check write overlap, pay conflict I/O
         """
         last_snapshot = self._start_snapshot
+        skip_per_attempt_io = False
 
         for attempt in range(max_retries + 1):
             writes = self._compute_writes(last_snapshot)
 
-            # Mandatory per-attempt I/O: ML read + MF write + ML write
-            before = self._elapsed
-            per_attempt = self.get_per_attempt_cost(ml_append_mode)
-            yield from self._pay_conflict_cost(per_attempt, storage)
-            self._per_attempt_io_ms += self._elapsed - before
+            # Per-attempt I/O: ML read + MF write + ML write
+            # Skipped when the prior CAS failure was cross-table/disjoint
+            if not skip_per_attempt_io:
+                before = self._elapsed
+                per_attempt = self.get_per_attempt_cost(ml_append_mode)
+                yield from self._pay_conflict_cost(per_attempt, storage)
+                self._per_attempt_io_ms += self._elapsed - before
 
             # CAS
             before = self._elapsed
@@ -349,6 +379,7 @@ class Transaction(ABC):
                     expected_seq=last_snapshot.seq,
                     writes=writes,
                     timestamp_ms=self.submit_time + self._elapsed,
+                    partitions_written=self.partitions_written,
                 )
             )
             self._catalog_commit_ms += self._elapsed - before
@@ -357,30 +388,35 @@ class Transaction(ABC):
                 self._status = TransactionStatus.COMMITTED
                 return self._make_result(TransactionStatus.COMMITTED)
 
-            # Commit failed — conflict resolution
-            current_snapshot = commit_result.snapshot
-
-            # Pay validation I/O cost BEFORE conflict detection.
-            # In Iceberg, validate() does all historical ML reads before
-            # determining whether a conflict is real or false. Both real
-            # and false conflicts pay the same O(N) I/O cost upfront.
+            # CAS failed — read catalog to get current state
             before = self._elapsed
-            n_behind = current_snapshot.seq - last_snapshot.seq
-            cost = self.get_conflict_cost(n_behind, ml_append_mode)
-            yield from self._pay_conflict_cost(cost, storage)
-            self._conflict_io_ms += self._elapsed - before
+            current_snapshot = yield from self._yield_from(
+                catalog.read(self.submit_time + self._elapsed)
+            )
+            self._catalog_read_ms += self._elapsed - before
 
-            # Check for real conflict (only matters for validated ops)
-            if self.can_have_real_conflict():
-                is_real = conflict_detector.is_real_conflict(
-                    self, current_snapshot, self._start_snapshot
-                )
-                if is_real and self.should_abort_on_real_conflict():
-                    self._status = TransactionStatus.ABORTED
-                    return self._make_result(
-                        TransactionStatus.ABORTED,
-                        abort_reason="validation_exception",
+            # Check whether the intervening commits overlap our writes
+            overlap = self.has_write_overlap(last_snapshot, current_snapshot)
+
+            if overlap:
+                # Same-table/partition conflict: pay validation I/O
+                before = self._elapsed
+                n_behind = current_snapshot.seq - last_snapshot.seq
+                cost = self.get_conflict_cost(n_behind, ml_append_mode)
+                yield from self._pay_conflict_cost(cost, storage)
+                self._conflict_io_ms += self._elapsed - before
+
+                # Check for real conflict (only matters for validated ops)
+                if self.can_have_real_conflict():
+                    is_real = conflict_detector.is_real_conflict(
+                        self, current_snapshot, self._start_snapshot
                     )
+                    if is_real and self.should_abort_on_real_conflict():
+                        self._status = TransactionStatus.ABORTED
+                        return self._make_result(
+                            TransactionStatus.ABORTED,
+                            abort_reason="validation_exception",
+                        )
 
             # No more retries left — abort
             if attempt >= max_retries:
@@ -389,6 +425,7 @@ class Transaction(ABC):
             # Update state for retry
             last_snapshot = current_snapshot
             self._retries += 1
+            skip_per_attempt_io = not overlap
 
         # All attempts exhausted
         self._status = TransactionStatus.ABORTED

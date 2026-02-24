@@ -308,8 +308,7 @@ class Workload:
             self._rng,
         )
 
-        # Sample partitions (if enabled)
-        partitions_written = None
+        # Sample partitions
         if self._config.partitions_per_txn is not None:
             partitions_written = {}
             for table_id in tables_written:
@@ -320,6 +319,9 @@ class Workload:
                     self._rng,
                 )
                 partitions_written[table_id] = pw
+        else:
+            # Model unpartitioned tables as single-partition
+            partitions_written = {tid: frozenset({0}) for tid in tables_written}
 
         # Sample operation type
         op_type = self._sample_operation_type()

@@ -127,18 +127,19 @@ class TestCatalogSnapshot:
 class TestCommitResult:
 
     def test_frozen(self):
-        cr = CommitResult(success=True, snapshot=None, latency_ms=1.0)
+        cr = CommitResult(success=True, latency_ms=1.0)
         with pytest.raises(AttributeError):
             cr.success = False
 
-    def test_success_has_no_snapshot(self):
-        cr = CommitResult(success=True, snapshot=None, latency_ms=5.0)
-        assert cr.snapshot is None
+    def test_success_fields(self):
+        cr = CommitResult(success=True, latency_ms=5.0)
+        assert cr.success is True
+        assert cr.latency_ms == 5.0
 
-    def test_failure_has_snapshot(self):
-        snap = CatalogSnapshot(seq=0, tables=(), timestamp_ms=0.0)
-        cr = CommitResult(success=False, snapshot=snap, latency_ms=5.0)
-        assert cr.snapshot is snap
+    def test_failure_fields(self):
+        cr = CommitResult(success=False, latency_ms=5.0)
+        assert cr.success is False
+        assert cr.latency_ms == 5.0
 
 
 # ---------------------------------------------------------------------------
@@ -185,16 +186,15 @@ class TestCASCatalog:
         assert snap.tables[1].num_partitions == 2
         assert snap.timestamp_ms == 100.0
 
-    def test_commit_success_returns_no_snapshot(self):
+    def test_commit_success(self):
         storage = make_instant_storage()
         cat = CASCatalog(storage, 1, (1,))
         result = exhaust(cat.commit(expected_seq=0, writes={0: 1}))
         assert isinstance(result, CommitResult)
         assert result.success is True
-        assert result.snapshot is None
         assert result.latency_ms > 0
 
-    def test_commit_failure_returns_snapshot(self):
+    def test_commit_failure(self):
         storage = make_instant_storage()
         cat = CASCatalog(storage, 1, (1,))
         # First commit succeeds (seq 0 -> 1)
@@ -202,8 +202,6 @@ class TestCASCatalog:
         # Second commit with stale seq fails
         result = exhaust(cat.commit(expected_seq=0, writes={0: 2}))
         assert result.success is False
-        assert result.snapshot is not None
-        assert result.snapshot.seq == 1
 
     def test_seq_increments_by_one(self):
         storage = make_instant_storage()
@@ -293,16 +291,13 @@ class TestAppendCatalog:
         result = exhaust(cat.commit(expected_seq=0, writes={0: 1}))
         assert isinstance(result, CommitResult)
         assert result.success is True
-        assert result.snapshot is None
 
-    def test_commit_failure_returns_snapshot(self):
+    def test_commit_failure(self):
         storage = make_instant_storage()
         cat = AppendCatalog(storage, 1, (1,))
         exhaust(cat.commit(expected_seq=0, writes={0: 1}))
         result = exhaust(cat.commit(expected_seq=0, writes={0: 2}))
         assert result.success is False
-        assert result.snapshot is not None
-        assert result.snapshot.seq == 1
 
     def test_seq_increments(self):
         storage = make_instant_storage()
@@ -363,14 +358,12 @@ class TestInstantCatalog:
         cat = InstantCatalog(1, (1,))
         result = exhaust(cat.commit(expected_seq=0, writes={0: 1}))
         assert result.success is True
-        assert result.snapshot is None
 
     def test_commit_failure(self):
         cat = InstantCatalog(1, (1,))
         exhaust(cat.commit(expected_seq=0, writes={0: 1}))
         result = exhaust(cat.commit(expected_seq=0, writes={0: 2}))
         assert result.success is False
-        assert result.snapshot is not None
 
     def test_fixed_latency(self):
         cat = InstantCatalog(1, (1,), latency_ms=3.0)
@@ -446,15 +439,12 @@ class TestUniformInterface:
         result = exhaust(cat.commit(expected_seq=0, writes={0: 1}))
         assert isinstance(result, CommitResult)
         assert result.success is True
-        assert result.snapshot is None
         assert result.latency_ms > 0
 
         # Failure (stale seq)
         result = exhaust(cat.commit(expected_seq=0, writes={0: 2}))
         assert isinstance(result, CommitResult)
         assert result.success is False
-        assert isinstance(result.snapshot, CatalogSnapshot)
-        assert result.snapshot.seq == 1
         assert result.latency_ms > 0
 
     def test_instant_catalog(self):
@@ -479,7 +469,6 @@ class TestCASCatalogWithRealStorage:
         cat = CASCatalog(storage, 2, (4, 2))
         result = exhaust(cat.commit(expected_seq=0, writes={0: 1, 1: 1}))
         assert result.success is True
-        assert result.snapshot is None
         # S3X latency should be > 10ms
         assert result.latency_ms >= 10.0
 
@@ -528,11 +517,6 @@ class TestConcurrentCommits:
         assert len(successes) == 1
         assert len(failures) == 4
         assert cat.seq == 1
-
-        # All failures have snapshots
-        for f in failures:
-            assert f.snapshot is not None
-            assert f.snapshot.seq == 1
 
 
 # ---------------------------------------------------------------------------
@@ -594,3 +578,63 @@ class TestSnapshotConsistency:
         exhaust(cat.commit(expected_seq=0, writes={0: 99}))  # fails
         snap = exhaust(cat.read())
         assert snap.get_table(0).version == 1  # not 99
+
+
+# ---------------------------------------------------------------------------
+# Partition version tracking
+# ---------------------------------------------------------------------------
+
+class TestPartitionVersionTracking:
+    """Verify partition versions advance on successful commits."""
+
+    @pytest.mark.parametrize("catalog_factory", [
+        lambda: InstantCatalog(1, (4,)),
+        lambda: CASCatalog(make_instant_storage(), 1, (4,)),
+        lambda: AppendCatalog(make_instant_storage(), 1, (4,)),
+    ], ids=["instant", "cas", "append"])
+    def test_partition_versions_advance_on_commit(self, catalog_factory):
+        cat = catalog_factory()
+        result = exhaust(cat.commit(
+            expected_seq=0,
+            writes={0: 1},
+            partitions_written={0: frozenset({1, 3})},
+        ))
+        assert result.success is True
+        snap = exhaust(cat.read())
+        assert snap.get_partition_version(0, 0) == 0  # untouched
+        assert snap.get_partition_version(0, 1) == 1  # advanced
+        assert snap.get_partition_version(0, 2) == 0  # untouched
+        assert snap.get_partition_version(0, 3) == 1  # advanced
+
+    @pytest.mark.parametrize("catalog_factory", [
+        lambda: InstantCatalog(1, (4,)),
+        lambda: CASCatalog(make_instant_storage(), 1, (4,)),
+        lambda: AppendCatalog(make_instant_storage(), 1, (4,)),
+    ], ids=["instant", "cas", "append"])
+    def test_no_partitions_written_leaves_versions_unchanged(self, catalog_factory):
+        cat = catalog_factory()
+        result = exhaust(cat.commit(expected_seq=0, writes={0: 1}))
+        assert result.success is True
+        snap = exhaust(cat.read())
+        assert snap.get_partition_version(0, 0) == 0
+        assert snap.get_partition_version(0, 1) == 0
+
+    @pytest.mark.parametrize("catalog_factory", [
+        lambda: InstantCatalog(2, (2, 3)),
+        lambda: CASCatalog(make_instant_storage(), 2, (2, 3)),
+        lambda: AppendCatalog(make_instant_storage(), 2, (2, 3)),
+    ], ids=["instant", "cas", "append"])
+    def test_multi_table_partition_updates(self, catalog_factory):
+        cat = catalog_factory()
+        result = exhaust(cat.commit(
+            expected_seq=0,
+            writes={0: 1, 1: 1},
+            partitions_written={0: frozenset({0}), 1: frozenset({1, 2})},
+        ))
+        assert result.success is True
+        snap = exhaust(cat.read())
+        assert snap.get_partition_version(0, 0) == 1
+        assert snap.get_partition_version(0, 1) == 0
+        assert snap.get_partition_version(1, 0) == 0
+        assert snap.get_partition_version(1, 1) == 1
+        assert snap.get_partition_version(1, 2) == 1

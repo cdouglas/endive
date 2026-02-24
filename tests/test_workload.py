@@ -456,12 +456,14 @@ class TestWorkloadTableSelection:
 # ---------------------------------------------------------------------------
 
 class TestWorkloadPartitionSelection:
-    def test_no_partitions_by_default(self):
+    def test_single_partition_by_default(self):
         config = make_config()
         workload = Workload(config, seed=42)
         _, txn = next(workload.generate())
-        # partitions_written defaults to empty dict when None
-        assert txn.partitions_written == {}
+        # Each written table gets single-partition default {tid: frozenset({0})}
+        for tid in txn.tables_written:
+            assert tid in txn.partitions_written
+            assert txn.partitions_written[tid] == frozenset({0})
 
     def test_partitions_when_enabled(self):
         config = make_config(
