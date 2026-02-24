@@ -329,14 +329,27 @@ def compute_experiment_hash(config: dict) -> str:
     # Serialize config deterministically
     config_str = json.dumps(config_for_hash, sort_keys=True)
 
-    # 2. Hash simulator code files
+    # 2. Hash simulator code files (only files that affect simulation results)
     code_hash = hashlib.sha256()
     endive_dir = Path(__file__).parent
 
-    # Include all .py files in endive/ directory
-    for py_file in sorted(endive_dir.glob("*.py")):
-        with open(py_file, 'rb') as f:
-            code_hash.update(f.read())
+    # Only include modules that affect simulation output.
+    # Excludes: saturation_analysis.py (plotting), test_utils.py, utils.py, __init__.py
+    _SIMULATION_MODULES = [
+        "catalog.py",
+        "config.py",
+        "conflict_detector.py",
+        "main.py",
+        "simulation.py",
+        "storage.py",
+        "transaction.py",
+        "workload.py",
+    ]
+    for module_name in _SIMULATION_MODULES:
+        py_file = endive_dir / module_name
+        if py_file.exists():
+            with open(py_file, 'rb') as f:
+                code_hash.update(f.read())
 
     # Include provider TOML files (latency config)
     providers_dir = endive_dir / "providers"
