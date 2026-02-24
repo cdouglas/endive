@@ -903,7 +903,7 @@ def plot_sustainable_throughput(
     fig, ax = plt.subplots(figsize=(12, 8))
 
     # Color palette for different configurations
-    colors = ['#2E86AB', '#A23B72', '#F18F01', '#C73E1D', '#3B1F2B', '#95190C']
+    colors = ['#2E86AB', '#A23B72', '#F18F01', '#44AA99', '#332288', '#DDCC77']
 
     if group_by and group_by in sustainable_df.columns:
         # Plot separate lines for each group (e.g., different optimization configs)
@@ -1998,7 +1998,7 @@ def generate_heatmap_plots(base_dir: str, pattern: str, output_dir: str,
     results_df.to_csv(os.path.join(output_dir, "heatmap_data.csv"), index=False)
 
     metric_configs = {
-        "success_rate": ("Success Rate (%)", "RdYlGn", 60, 100),
+        "success_rate": ("Success Rate (%)", "RdYlBu", 60, 100),
         "throughput": ("Throughput (commits/hour)", "plasma", None, None),
         "mean_latency": ("Mean Commit Latency (ms)", "inferno_r", None, None),
         "p99_latency": ("P99 Commit Latency (ms)", "inferno_r", None, None),
@@ -2188,8 +2188,10 @@ def generate_operation_type_plots(base_dir: str, pattern: str, output_dir: str,
     group_values = sorted(agg[group_by].unique())
 
     # Color map for group values
-    cmap = plt.cm.tab10
-    colors = {val: cmap(i / max(len(group_values) - 1, 1)) for i, val in enumerate(group_values)}
+    # Colorblind-friendly palette (Tol's qualitative scheme)
+    _cb_palette = ['#332288', '#88CCEE', '#44AA99', '#117733', '#999933',
+                   '#DDCC77', '#CC6677', '#882255', '#AA4499', '#DDDDDD']
+    colors = {val: _cb_palette[i % len(_cb_palette)] for i, val in enumerate(group_values)}
     markers = ["o", "s", "^", "D", "v", "<", ">", "p", "*", "h"]
 
     # Format group label for legend
