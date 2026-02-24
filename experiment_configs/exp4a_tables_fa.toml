@@ -1,0 +1,86 @@
+# Experiment 4a: Multi-Table Catalog Contention (100% FastAppend)
+#
+# Goal: Show how adding tables to a single-file catalog affects
+# contention on the shared global seq pointer.
+#
+# With N tables and random table selection, writers target different tables
+# but still contend on the shared seq. More tables means more total concurrent
+# activity at a given per-table arrival rate, amplifying the CAS bottleneck.
+# This is the core distinction between FileIOCatalog and REST/JDBC catalogs.
+#
+# Sweep: num_tables x catalog_latency x arrival_rate (3D)
+#   num_tables:      [1, 2, 5, 10, 20, 50]
+#   catalog_latency: [1, 10, 50, 120] ms (instant -> GCP range)
+#   arrival_rate:    LOAD_SWEEP
+#
+# Operation types: 100% FastAppend (isolates catalog contention)
+#
+# Expected patterns:
+#   - More tables -> more CAS failures at same arrival rate
+#   - Effect amplified at lower catalog latency (faster retry cycles)
+#   - At high catalog latency, CAS latency dominates table count effect
+#   - num_tables=1 should match exp3a results at matching latencies
+#
+# Validation:
+#   - All operation_type values should be "fast_append"
+#   - No validation_exception aborts
+#   - num_tables=1 cross-validates against exp3a
+
+[simulation]
+duration_ms = 3600000  # 1 hour
+output_path = "results.parquet"
+
+[experiment]
+label = "exp4a_tables_fa"
+
+[catalog]
+num_tables = 1           # Swept: [1, 2, 5, 10, 20, 50]
+num_groups = 1           # Single-file catalog: all tables share one seq
+table_metadata_inlined = true
+backend = "service"
+
+[catalog.service]
+provider = "instant"
+latency_ms = 1.0         # Swept: [1, 10, 50, 120]
+
+[transaction]
+retry = 10
+runtime.min = 30000
+runtime.mean = 180000
+runtime.sigma = 1.5
+
+inter_arrival.distribution = "exponential"
+inter_arrival.scale = 100.0  # Swept: LOAD_SWEEP
+
+# 100% FastAppend
+operation_types.fast_append = 1.0
+operation_types.validated_overwrite = 0.0
+real_conflict_probability = 0.0
+
+conflicting_manifests.distribution = "exponential"
+conflicting_manifests.mean = 3.0
+conflicting_manifests.min = 1
+conflicting_manifests.max = 10
+manifest_list_mode = "rewrite"
+
+[storage]
+provider = "s3"  # Fixed S3 storage (catalog latency swept separately)
+max_parallel = 4
+
+[plots]
+output_dir = "plots/exp4a_tables_fa"
+
+[[plots.graphs]]
+type = "commit_rate_over_time"
+
+[[plots.graphs]]
+type = "heatmap"
+x_param = "num_tables"
+y_param = "inter_arrival_scale"
+metrics = ["success_rate", "throughput", "mean_latency", "p99_latency"]
+# One heatmap per catalog latency (filtered externally)
+
+[[plots.graphs]]
+type = "latency_vs_throughput"
+group_by = "num_tables"
+# One plot per catalog latency (filtered externally)

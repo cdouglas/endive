@@ -358,6 +358,7 @@ python -c "import pyarrow.parquet as pq; meta = pq.read_metadata('experiments/co
 - **baseline**: 100% FastAppend with instant catalog (`exp1_fa_baseline`)
 - **heatmap**: FA/VO operation mix 2D sweep (`exp2_mix_heatmap`)
 - **catalog**: Catalog latency impact on FA and mixed workloads (`exp3a_catalog_fa`, `exp3b_catalog_mix`)
+- **tables**: Multi-table single-file catalog contention (`exp4a_tables_fa`, `exp4b_tables_mix`)
 
 **Plotting Approach:**
 - Each experiment config declares `[plots]` section with positive list of graphs

@@ -1,0 +1,90 @@
+# Experiment 4b: Multi-Table Catalog Contention (90/10 FastAppend/ValidatedOverwrite Mix)
+#
+# Goal: Show how multi-table catalog contention interacts with operation cost.
+#
+# Same sweep as exp4a but with 90% FA / 10% VO mix. ValidatedOverwrite has
+# higher retry cost (manifest reads + writes), so catalog contention from
+# additional tables should have a larger impact on VO success rate.
+#
+# Sweep: num_tables x catalog_latency x arrival_rate (3D)
+#   num_tables:      [1, 2, 5, 10, 20, 50]
+#   catalog_latency: [1, 10, 50, 120] ms (instant -> GCP range)
+#   arrival_rate:    LOAD_SWEEP
+#
+# Operation types: 90% FastAppend, 10% ValidatedOverwrite
+#
+# Expected patterns:
+#   - VO success rate degrades faster than FA as num_tables increases
+#   - Higher catalog latency + more tables = multiplicative degradation
+#   - num_tables=1 should match exp3b results at matching latencies
+#
+# Validation:
+#   - Operation type distribution matches ~90/10 (within sampling variance)
+#   - No validation_exception aborts (real_conflict_probability = 0)
+#   - num_tables=1 cross-validates against exp3b
+
+[simulation]
+duration_ms = 3600000  # 1 hour
+output_path = "results.parquet"
+
+[experiment]
+label = "exp4b_tables_mix"
+
+[catalog]
+num_tables = 1           # Swept: [1, 2, 5, 10, 20, 50]
+num_groups = 1           # Single-file catalog: all tables share one seq
+table_metadata_inlined = true
+backend = "service"
+
+[catalog.service]
+provider = "instant"
+latency_ms = 1.0         # Swept: [1, 10, 50, 120]
+
+[transaction]
+retry = 10
+runtime.min = 30000
+runtime.mean = 180000
+runtime.sigma = 1.5
+
+inter_arrival.distribution = "exponential"
+inter_arrival.scale = 100.0  # Swept: LOAD_SWEEP
+
+# 90% FastAppend, 10% ValidatedOverwrite (realistic mixed workload)
+operation_types.fast_append = 0.9
+operation_types.validated_overwrite = 0.1
+
+# No real conflicts — isolates catalog latency + operation-type cost
+real_conflict_probability = 0.0
+
+conflicting_manifests.distribution = "exponential"
+conflicting_manifests.mean = 3.0
+conflicting_manifests.min = 1
+conflicting_manifests.max = 10
+manifest_list_mode = "rewrite"
+
+[storage]
+provider = "s3"  # Fixed S3 storage (catalog latency swept separately)
+max_parallel = 4
+
+[plots]
+output_dir = "plots/exp4b_tables_mix"
+
+[[plots.graphs]]
+type = "commit_rate_over_time"
+
+[[plots.graphs]]
+type = "heatmap"
+x_param = "num_tables"
+y_param = "inter_arrival_scale"
+metrics = ["success_rate", "throughput", "mean_latency", "p99_latency"]
+per_type_metrics = ["success_rate", "mean_latency"]
+# One heatmap per catalog latency (filtered externally)
+
+[[plots.graphs]]
+type = "latency_vs_throughput"
+group_by = "num_tables"
+# One plot per catalog latency (filtered externally)
+
+[[plots.graphs]]
+type = "operation_types"
+group_by = "catalog_service_latency_ms"

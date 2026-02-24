@@ -8,6 +8,8 @@
 | `exp2_mix_heatmap.toml` | `heatmap` | load × fa_ratio | FA/VO operation mix 2D sweep |
 | `exp3a_catalog_fa.toml` | `catalog` | catalog_latency × load | Catalog latency impact (100% FA) |
 | `exp3b_catalog_mix.toml` | `catalog` | catalog_latency × load | Catalog latency impact (90/10 FA/VO mix) |
+| `exp4a_tables_fa.toml` | `tables` | num_tables × catalog_latency × load | Multi-table catalog contention (100% FA) |
+| `exp4b_tables_mix.toml` | `tables` | num_tables × catalog_latency × load | Multi-table catalog contention (90/10 FA/VO mix) |
 
 Each config has a `[plots]` section declaring which graphs to generate.
 See `plotting.toml` for default plot parameters.
