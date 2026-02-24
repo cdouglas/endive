@@ -379,6 +379,10 @@ def main():
 
     args = parser.parse_args()
 
+    if args.destructive and (args.verify or args.verify_only):
+        parser.error("--destructive cannot be combined with --verify or --verify-only "
+                     "(originals are deleted before verification could run)")
+
     # Verify-only mode
     if args.verify_only:
         passed, failed = verify_consolidation(
