@@ -202,9 +202,10 @@ class CatalogSnapshot:
 @dataclass(frozen=True)
 class CommitResult:
     """Uniform result of Catalog.commit().
-    On success: snapshot=None. On failure: snapshot has current state."""
+    On success: snapshot=None (transaction knows its writes were installed).
+    On failure: snapshot=None (CAS/append do not return catalog content;
+    transaction must call catalog.read() to learn the current state)."""
     success: bool
-    snapshot: Optional[CatalogSnapshot]  # Present ONLY on failure
     latency_ms: float
 
 @dataclass(frozen=True)
@@ -217,7 +218,7 @@ class IntentionRecord:
     size_bytes: int = 100
 ```
 
-**Contention model note:** The global `seq` models a single-file catalog (`FileIOCatalog`) where all tables contend on one atomic pointer. Every commit—regardless of which table it targets—must increment the same `seq`, so concurrent writers to different tables still produce CAS failures. This represents the worst-case contention scenario. A per-table metadata catalog (e.g., REST catalog backed by a database) would version each table independently, eliminating cross-table contention entirely. Results from this simulator should be interpreted as upper bounds on catalog-induced contention; deployments using REST or JDBC catalogs will see lower conflict rates for multi-table workloads.
+**Contention model note:** The global `seq` models a single-file catalog (`FileIOCatalog`) where all tables contend on one atomic pointer. Every commit—regardless of which table it targets—must increment the same `seq`, so concurrent writers to different tables still produce CAS failures. However, **cross-table CAS failures are cheap to retry**: the transaction reads the updated catalog, sees the intervening commit was to a different table, and retries the CAS without any manifest I/O. Only same-table conflicts with overlapping partitions require full conflict resolution. This distinction is critical for multi-table workloads: more tables means more CAS failures but cheaper retries, so the net effect depends on the balance between catalog round-trip cost and manifest I/O cost. A per-table metadata catalog (e.g., REST catalog backed by a database) would version each table independently, eliminating cross-table CAS failures entirely.
 
 Internal types `_CASResult`, `_AppendResult`, and `_MutableTable` are not exposed to transactions.
 
@@ -279,8 +280,14 @@ Transaction                              Catalog
     │                                       │  [CAS or append+read internally]
     │◀──── CommitResult ───────────────────│
     │                                       │
-    │  success=True:  snapshot=None         │
-    │  success=False: snapshot=<current>    │
+    │  success=True:  done                  │
+    │  success=False: must call read()      │
+    │                                       │
+    ├──── read() ──────────────────────────▶│  [on failure only]
+    │◀──── CatalogSnapshot ────────────────│
+    │                                       │
+    │  [check write overlap, then retry     │
+    │   or resolve conflict]                │
 ```
 
 **CAS-based** (internal):
@@ -371,29 +378,67 @@ class Transaction(ABC):
     def should_abort_on_real_conflict(self) -> bool: ...
 
     def get_per_attempt_cost(self, ml_append_mode: bool) -> ConflictCost:
-        """I/O cost paid on every commit attempt.
-        Every attempt: 1 ML read + 1 MF write + 1 ML write (0 in ML+ mode)."""
+        """I/O cost paid on first attempt and on retries with write overlap.
+        Cost: 1 ML read + 1 MF write + 1 ML write (0 ML write in ML+ mode).
+        Skipped on retry when intervening commits have no write overlap."""
 
     @abstractmethod
     def get_conflict_cost(self, n_snapshots_behind: int, ml_append_mode: bool) -> ConflictCost:
-        """Additional retry-specific I/O cost (separate from per-attempt cost)."""
+        """Additional retry-specific I/O cost. Only paid when write overlap exists."""
+
+    def has_write_overlap(self, old_snapshot: CatalogSnapshot,
+                          new_snapshot: CatalogSnapshot) -> bool:
+        """Check if intervening commits overlap with this transaction's writes.
+        Returns False if all intervening commits were to different tables or
+        disjoint partitions of the same table. Returns True if any intervening
+        commit modified the same table AND overlapping partitions (or if
+        partition tracking is disabled, any same-table modification)."""
 ```
 
 The `execute()` method drives the transaction lifecycle:
 
 1. **Read** catalog snapshot (`catalog.read()`)
 2. **Execute** transaction work (yield `runtime_ms`)
-3. **Commit loop** with up to `max_retries` attempts:
-   - Pay per-attempt I/O cost (ML read, MF write, ML write)
-   - Call `catalog.commit()`
-   - On success: return COMMITTED
-   - On failure: check real conflict, pay retry-specific I/O cost, retry
+3. **Commit loop** (up to `max_retries + 1` attempts):
+   - a. Pay per-attempt I/O cost (ML read, MF write, ML write) — **skipped when no write overlap** (see below)
+   - b. Call `catalog.commit()`
+   - c. On success: return COMMITTED
+   - d. On failure: read catalog (`catalog.read()`) to learn current state
+   - e. Check **write overlap** (`has_write_overlap()`): did any intervening commit modify the same table AND overlapping partitions?
+   - f. If **no overlap** (cross-table or disjoint partitions): skip to step 3b on next iteration (no manifest I/O)
+   - g. If **overlap**: pay type-specific conflict cost, check for real conflict (may abort), go to step 3a on next iteration
 
 The `_yield_from()` helper tracks elapsed time across sub-generators. The `_pay_conflict_cost()` method executes storage operations for each `ConflictCost` field.
 
-### 3.3 Concrete Transaction Types
+### 3.3 Write Overlap Check
 
-**FastAppendTransaction**: Append-only, no validation, no real conflicts possible. Always retries on conflict. No additional retry cost.
+After a CAS failure, the transaction compares its `tables_written` and `partitions_written` against what changed between the old and new catalog snapshots:
+
+```python
+def has_write_overlap(self, old_snapshot, new_snapshot) -> bool:
+    for table_id in self.tables_written:
+        old_table = old_snapshot.get_table(table_id)
+        new_table = new_snapshot.get_table(table_id)
+        if old_table.version == new_table.version:
+            continue  # This table was not modified by intervening commits
+        # Same table was modified — check partition overlap
+        if self.partitions_written is None:
+            return True  # No partition tracking; assume overlap
+        for pid in self.partitions_written.get(table_id, ()):
+            if old_table.partition_versions[pid] != new_table.partition_versions[pid]:
+                return True  # Overlapping partition
+    return False
+```
+
+**No overlap** means: every intervening commit was either to a different table entirely, or to the same table but disjoint partitions. The transaction's manifest file and manifest list from the previous attempt are still valid — it just needs to retry the CAS with the updated seq.
+
+**Overlap** means: at least one intervening commit modified the same table AND the same partition(s). The transaction must redo its manifest work (re-read ML, re-write MF, re-write ML) and perform type-specific conflict resolution.
+
+### 3.4 Concrete Transaction Types
+
+All per-attempt I/O costs and conflict costs below are paid **only when `has_write_overlap()` returns True**. Cross-table and disjoint-partition retries pay only the catalog read + CAS round-trip.
+
+**FastAppendTransaction**: Append-only, no validation, no real conflicts possible. Always retries on conflict. No additional retry cost beyond per-attempt I/O.
 
 ```python
 class FastAppendTransaction(Transaction):
@@ -403,7 +448,7 @@ class FastAppendTransaction(Transaction):
     get_conflict_cost() -> ConflictCost()  # No additional retry cost
 ```
 
-**MergeAppendTransaction**: Must re-merge manifests on conflict. No real conflicts. Always retries. Additional retry cost: N manifest file reads + N writes, where N = `n_behind * manifests_per_concurrent_commit`.
+**MergeAppendTransaction**: Must re-merge manifests on conflict. No real conflicts. Always retries. Additional retry cost (with overlap): N manifest file reads + N writes, where N = `n_behind * manifests_per_concurrent_commit`.
 
 ```python
 class MergeAppendTransaction(Transaction):
@@ -417,7 +462,7 @@ class MergeAppendTransaction(Transaction):
     )
 ```
 
-**ValidatedOverwriteTransaction**: Full validation via `validationHistory()`. Can have real conflicts (data overlap). Aborts with `"validation_exception"` on real conflict. Additional retry cost: N historical ML reads (I/O convoy).
+**ValidatedOverwriteTransaction**: Full validation via `validationHistory()`. Can have real conflicts (data overlap). Aborts with `"validation_exception"` on real conflict. Additional retry cost (with overlap): N historical ML reads (I/O convoy).
 
 ```python
 class ValidatedOverwriteTransaction(Transaction):
@@ -429,7 +474,7 @@ class ValidatedOverwriteTransaction(Transaction):
     )
 ```
 
-### 3.4 ML+ Manifest List Protocol
+### 3.5 ML+ Manifest List Protocol
 
 In ML+ mode (`ml_append_mode=True`), the manifest list is updated via append before the catalog commit. This is Transaction-level logic:
 
@@ -692,12 +737,14 @@ experiments/
 - Changes are only visible after commit
 
 ### 8.3 Manifest List Exactness
-- When N snapshots behind, read exactly N historical manifest lists (I/O convoy)
+- When N snapshots behind AND write overlap exists, read exactly N historical manifest lists (I/O convoy)
 - Not N-1, not N+1
+- Skipped entirely when there is no write overlap (cross-table or disjoint partitions)
 
 ### 8.4 Conflict Type Distinction
-- False conflicts: Different partitions, merge and retry
-- Real conflicts: Same partition, may abort (operation-dependent)
+- **No overlap**: Different table or disjoint partitions — no manifest I/O, just re-CAS
+- **False conflict**: Same table + overlapping partitions, but no data conflict — merge and retry
+- **Real conflict**: Same table + overlapping partitions with data conflict — may abort (operation-dependent)
 
 ### 8.5 Determinism
 - Same seed + same config produces identical results
@@ -711,12 +758,14 @@ experiments/
 - Transactions call only `read()` and `commit()` on the Catalog
 - Transactions do not know whether the underlying mechanism is CAS or append
 - `commit()` returns `CommitResult` with the same semantics for all implementations:
-  - On success: `snapshot=None` (transaction knows its state was installed)
-  - On failure: `snapshot=<current>` (for conflict resolution)
+  - On success: transaction knows its state was installed
+  - On failure: transaction must call `catalog.read()` to learn the current state
 
-### 8.8 CAS Success Returns No State
-- A successful CAS does not return a catalog snapshot
-- The transaction knows its state was installed because CAS guarantees the state it read was unmodified
+### 8.8 Commit Does Not Return State
+- Neither success nor failure returns a catalog snapshot
+- On success: the transaction knows its state was installed (CAS/append guarantees atomicity)
+- On failure: the transaction must call `catalog.read()` to get the current snapshot, paying one read round-trip
+- This models the real cost: CAS returns only success/failure, not the current value
 
 ### 8.9 Information Asymmetry in Append Protocol
 - `Storage.append()` returns only physical success (offset matched)
@@ -734,16 +783,25 @@ experiments/
 - The Workload owns topology and configures Transactions accordingly
 - The Catalog does not expose topology queries
 
+### 8.12 Cross-Table Retry Cost
+- CAS failures caused by commits to a different table (or disjoint partitions of the same table) do not require manifest I/O
+- The retry cost is: 1 catalog read + 1 CAS round-trip
+- Per-attempt I/O and conflict resolution costs apply ONLY when `has_write_overlap()` returns True
+- This is critical for multi-table workloads: with N tables and uniform selection, ~(N-1)/N of CAS failures are cross-table and essentially free to retry
+
 ---
 
 ## Appendix A: Glossary
 
 - **CAS**: Compare-and-swap; atomic conditional update
 - **ML+**: Manifest list append mode; avoids ML rewrite on false conflict
-- **False Conflict**: Concurrent commit to unrelated data (different partitions)
-- **Real Conflict**: Concurrent commit to overlapping data (same partition)
-- **I/O Convoy**: Reading N historical manifest lists for N missed snapshots
+- **Write Overlap**: Intervening commit modified the same table AND overlapping partitions as the retrying transaction
+- **No Overlap (cross-table)**: Intervening commit was to a different table; retry is free (catalog read + CAS only)
+- **No Overlap (disjoint partitions)**: Intervening commit was to the same table but different partitions; retry is free
+- **False Conflict**: Same table + overlapping partitions, but no data conflict; merge and retry with manifest I/O
+- **Real Conflict**: Same table + overlapping partitions with data conflict; may abort (operation-dependent)
+- **I/O Convoy**: Reading N historical manifest lists for N missed snapshots (only when write overlap exists)
 - **Snapshot Isolation**: Transaction sees consistent point-in-time state
 - **Validation Exception**: Abort due to real data overlap detection
-- **Per-attempt cost**: I/O paid on every commit attempt (ML read, MF write, ML write)
-- **Conflict cost**: Additional I/O paid only on retry (type-dependent)
+- **Per-attempt cost**: I/O paid on first attempt and on retries with write overlap (ML read, MF write, ML write)
+- **Conflict cost**: Additional I/O paid only on retry with write overlap (type-dependent)

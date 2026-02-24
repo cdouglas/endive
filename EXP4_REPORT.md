@@ -109,40 +109,55 @@ crossing to ~0 at load >= 500ms (exp4a) or >= 400ms (exp4b).
 
 ## Why the null result?
 
-The reason is structural: `inter_arrival.scale` controls the **global** arrival
-rate, not the per-table rate.
+Two compounding reasons:
 
-With num_tables=1 and inter_arrival=100ms, 10 transactions/sec compete for one
-table on one seq pointer.
+### 1. Global arrival rate, not per-table
 
-With num_tables=50 and inter_arrival=100ms, the same 10 transactions/sec are
-**spread across 50 tables** (random table selection), so each table sees only
-0.2 transactions/sec. The total commit rate on the shared seq is still 10/sec.
-Adding tables doesn't add load — it dilutes it.
+`inter_arrival.scale` controls the **global** arrival rate, not the per-table
+rate. With num_tables=50 and inter_arrival=100ms, the same 10 transactions/sec
+are spread across 50 tables (0.2/sec each). Adding tables dilutes per-table
+contention without changing aggregate CAS contention.
 
-The hypothesis assumed that more tables means more independent writers each
-producing their own commit stream. That's the real-world scenario (N microservices
-each writing to their own table), but the simulator models a single workload
-generator with a fixed aggregate rate. The table assignment is a routing decision,
-not a load multiplier.
+### 2. Cross-table retries are incorrectly expensive (modeling bug)
+
+Even with the same aggregate CAS failure rate, more tables should help: with
+50 tables, 49/50 CAS failures are cross-table and should be nearly free to
+retry (just re-read catalog + re-CAS). Only 1/50 same-table failures need
+manifest I/O.
+
+However, the simulator charges full per-attempt I/O cost (1 ML read + 1 MF
+write + 1 ML write, ~160ms on S3) on every retry regardless of whether the
+conflicting commit touched the same table. This masks the benefit of table
+diversity. See endive-s5j and SPEC.md §3.3.
+
+With both issues, num_tables has zero observed effect. Fixing the modeling
+bug alone would show some benefit (cheaper retries with more tables), but
+the full multi-tenant scenario also requires fixing the arrival rate.
 
 ## What would be needed to test the hypothesis
 
-To model N independent writer streams on a shared catalog, the experiment would
-need to scale the total arrival rate proportionally to num_tables:
+### Fix 1: Cross-table retry cost (endive-s5j)
+
+After CAS failure, check whether intervening commits overlap with this
+transaction's tables/partitions. If no overlap (cross-table or disjoint
+partitions), skip manifest I/O and just re-CAS. SPEC.md has been updated
+with the corrected commit loop (§3.2-3.3).
+
+### Fix 2: Per-table arrival rate
+
+To model N independent writer streams on a shared catalog, scale the total
+arrival rate proportionally to num_tables:
 
     effective_inter_arrival = base_inter_arrival / num_tables
 
 With 50 tables and base_inter_arrival=100ms, the effective rate would be
-50 * 10/sec = 500 transactions/sec, which would massively increase seq contention.
-This requires either:
+50 * 10/sec = 500 transactions/sec. This requires either:
 
 1. **A per-table arrival rate parameter** in the workload generator, or
 2. **Scaling the sweep**: For each num_tables value, divide inter_arrival.scale
    by num_tables in the experiment runner
 
-Option 2 is simpler and doesn't require simulator changes. The experiment runner
-would generate:
+Option 2 is simpler and doesn't require simulator changes:
 
 ```python
 params = {
