@@ -821,18 +821,30 @@ def plot_latency_vs_throughput(
                         linewidth=0
                     )
 
-    # Annotate success rate above P99 line for single-series plots
+    # Annotate success rate below P50 line for single-series plots
     if annotate_success_rate and not group_by and 'success_rate' in index_df.columns:
         df_sorted = index_df.sort_values('throughput')
+        placed = []  # (x, y) of placed annotations for overlap detection
         for _, row in df_sorted.iterrows():
             sr = row.get('success_rate', 100.0)
             if sr < 99.5:
+                x = row['throughput']
+                y = row['p50_commit_latency']
+                # Skip if too close to an existing annotation
+                too_close = False
+                for px, py in placed:
+                    if abs(x - px) < 0.3 and abs(y - py) < 50:
+                        too_close = True
+                        break
+                if too_close:
+                    continue
+                placed.append((x, y))
                 ax.annotate(
                     f"{sr:.0f}%",
-                    xy=(row['throughput'], row['p99_commit_latency']),
-                    xytext=(0, 10),
+                    xy=(x, y),
+                    xytext=(0, -14),
                     textcoords='offset points',
-                    fontsize=8, color='#666666', ha='center', va='bottom'
+                    fontsize=8, color='#666666', ha='center', va='top'
                 )
 
     # Mark saturation point (configurable success rate threshold)
