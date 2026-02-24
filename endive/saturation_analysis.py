@@ -1314,6 +1314,7 @@ def format_value_with_stddev(value: float, stddev: float = None, decimals: int =
 def generate_latency_vs_throughput_table(
     index_df: pd.DataFrame,
     output_path: str,
+    title: str = None,
     group_by: str = None
 ):
     """Generate markdown table for latency vs throughput data with optional stddev."""
