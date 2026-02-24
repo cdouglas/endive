@@ -297,7 +297,8 @@ def cli():
     output_dir.mkdir(parents=True, exist_ok=True)
     temp_output_path = output_dir / ".running.parquet"
 
-    sim = Simulation(sim_config, output_path=str(temp_output_path))
+    progress_path = str(output_dir / ".progress.json")
+    sim = Simulation(sim_config, output_path=str(temp_output_path), progress_path=progress_path)
     stats = sim.run()
 
     logger.info("Simulation complete")

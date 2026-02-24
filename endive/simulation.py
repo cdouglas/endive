@@ -15,6 +15,9 @@ bare floats representing latencies in milliseconds.
 
 from __future__ import annotations
 
+import json
+import os
+import time
 from dataclasses import dataclass, field
 from typing import Generator, List, Optional
 
@@ -292,9 +295,12 @@ class Simulation:
         self,
         config: SimulationConfig,
         output_path: str | None = None,
+        progress_path: str | None = None,
     ):
         self._config = config
         self._stats = Statistics(output_path=output_path)
+        self._progress_path = progress_path
+        self._start_wall: float = 0.0
         self._rng: Optional[np.random.RandomState] = None
 
     def run(self) -> Statistics:
@@ -306,12 +312,43 @@ class Simulation:
             np.random.seed(self._config.seed)
             self._rng = np.random.RandomState(self._config.seed + 1)
 
+        self._start_wall = time.time()
         env = simpy.Environment()
         env.process(self._run_workload(env))
+        if self._progress_path:
+            env.process(self._progress_reporter(env))
         env.run(until=self._config.duration_ms)
 
         self._stats.close()
+        # Clean up progress file
+        if self._progress_path:
+            try:
+                os.unlink(self._progress_path)
+            except FileNotFoundError:
+                pass
         return self._stats
+
+    def _progress_reporter(
+        self, env: simpy.Environment, interval_ms: float = 60_000,
+    ) -> Generator:
+        """Periodically write progress to a JSON file."""
+        while True:
+            yield env.timeout(interval_ms)
+            progress = {
+                "sim_time_ms": env.now,
+                "duration_ms": self._config.duration_ms,
+                "pct": round(env.now / self._config.duration_ms * 100, 1),
+                "committed": self._stats.committed,
+                "aborted": self._stats.aborted,
+                "wall_clock_s": round(time.time() - self._start_wall, 2),
+            }
+            tmp = self._progress_path + ".tmp"
+            try:
+                with open(tmp, "w") as f:
+                    json.dump(progress, f)
+                os.replace(tmp, self._progress_path)
+            except OSError:
+                pass
 
     def _run_workload(self, env: simpy.Environment) -> Generator:
         """Generate transactions and launch them as SimPy processes."""

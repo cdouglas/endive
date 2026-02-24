@@ -515,14 +515,21 @@ def run_experiments(args):
                 if not HAS_TQDM:
                     print(f"  FAILED: {run_id}: {message[:100]}")
 
+            # Update in_progress from pending futures
+            state.in_progress = [
+                futures[f].run_id for f in futures
+                if not f.done()
+            ]
+
             # Update state file periodically
             state.save(STATE_FILE)
 
+            elapsed = time.time() - start_time
             if HAS_TQDM:
                 pbar.update(1)
-                pbar.set_postfix(ok=completed, fail=failed)
+                rate_str = f"{completed / elapsed:.1f}/s" if elapsed > 0 else "..."
+                pbar.set_postfix(ok=completed, fail=failed, rate=rate_str)
             else:
-                elapsed = time.time() - start_time
                 pct = (completed + failed) / len(all_runs) * 100
                 print(f"[{pct:5.1f}%] {completed + failed}/{len(all_runs)} "
                       f"(ok={completed}, fail={failed}, elapsed={elapsed:.0f}s)")
