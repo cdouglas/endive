@@ -217,6 +217,8 @@ class IntentionRecord:
     size_bytes: int = 100
 ```
 
+**Contention model note:** The global `seq` models a single-file catalog (`FileIOCatalog`) where all tables contend on one atomic pointer. Every commit—regardless of which table it targets—must increment the same `seq`, so concurrent writers to different tables still produce CAS failures. This represents the worst-case contention scenario. A per-table metadata catalog (e.g., REST catalog backed by a database) would version each table independently, eliminating cross-table contention entirely. Results from this simulator should be interpreted as upper bounds on catalog-induced contention; deployments using REST or JDBC catalogs will see lower conflict rates for multi-table workloads.
+
 Internal types `_CASResult`, `_AppendResult`, and `_MutableTable` are not exposed to transactions.
 
 ### 2.2 Catalog Interface

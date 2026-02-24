@@ -185,6 +185,7 @@ All operations use normal distributions with mean ± stddev:
 ⚠️ Garbage collection/compaction
 ⚠️ Read queries (only write transactions simulated)
 ⚠️ Deletion vectors (cost lumped into manifest operations)
+⚠️ **Single-file catalog contention** — the global `seq` models a `FileIOCatalog` where all tables contend on one atomic pointer. Per-table metadata catalogs (REST, JDBC) version tables independently and would show lower cross-table contention. Results represent worst-case catalog-induced contention.
 
 ### Parameterized
 
