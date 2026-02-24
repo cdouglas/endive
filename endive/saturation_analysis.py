@@ -821,7 +821,7 @@ def plot_latency_vs_throughput(
                         linewidth=0
                     )
 
-    # Annotate success rate on P50 line for single-series plots
+    # Annotate success rate above P99 line for single-series plots
     if annotate_success_rate and not group_by and 'success_rate' in index_df.columns:
         df_sorted = index_df.sort_values('throughput')
         for _, row in df_sorted.iterrows():
@@ -829,10 +829,10 @@ def plot_latency_vs_throughput(
             if sr < 99.5:
                 ax.annotate(
                     f"{sr:.0f}%",
-                    xy=(row['throughput'], row['p50_commit_latency']),
-                    xytext=(0, -15),
+                    xy=(row['throughput'], row['p99_commit_latency']),
+                    xytext=(0, 10),
                     textcoords='offset points',
-                    fontsize=8, color='#666666', ha='center', va='top'
+                    fontsize=8, color='#666666', ha='center', va='bottom'
                 )
 
     # Mark saturation point (configurable success rate threshold)
@@ -1075,7 +1075,8 @@ def plot_success_rate_vs_throughput(
         df_sorted = index_df.sort_values('throughput')
 
         ax.plot(df_sorted['throughput'], df_sorted['success_rate'],
-               marker='o', linewidth=3, markersize=10, color='#2E86AB')
+               marker='o', linewidth=3, markersize=10, color='#2E86AB',
+               label='Success Rate')
 
         # Add error bands if stddev is enabled and available
         stddev_config = CONFIG.get('plots', {}).get('stddev', {})
@@ -1301,8 +1302,8 @@ def plot_commit_rate_over_time(
     ax.set_xlabel('Time (minutes)', fontsize=14, fontweight='bold')
     ax.set_ylabel('Commit Rate (commits/sec)', fontsize=14, fontweight='bold')
     ax.set_title(title, fontsize=16, fontweight='bold')
-    ax.legend(bbox_to_anchor=(-0.02, 0.5), loc='center right',
-              fontsize=8, framealpha=0.9, ncol=1)
+    ax.legend(bbox_to_anchor=(0.5, -0.12), loc='upper center',
+              fontsize=8, framealpha=0.9, ncol=4)
     ax.grid(True, alpha=0.3, linestyle='--')
     ax.set_xlim(left=0)
     ax.set_ylim(bottom=0)

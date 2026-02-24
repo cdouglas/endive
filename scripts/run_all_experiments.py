@@ -75,7 +75,7 @@ LOAD_SWEEP = [20, 50, 100, 200, 300, 400, 500, 1000, 2000, 5000]
 # Operation type experiments
 FA_RATIO_SWEEP = [1.0, 0.9, 0.8, 0.7, 0.5, 0.3, 0.1, 0.0]  # fast_append fraction
 # Catalog CAS latencies in ms (from PROVIDER_PROFILES min_latency)
-CATALOG_LATENCY_SWEEP = [1.0, 10.0, 40.0, 43.0, 118.0]  # instant, s3x, azurex, s3, gcp
+CATALOG_LATENCY_SWEEP = [1.0, 5.0, 10.0, 20.0, 50.0, 80.0, 120.0]
 
 # Quick mode parameters
 QUICK_LOADS = [100, 500, 2000]
@@ -344,7 +344,7 @@ def generate_all_runs(groups: list, num_seeds: int, quick: bool = False) -> list
             elif "exp3a_catalog_fa" in config_name:
                 # 100% FA with catalog CAS latency sweep (storage fixed at S3)
                 latencies = [1.0, 43.0, 118.0] if quick else CATALOG_LATENCY_SWEEP
-                catalog_loads = [100, 500] if quick else [50, 100, 200, 500]
+                catalog_loads = [100, 500] if quick else LOAD_SWEEP
                 for cat_latency in latencies:
                     for load in catalog_loads:
                         for seed_num in range(1, num_seeds + 1):
@@ -362,7 +362,7 @@ def generate_all_runs(groups: list, num_seeds: int, quick: bool = False) -> list
             elif "exp3b_catalog_mix" in config_name:
                 # 90/10 mix with catalog CAS latency sweep (storage fixed at S3)
                 latencies = [1.0, 43.0, 118.0] if quick else CATALOG_LATENCY_SWEEP
-                catalog_loads = [100, 500] if quick else [50, 100, 200, 500]
+                catalog_loads = [100, 500] if quick else LOAD_SWEEP
                 for cat_latency in latencies:
                     for load in catalog_loads:
                         for seed_num in range(1, num_seeds + 1):

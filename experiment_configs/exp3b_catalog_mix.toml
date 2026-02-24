@@ -2,14 +2,11 @@
 #
 # Goal: Determine catalog latency impact when maintenance operations are present.
 #
-# Catalog latency sweep: [instant, s3x, azure_premium, s3, gcp]
-#   - Instant: ~1ms
-#   - S3 Express: ~15ms
-#   - Azure Premium: ~50ms
-#   - S3 / Azure: ~100ms
-#   - GCP: ~500ms
+# Catalog CAS latency sweep: [1, 5, 10, 20, 50, 80, 120] ms
+#   Notable provider min_latency values in this range:
+#     1ms ~ instant, 10ms ~ S3 Express, 40-43ms ~ Azure Premium/S3, 118ms ~ GCP
 #
-# Arrival rate sweep: [50, 100, 200, 500] ms
+# Arrival rate sweep: same as exp1/exp2 (LOAD_SWEEP)
 #
 # Operation types: 90% FastAppend, 10% ValidatedOverwrite
 # Real conflict probability: 0.0 (isolates catalog latency + operation-type cost)
