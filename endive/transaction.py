@@ -360,6 +360,16 @@ class Transaction(ABC):
             # Commit failed — conflict resolution
             current_snapshot = commit_result.snapshot
 
+            # Pay validation I/O cost BEFORE conflict detection.
+            # In Iceberg, validate() does all historical ML reads before
+            # determining whether a conflict is real or false. Both real
+            # and false conflicts pay the same O(N) I/O cost upfront.
+            before = self._elapsed
+            n_behind = current_snapshot.seq - last_snapshot.seq
+            cost = self.get_conflict_cost(n_behind, ml_append_mode)
+            yield from self._pay_conflict_cost(cost, storage)
+            self._conflict_io_ms += self._elapsed - before
+
             # Check for real conflict (only matters for validated ops)
             if self.can_have_real_conflict():
                 is_real = conflict_detector.is_real_conflict(
@@ -375,13 +385,6 @@ class Transaction(ABC):
             # No more retries left — abort
             if attempt >= max_retries:
                 break
-
-            # Pay additional retry-specific I/O cost (type-dependent)
-            before = self._elapsed
-            n_behind = current_snapshot.seq - last_snapshot.seq
-            cost = self.get_conflict_cost(n_behind, ml_append_mode)
-            yield from self._pay_conflict_cost(cost, storage)
-            self._conflict_io_ms += self._elapsed - before
 
             # Update state for retry
             last_snapshot = current_snapshot
