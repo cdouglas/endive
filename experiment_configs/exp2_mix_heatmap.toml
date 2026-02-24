@@ -69,18 +69,6 @@ max_parallel = 4
 output_dir = "plots/exp2_mix_heatmap"
 
 [[plots.graphs]]
-type = "latency_vs_throughput"
-group_by = "fast_append_ratio"
-
-[[plots.graphs]]
-type = "latency_vs_throughput_table"
-group_by = "fast_append_ratio"
-
-[[plots.graphs]]
-type = "success_rate_vs_throughput"
-group_by = "fast_append_ratio"
-
-[[plots.graphs]]
 type = "commit_rate_over_time"
 
 [[plots.graphs]]

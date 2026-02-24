@@ -749,7 +749,8 @@ def plot_latency_vs_throughput(
     index_df: pd.DataFrame,
     output_path: str,
     title: str = "Latency vs Throughput",
-    group_by: str = None
+    group_by: str = None,
+    annotate_success_rate: bool = False
 ):
     """
     Generate latency vs throughput plot (ANALYSIS_PLAN.md Figure 4.1).
@@ -819,6 +820,20 @@ def plot_latency_vs_throughput(
                         alpha=stddev_alpha,
                         linewidth=0
                     )
+
+    # Annotate success rate on P50 line for single-series plots
+    if annotate_success_rate and not group_by and 'success_rate' in index_df.columns:
+        df_sorted = index_df.sort_values('throughput')
+        for _, row in df_sorted.iterrows():
+            sr = row.get('success_rate', 100.0)
+            if sr < 99.5:
+                ax.annotate(
+                    f"{sr:.0f}%",
+                    xy=(row['throughput'], row['p50_commit_latency']),
+                    xytext=(0, -15),
+                    textcoords='offset points',
+                    fontsize=8, color='#666666', ha='center', va='top'
+                )
 
     # Mark saturation point (configurable success rate threshold)
     sat_config = CONFIG.get('plots', {}).get('saturation', {})
@@ -1205,37 +1220,36 @@ def plot_commit_rate_over_time(
         print(f"No experiments found for commit rate plot")
         return
 
-    # Get warmup duration for marking on plot
+    # Get warmup and cooldown durations for marking on plot
     first_exp = list(experiments.values())[0]
-    warmup_ms = compute_transient_period_duration(first_exp['config'])
+    first_config = first_exp['config']
+    warmup_ms = compute_warmup_duration(first_config)
+    cooldown_ms = compute_cooldown_duration(first_config)
+    sim_duration_ms = first_config.get('simulation', {}).get('duration_ms', 3600000)
     warmup_min = warmup_ms / 60000
+    cooldown_start_min = (sim_duration_ms - cooldown_ms) / 60000
+    sim_duration_min = sim_duration_ms / 60000
 
     fig, ax = plt.subplots(figsize=(14, 8))
 
     colors = plt.cm.viridis(np.linspace(0, 1, len(experiments)))
 
     for (exp_dir, exp_info), color in zip(experiments.items(), colors):
-        # Load aggregated results
-        use_consolidated = CONFIG.get('analysis', {}).get('use_consolidated', False)
-        if use_consolidated:
-            # Make consolidated path relative to base_dir
-            consolidated_filename = CONFIG.get('paths', {}).get('consolidated_file', 'experiments/consolidated.parquet')
-            if os.path.isabs(consolidated_filename):
-                consolidated_path = consolidated_filename
-            elif consolidated_filename.startswith(base_dir):
-                consolidated_path = consolidated_filename
-            else:
-                consolidated_path = os.path.join(base_dir, 'consolidated.parquet')
+        # Load raw data (no warmup/cooldown filtering) for full time range
+        all_results = []
+        for seed_dir in exp_info['seeds']:
+            parquet_path = os.path.join(seed_dir, "results.parquet")
+            if os.path.exists(parquet_path):
+                df = pd.read_parquet(parquet_path)
+                df['seed'] = os.path.basename(seed_dir)
+                all_results.append(df)
 
-            # Check if consolidated file exists before trying to use it
-            if os.path.exists(consolidated_path):
-                df = load_and_aggregate_results_consolidated(exp_info, consolidated_path)
-            else:
-                df = load_and_aggregate_results(exp_info)
-        else:
-            df = load_and_aggregate_results(exp_info)
+        if not all_results:
+            continue
 
-        if df is None or len(df) == 0:
+        df = pd.concat(all_results, ignore_index=True)
+
+        if len(df) == 0:
             continue
 
         # Filter to committed transactions only
@@ -1279,10 +1293,16 @@ def plot_commit_rate_over_time(
               alpha=0.7, label=f'Warmup end ({warmup_min:.1f} min)')
     ax.axvspan(0, warmup_min, alpha=0.1, color='red')
 
+    # Mark cooldown period
+    ax.axvline(cooldown_start_min, color='blue', linestyle='--', linewidth=2,
+              alpha=0.7, label=f'Cooldown start ({cooldown_start_min:.1f} min)')
+    ax.axvspan(cooldown_start_min, sim_duration_min, alpha=0.1, color='blue')
+
     ax.set_xlabel('Time (minutes)', fontsize=14, fontweight='bold')
     ax.set_ylabel('Commit Rate (commits/sec)', fontsize=14, fontweight='bold')
     ax.set_title(title, fontsize=16, fontweight='bold')
-    ax.legend(loc='best', fontsize=8, framealpha=0.9, ncol=2)
+    ax.legend(bbox_to_anchor=(-0.02, 0.5), loc='center right',
+              fontsize=8, framealpha=0.9, ncol=1)
     ax.grid(True, alpha=0.3, linestyle='--')
     ax.set_xlim(left=0)
     ax.set_ylim(bottom=0)
@@ -1920,12 +1940,18 @@ def _create_single_heatmap(data: pd.DataFrame, x_param: str, y_param: str,
 
     fig.colorbar(im, ax=ax)
 
+    # Use actual colormap luminance for text color (works with all colormaps)
+    norm = plt.Normalize(vmin=vmin or np.nanmin(pivot.values),
+                         vmax=vmax or np.nanmax(pivot.values))
+    colormap = plt.get_cmap(cmap)
+
     for i in range(len(pivot.index)):
         for j in range(len(pivot.columns)):
             val = pivot.values[i, j]
             if not np.isnan(val):
-                threshold = (vmax or np.nanmax(pivot.values)) * 0.5
-                text_color = "white" if val < threshold else "black"
+                rgba = colormap(norm(val))
+                luminance = 0.299 * rgba[0] + 0.587 * rgba[1] + 0.114 * rgba[2]
+                text_color = "white" if luminance < 0.5 else "black"
                 ax.text(j, i, f"{val:{fmt}}", ha="center", va="center",
                         color=text_color, fontsize=8)
 

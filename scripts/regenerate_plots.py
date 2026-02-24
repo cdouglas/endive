@@ -226,6 +226,12 @@ def process_config(config_path: Path, plotting_defaults: dict,
                     kwargs["group_by"] = merged["group_by"]
                 if "success_threshold" in merged:
                     kwargs["success_threshold"] = merged["success_threshold"]
+                if "annotate_success_rate" in merged:
+                    kwargs["annotate_success_rate"] = merged["annotate_success_rate"]
+
+                # Allow per-graph output file override
+                if "output_file" in merged:
+                    output_path = os.path.join(graph_output_dir, merged["output_file"])
 
                 func(graph_index_df, output_path, **kwargs)
 

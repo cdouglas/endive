@@ -71,19 +71,14 @@ max_parallel = 4
 output_dir = "plots/exp3b_catalog_mix"
 
 [[plots.graphs]]
-type = "latency_vs_throughput"
-group_by = "catalog_service_latency_ms"
-
-[[plots.graphs]]
-type = "latency_vs_throughput_table"
-group_by = "catalog_service_latency_ms"
-
-[[plots.graphs]]
-type = "success_rate_vs_throughput"
-group_by = "catalog_service_latency_ms"
-
-[[plots.graphs]]
 type = "commit_rate_over_time"
+
+[[plots.graphs]]
+type = "heatmap"
+x_param = "inter_arrival_scale"
+y_param = "catalog_service_latency_ms"
+metrics = ["success_rate", "throughput", "mean_latency", "p99_latency"]
+per_type_metrics = ["success_rate", "mean_latency"]
 
 [[plots.graphs]]
 type = "operation_types"
