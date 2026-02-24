@@ -10,6 +10,7 @@ Includes optional verification to validate consolidated data matches originals.
 
 import argparse
 import random
+import shutil
 import sys
 from pathlib import Path
 from typing import List, Tuple
@@ -81,7 +82,8 @@ def consolidate_incremental(
     output_path: str = 'experiments/consolidated.parquet',
     batch_size: int = 50,
     compression: str = 'zstd',
-    compression_level: int = 3
+    compression_level: int = 3,
+    destructive: bool = False
 ):
     """
     Consolidate experiments incrementally to avoid memory exhaustion.
@@ -96,6 +98,11 @@ def consolidate_incremental(
     print(f"Output file: {output_path}")
     print(f"Batch size: {batch_size} experiments")
     print(f"Compression: {compression} (level {compression_level})")
+    if destructive:
+        print(f"Mode: DESTRUCTIVE (experiment directories deleted after writing)")
+        print(f"\n  ⚠ WARNING: Original experiment files will be deleted as they are")
+        print(f"  consolidated. If this process is interrupted, any already-deleted")
+        print(f"  experiments will only exist in the partially-written consolidated file.")
 
     # Find all experiments
     print("\n" + "-" * 80)
@@ -135,6 +142,8 @@ def consolidate_incremental(
 
     writer = None
     total_rows = 0
+    deleted_dirs = 0
+    deleted_bytes = 0
 
     try:
         for i, (exp_name, exp_hash, exp_dir, seed_dirs) in enumerate(tqdm(experiments, desc="Processing")):
@@ -149,6 +158,9 @@ def consolidate_incremental(
                     config_map = [('error', f'Failed to load: {e}')]
             else:
                 config_map = [('warning', 'No config file')]
+
+            # Track whether all seeds for this experiment succeeded
+            exp_seeds_ok = True
 
             # Process each seed
             for seed_dir in seed_dirs:
@@ -193,7 +205,15 @@ def consolidate_incremental(
 
                 except Exception as e:
                     print(f"\n  ERROR processing {parquet_path}: {e}")
+                    exp_seeds_ok = False
                     continue
+
+            # Delete experiment directory after all seeds written
+            if destructive and exp_seeds_ok:
+                dir_size = sum(f.stat().st_size for f in exp_dir.rglob('*') if f.is_file())
+                shutil.rmtree(exp_dir)
+                deleted_dirs += 1
+                deleted_bytes += dir_size
 
         # Close writer
         if writer is not None:
@@ -209,7 +229,11 @@ def consolidate_incremental(
         print(f"Total rows: {total_rows:,}")
         print(f"Experiments: {len(experiments)}")
         print(f"Seeds: {total_seeds}")
-        print(f"\n✓ Original files PRESERVED (not deleted)")
+        if destructive:
+            print(f"\n✗ Deleted {deleted_dirs} experiment directories"
+                  f" ({deleted_bytes / (1024**2):.1f} MB freed)")
+        else:
+            print(f"\n✓ Original files PRESERVED (not deleted)")
 
         return True
 
@@ -349,6 +373,9 @@ def main():
                         help='Number of random files to verify (default: 20)')
     parser.add_argument('--verify-only', action='store_true',
                         help='Only run verification (skip consolidation)')
+    parser.add_argument('--destructive', action='store_true',
+                        help='Delete experiment directories after writing to consolidated file. '
+                             'Frees disk space incrementally but risks data loss if interrupted.')
 
     args = parser.parse_args()
 
@@ -367,7 +394,8 @@ def main():
         output_path=args.output,
         batch_size=args.batch_size,
         compression=args.compression,
-        compression_level=args.compression_level
+        compression_level=args.compression_level,
+        destructive=args.destructive
     )
 
     if not success:
