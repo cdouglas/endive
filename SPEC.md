@@ -236,6 +236,7 @@ class Catalog(ABC):
         writes: Dict[int, int],          # table_id -> new_version
         timestamp_ms: float = 0.0,
         intention: Optional[IntentionRecord] = None,
+        partitions_written: Optional[Dict[int, FrozenSet[int]]] = None,
     ) -> Generator[float, None, CommitResult]: ...
 
     @property
@@ -245,7 +246,7 @@ class Catalog(ABC):
 
 ### 2.3 Implementations
 
-**CASCatalog**: Single round-trip CAS on underlying storage. On CAS success, applies writes atomically and advances `seq` by 1. On failure, captures a snapshot for conflict resolution.
+**CASCatalog**: Single round-trip CAS on underlying storage. On success, applies writes atomically, advances partition versions for written partitions, and advances `seq` by 1. On failure, returns `CommitResult(success=False)` — the caller must call `catalog.read()` to learn the current state.
 
 ```python
 class CASCatalog(Catalog):
@@ -422,13 +423,13 @@ def has_write_overlap(self, old_snapshot, new_snapshot) -> bool:
         if old_table.version == new_table.version:
             continue  # This table was not modified by intervening commits
         # Same table was modified — check partition overlap
-        if self.partitions_written is None:
-            return True  # No partition tracking; assume overlap
         for pid in self.partitions_written.get(table_id, ()):
             if old_table.partition_versions[pid] != new_table.partition_versions[pid]:
                 return True  # Overlapping partition
     return False
 ```
+
+`partitions_written` is always a `Dict[int, FrozenSet[int]]` (never None). The Workload models unpartitioned tables as single-partition (`{tid: frozenset({0})}`) so partition-level overlap detection always applies.
 
 **No overlap** means: every intervening commit was either to a different table entirely, or to the same table but disjoint partitions. The transaction's manifest file and manifest list from the previous attempt are still valid — it just needs to retry the CAS with the updated seq.
 
@@ -580,6 +581,8 @@ class Workload:
 ```
 
 The `generate()` method samples inter-arrival times, runtime, operation type, table/partition selections, and constructs the appropriate `Transaction` subclass. Operation type weights are normalized internally.
+
+When `partitions_per_txn` is None (the default), the Workload generates `{tid: frozenset({0})}` for each written table — modeling unpartitioned tables as single-partition. This ensures `partitions_written` is always a populated `Dict[int, FrozenSet[int]]`, enabling partition-level overlap detection in the commit loop without Optional paths.
 
 ---
 
