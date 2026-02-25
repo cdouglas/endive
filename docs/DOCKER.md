@@ -227,7 +227,7 @@ Create single consolidated.parquet file for efficient storage:
 docker run --rm \
     -v $(pwd)/experiments:/app/experiments \
     cdouglas/endive-sim:latest \
-    python scripts/consolidate_all_experiments_incremental.py
+    python scripts/consolidate.py
 ```
 
 ## Troubleshooting

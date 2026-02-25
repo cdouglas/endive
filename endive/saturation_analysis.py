@@ -686,7 +686,7 @@ def build_experiment_index(base_dir: str, pattern: str) -> pd.DataFrame:
         print(f"Processing {exp_info['label']}-{exp_info['hash']}...", end='')
 
         # Use consolidated file if enabled, otherwise use individual files
-        use_consolidated = CONFIG.get('analysis', {}).get('use_consolidated', False)
+        use_consolidated = CONFIG.get('analysis', {}).get('use_consolidated', True)
         if use_consolidated:
             # Make consolidated path relative to base_dir
             consolidated_filename = CONFIG.get('paths', {}).get('consolidated_file', 'experiments/consolidated.parquet')

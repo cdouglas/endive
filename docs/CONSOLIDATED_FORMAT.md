@@ -154,7 +154,7 @@ Recreate consolidated file from scratch:
 
 ```bash
 # Incremental writing (low memory, ~22 minutes)
-python scripts/consolidate_all_experiments_incremental.py
+python scripts/consolidate.py
 
 # Output: experiments/consolidated.parquet (1.39 GB)
 # Memory: <2 GB peak
@@ -257,7 +257,7 @@ python -m endive.saturation_analysis --no-use-consolidated
 python scripts/verify_consolidation_efficient.py --sample 10
 
 # If corrupted, regenerate
-python scripts/consolidate_all_experiments_incremental.py
+python scripts/consolidate.py
 ```
 
 ### Mismatched Results
@@ -273,7 +273,7 @@ python scripts/test_consolidated_analysis.py --pattern "exp2_1_*" --sample 5
 
 Potential improvements to consolidated format:
 
-1. **Partitioning**: Partition by exp_name for even faster filtering
+1. ~~**Partitioning**: Partition by exp_name for even faster filtering~~ (done: `--partition` flag)
 2. **Columnar stats**: Pre-compute statistics per row group
 3. **Compression tuning**: Test ZSTD levels 1-9 for size/speed tradeoff
 4. **Delta updates**: Incrementally append new experiments
@@ -281,7 +281,7 @@ Potential improvements to consolidated format:
 
 ## References
 
-- **Implementation**: `scripts/consolidate_all_experiments_incremental.py`
+- **Implementation**: `scripts/consolidate.py`
 - **Analysis code**: `endive/saturation_analysis.py:load_and_aggregate_results_consolidated()`
 - **Verification**: `scripts/verify_consolidation_efficient.py`
 - **Testing**: `scripts/test_consolidated_analysis.py`

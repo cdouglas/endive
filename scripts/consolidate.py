@@ -6,12 +6,18 @@ This version processes experiments in batches and appends to the Parquet file
 incrementally, avoiding memory exhaustion.
 
 Includes optional verification to validate consolidated data matches originals.
+
+Supports two modes:
+- Single file (default): All experiments -> experiments/consolidated.parquet
+- Partitioned (--partition): One file per experiment label -> experiments/<label>.parquet
 """
 
 import argparse
 import random
 import shutil
 import sys
+from collections import defaultdict
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 from typing import List, Tuple
 
@@ -77,40 +83,9 @@ def discover_schema(experiments):
     raise ValueError("No results.parquet files found to discover schema")
 
 
-def consolidate_incremental(
-    base_dir: str = 'experiments',
-    output_path: str = 'experiments/consolidated.parquet',
-    batch_size: int = 50,
-    compression: str = 'zstd',
-    compression_level: int = 3,
-    destructive: bool = False
-):
-    """
-    Consolidate experiments incrementally to avoid memory exhaustion.
-
-    Processes experiments in batches and writes to temporary sorted files,
-    then merges them into final consolidated file.
-    """
-    print("=" * 80)
-    print("INCREMENTAL EXPERIMENT CONSOLIDATION")
-    print("=" * 80)
-    print(f"\nBase directory: {base_dir}")
-    print(f"Output file: {output_path}")
-    print(f"Batch size: {batch_size} experiments")
-    print(f"Compression: {compression} (level {compression_level})")
-    if destructive:
-        print(f"Mode: DESTRUCTIVE (experiment directories deleted after writing)")
-        print(f"\n  ⚠ WARNING: Original experiment files will be deleted as they are")
-        print(f"  consolidated. If this process is interrupted, any already-deleted")
-        print(f"  experiments will only exist in the partially-written consolidated file.")
-
-    # Find all experiments
-    print("\n" + "-" * 80)
-    print("PHASE 1: Scanning experiment directories")
-    print("-" * 80)
-
+def scan_experiments(base_dir: str):
+    """Scan base_dir for experiment directories. Returns list of (exp_name, exp_hash, exp_dir, seed_dirs)."""
     experiments = []
-    # Match directories with hash suffix (e.g., baseline_s3-abc123, exp2_1-def456)
     for exp_dir in sorted(Path(base_dir).glob('*-*')):
         if not exp_dir.is_dir():
             continue
@@ -128,25 +103,21 @@ def consolidate_incremental(
         if seed_dirs:
             experiments.append((exp_name, exp_hash, exp_dir, seed_dirs))
 
-    print(f"\nFound {len(experiments)} experiments")
-    total_seeds = sum(len(seeds) for _, _, _, seeds in experiments)
-    print(f"Total seeds: {total_seeds}")
+    return experiments
 
-    # Discover schema from first available results.parquet
-    schema = discover_schema(experiments)
 
-    # Process experiments in batches and write incrementally
-    print("\n" + "-" * 80)
-    print("PHASE 2: Processing and writing incrementally")
-    print("-" * 80)
+def _consolidate_experiments(experiments, output_path, schema, compression, compression_level, destructive):
+    """Consolidate a list of experiments into a single parquet file.
 
+    Returns (total_rows, deleted_dirs, deleted_bytes) or raises on error.
+    """
     writer = None
     total_rows = 0
     deleted_dirs = 0
     deleted_bytes = 0
 
     try:
-        for i, (exp_name, exp_hash, exp_dir, seed_dirs) in enumerate(tqdm(experiments, desc="Processing")):
+        for exp_name, exp_hash, exp_dir, seed_dirs in experiments:
             # Load config
             cfg_path = exp_dir / 'cfg.toml'
             if cfg_path.exists():
@@ -179,7 +150,6 @@ def consolidate_incremental(
                     df['config'] = [config_map] * len(df)
 
                     # Sort by t_submit only
-                    # Directory traversal order already provides exp_name, exp_hash, seed ordering
                     df = df.sort_values('t_submit')
 
                     # Convert to PyArrow table
@@ -215,33 +185,197 @@ def consolidate_incremental(
                 deleted_dirs += 1
                 deleted_bytes += dir_size
 
-        # Close writer
+    finally:
         if writer is not None:
             writer.close()
 
-        # Print summary
-        file_size = Path(output_path).stat().st_size
-        print("\n" + "=" * 80)
-        print("CONSOLIDATION COMPLETE")
-        print("=" * 80)
-        print(f"\nOutput file: {output_path}")
-        print(f"File size: {file_size / (1024**2):.1f} MB ({file_size / (1024**3):.2f} GB)")
-        print(f"Total rows: {total_rows:,}")
-        print(f"Experiments: {len(experiments)}")
-        print(f"Seeds: {total_seeds}")
-        if destructive:
-            print(f"\n✗ Deleted {deleted_dirs} experiment directories"
-                  f" ({deleted_bytes / (1024**2):.1f} MB freed)")
-        else:
-            print(f"\n✓ Original files PRESERVED (not deleted)")
+    return total_rows, deleted_dirs, deleted_bytes
 
+
+def _consolidate_group(args):
+    """Worker function for parallel partitioned consolidation.
+
+    Takes a tuple to work with ProcessPoolExecutor.map().
+    Returns (group_name, total_rows, deleted_dirs, deleted_bytes, output_path, error).
+    """
+    group_name, experiment_tuples, output_path, compression, compression_level, destructive = args
+
+    # Rebuild Path objects (can't pickle Path across processes reliably on all platforms)
+    experiments = []
+    for exp_name, exp_hash, exp_dir_str, seed_dir_strs in experiment_tuples:
+        experiments.append((exp_name, exp_hash, Path(exp_dir_str), [Path(s) for s in seed_dir_strs]))
+
+    try:
+        schema = discover_schema(experiments)
+        total_rows, deleted_dirs, deleted_bytes = _consolidate_experiments(
+            experiments, output_path, schema, compression, compression_level, destructive
+        )
+        return (group_name, total_rows, deleted_dirs, deleted_bytes, output_path, None)
+    except Exception as e:
+        return (group_name, 0, 0, 0, output_path, str(e))
+
+
+def consolidate_incremental(
+    base_dir: str = 'experiments',
+    output_path: str = 'experiments/consolidated.parquet',
+    batch_size: int = 50,
+    compression: str = 'zstd',
+    compression_level: int = 3,
+    destructive: bool = False
+):
+    """
+    Consolidate experiments incrementally to avoid memory exhaustion.
+
+    Processes experiments in batches and writes to temporary sorted files,
+    then merges them into final consolidated file.
+    """
+    print("=" * 80)
+    print("INCREMENTAL EXPERIMENT CONSOLIDATION")
+    print("=" * 80)
+    print(f"\nBase directory: {base_dir}")
+    print(f"Output file: {output_path}")
+    print(f"Batch size: {batch_size} experiments")
+    print(f"Compression: {compression} (level {compression_level})")
+    if destructive:
+        print(f"Mode: DESTRUCTIVE (experiment directories deleted after writing)")
+        print(f"\n  ⚠ WARNING: Original experiment files will be deleted as they are")
+        print(f"  consolidated. If this process is interrupted, any already-deleted")
+        print(f"  experiments will only exist in the partially-written consolidated file.")
+
+    # Find all experiments
+    print("\n" + "-" * 80)
+    print("PHASE 1: Scanning experiment directories")
+    print("-" * 80)
+
+    experiments = scan_experiments(base_dir)
+
+    print(f"\nFound {len(experiments)} experiments")
+    total_seeds = sum(len(seeds) for _, _, _, seeds in experiments)
+    print(f"Total seeds: {total_seeds}")
+
+    # Discover schema from first available results.parquet
+    schema = discover_schema(experiments)
+
+    # Process experiments and write incrementally
+    print("\n" + "-" * 80)
+    print("PHASE 2: Processing and writing incrementally")
+    print("-" * 80)
+
+    total_rows, deleted_dirs, deleted_bytes = _consolidate_experiments(
+        tqdm(experiments, desc="Processing"), output_path, schema, compression, compression_level, destructive
+    )
+
+    # Print summary
+    file_size = Path(output_path).stat().st_size
+    print("\n" + "=" * 80)
+    print("CONSOLIDATION COMPLETE")
+    print("=" * 80)
+    print(f"\nOutput file: {output_path}")
+    print(f"File size: {file_size / (1024**2):.1f} MB ({file_size / (1024**3):.2f} GB)")
+    print(f"Total rows: {total_rows:,}")
+    print(f"Experiments: {len(experiments)}")
+    print(f"Seeds: {total_seeds}")
+    if destructive:
+        print(f"\n✗ Deleted {deleted_dirs} experiment directories"
+              f" ({deleted_bytes / (1024**2):.1f} MB freed)")
+    else:
+        print(f"\n✓ Original files PRESERVED (not deleted)")
+
+    return True
+
+
+def consolidate_partitioned(
+    base_dir: str = 'experiments',
+    compression: str = 'zstd',
+    compression_level: int = 3,
+    destructive: bool = False,
+    max_workers: int = None
+):
+    """Consolidate experiments into per-label parquet files in parallel."""
+    print("=" * 80)
+    print("PARTITIONED EXPERIMENT CONSOLIDATION")
+    print("=" * 80)
+    print(f"\nBase directory: {base_dir}")
+    print(f"Compression: {compression} (level {compression_level})")
+    print(f"Max workers: {max_workers or 'auto'}")
+    if destructive:
+        print(f"Mode: DESTRUCTIVE (experiment directories deleted after writing)")
+
+    # Scan all experiments
+    print("\n" + "-" * 80)
+    print("PHASE 1: Scanning experiment directories")
+    print("-" * 80)
+
+    experiments = scan_experiments(base_dir)
+    print(f"\nFound {len(experiments)} experiments")
+    total_seeds = sum(len(seeds) for _, _, _, seeds in experiments)
+    print(f"Total seeds: {total_seeds}")
+
+    if not experiments:
+        print("No experiments found.")
         return True
 
-    except Exception as e:
-        print(f"\nERROR: {e}")
-        import traceback
-        traceback.print_exc()
-        return False
+    # Group by exp_name
+    groups = defaultdict(list)
+    for exp_name, exp_hash, exp_dir, seed_dirs in experiments:
+        groups[exp_name].append((exp_name, exp_hash, exp_dir, seed_dirs))
+
+    print(f"Groups: {len(groups)}")
+    for name in sorted(groups):
+        n_exp = len(groups[name])
+        n_seeds = sum(len(s) for _, _, _, s in groups[name])
+        print(f"  {name}: {n_exp} experiments, {n_seeds} seeds")
+
+    # Process groups in parallel
+    print("\n" + "-" * 80)
+    print("PHASE 2: Consolidating groups in parallel")
+    print("-" * 80)
+
+    # Build work items - convert Paths to strings for pickling
+    work_items = []
+    for group_name in sorted(groups):
+        output_path = str(Path(base_dir) / f"{group_name}.parquet")
+        experiment_tuples = [
+            (exp_name, exp_hash, str(exp_dir), [str(s) for s in seed_dirs])
+            for exp_name, exp_hash, exp_dir, seed_dirs in groups[group_name]
+        ]
+        work_items.append((group_name, experiment_tuples, output_path, compression, compression_level, destructive))
+
+    grand_total_rows = 0
+    grand_total_deleted = 0
+    grand_total_bytes = 0
+    failures = []
+
+    with ProcessPoolExecutor(max_workers=max_workers) as executor:
+        futures = {executor.submit(_consolidate_group, item): item[0] for item in work_items}
+
+        for future in tqdm(as_completed(futures), total=len(futures), desc="Groups"):
+            group_name, total_rows, deleted_dirs, deleted_bytes, output_path, error = future.result()
+            if error:
+                tqdm.write(f"  FAILED {group_name}: {error}")
+                failures.append(group_name)
+            else:
+                file_size = Path(output_path).stat().st_size
+                tqdm.write(f"  {group_name}: {total_rows:,} rows, {file_size / (1024**2):.1f} MB")
+                grand_total_rows += total_rows
+                grand_total_deleted += deleted_dirs
+                grand_total_bytes += deleted_bytes
+
+    # Summary
+    print("\n" + "=" * 80)
+    print("PARTITIONED CONSOLIDATION COMPLETE")
+    print("=" * 80)
+    print(f"\nGroups written: {len(groups) - len(failures)}/{len(groups)}")
+    print(f"Total rows: {grand_total_rows:,}")
+    if failures:
+        print(f"\nFailed groups: {', '.join(failures)}")
+    if destructive:
+        print(f"\n✗ Deleted {grand_total_deleted} experiment directories"
+              f" ({grand_total_bytes / (1024**2):.1f} MB freed)")
+    else:
+        print(f"\n✓ Original files PRESERVED (not deleted)")
+
+    return len(failures) == 0
 
 
 def verify_dataframes_match(original_df: pd.DataFrame, consolidated_df: pd.DataFrame,
@@ -274,10 +408,19 @@ def verify_dataframes_match(original_df: pd.DataFrame, consolidated_df: pd.DataF
     return True
 
 
+def _find_consolidated_path_for_experiment(base_dir, exp_name, partitioned):
+    """Find the consolidated parquet file containing a given experiment."""
+    if partitioned:
+        return str(Path(base_dir) / f"{exp_name}.parquet")
+    else:
+        return str(Path(base_dir) / "consolidated.parquet")
+
+
 def verify_consolidation(
     consolidated_path: str,
     base_dir: str = 'experiments',
-    sample_size: int = 20
+    sample_size: int = 20,
+    partitioned: bool = False
 ) -> Tuple[int, int]:
     """
     Verify consolidated data matches original files.
@@ -316,6 +459,14 @@ def verify_consolidation(
 
         exp_name, exp_hash = dir_name.rsplit('-', 1)
 
+        # Determine which consolidated file to read
+        lookup_path = _find_consolidated_path_for_experiment(base_dir, exp_name, partitioned)
+
+        if not Path(lookup_path).exists():
+            tqdm.write(f"  ❌ {exp_name}-{exp_hash}/{seed}: Consolidated file not found: {lookup_path}")
+            failed += 1
+            continue
+
         try:
             # Load original with same normalization as consolidation
             original_df = load_and_normalize_schema(str(file_path))
@@ -323,7 +474,7 @@ def verify_consolidation(
 
             # Load matching slice from consolidated using predicate pushdown
             consolidated_df = pd.read_parquet(
-                consolidated_path,
+                lookup_path,
                 filters=[
                     ('exp_name', '==', exp_name),
                     ('exp_hash', '==', exp_hash),
@@ -361,9 +512,10 @@ def verify_consolidation(
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Memory-efficient consolidation')
+    parser = argparse.ArgumentParser(description='Memory-efficient experiment consolidation')
     parser.add_argument('--base-dir', default='experiments')
-    parser.add_argument('--output', default='experiments/consolidated.parquet')
+    parser.add_argument('--output', default='experiments/consolidated.parquet',
+                        help='Output path for single-file mode (ignored with --partition)')
     parser.add_argument('--batch-size', type=int, default=50)
     parser.add_argument('--compression', default='zstd', choices=['zstd', 'snappy'])
     parser.add_argument('--compression-level', type=int, default=3)
@@ -376,6 +528,12 @@ def main():
     parser.add_argument('--destructive', action='store_true',
                         help='Delete experiment directories after writing to consolidated file. '
                              'Frees disk space incrementally but risks data loss if interrupted.')
+    parser.add_argument('--partition', action='store_true',
+                        help='Produce one consolidated parquet file per experiment label '
+                             '(e.g., experiments/exp1_fa_baseline.parquet) instead of a single file. '
+                             'Groups are processed in parallel.')
+    parser.add_argument('--max-workers', type=int, default=None,
+                        help='Max parallel workers for --partition mode (default: CPU count)')
 
     args = parser.parse_args()
 
@@ -385,14 +543,48 @@ def main():
 
     # Verify-only mode
     if args.verify_only:
-        passed, failed = verify_consolidation(
-            args.output,
-            args.base_dir,
-            args.verify_sample
-        )
+        if args.partition:
+            # Verify all partitioned files
+            passed, failed = verify_consolidation(
+                None,  # not used in partitioned mode
+                args.base_dir,
+                args.verify_sample,
+                partitioned=True
+            )
+        else:
+            passed, failed = verify_consolidation(
+                args.output,
+                args.base_dir,
+                args.verify_sample
+            )
         sys.exit(0 if failed == 0 else 1)
 
-    # Normal consolidation
+    # Partitioned consolidation
+    if args.partition:
+        success = consolidate_partitioned(
+            base_dir=args.base_dir,
+            compression=args.compression,
+            compression_level=args.compression_level,
+            destructive=args.destructive,
+            max_workers=args.max_workers
+        )
+
+        if not success:
+            sys.exit(1)
+
+        if args.verify:
+            passed, failed = verify_consolidation(
+                None,
+                args.base_dir,
+                args.verify_sample,
+                partitioned=True
+            )
+            if failed > 0:
+                sys.exit(1)
+
+        sys.exit(0)
+
+    # Normal single-file consolidation
     success = consolidate_incremental(
         base_dir=args.base_dir,
         output_path=args.output,

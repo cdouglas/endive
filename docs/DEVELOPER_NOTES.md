@@ -24,7 +24,7 @@ scripts/
 ├── prepare_missing_experiments.sh   # Creates bundle with seed-specific configs
 ├── run_experiments.sh              # Auto-generated, runs batch in parallel
 ├── merge_experiment_results.sh     # Merges results back to experiments/
-└── consolidate_all_experiments_incremental.py  # Creates consolidated.parquet
+└── consolidate.py                             # Creates consolidated.parquet
 
 tests/
 └── test_saturation_analysis.py     # 36 tests for analysis pipeline

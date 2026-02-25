@@ -75,7 +75,7 @@ python -m endive.saturation_analysis -i experiments -p "exp1_fa_baseline-*" -o p
 python -m endive.saturation_analysis -i experiments -p "exp2_mix_heatmap-*" -o plots/exp2_mix_heatmap --group-by fast_append_ratio
 
 # Consolidate results (reduces storage by ~60% with compression)
-python scripts/consolidate_all_experiments_incremental.py
+python scripts/consolidate.py
 ```
 
 ### Docker
@@ -200,7 +200,7 @@ For batch experiments, use `run_all_experiments.py` which handles config variant
 - Single parquet file with all experiments: `experiments/consolidated.parquet`
 - Uses predicate pushdown for efficient filtering (memory efficiency, not speed)
 - Falls back to individual files if consolidated doesn't exist
-- Regenerate with: `python scripts/consolidate_all_experiments_incremental.py`
+- Regenerate with: `python scripts/consolidate.py`
 
 ### Analysis Pipeline Flow
 
