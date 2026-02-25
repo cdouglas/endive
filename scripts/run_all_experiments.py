@@ -269,7 +269,7 @@ def run_single_experiment(run: ExperimentRun, duration_ms: Optional[int] = None)
                 ["python", "-m", "endive.main", str(config_path), "--yes"],
                 capture_output=True,
                 text=True,
-                timeout=7200  # 2 hour timeout
+                timeout=14400  # 4 hour timeout
             )
 
             success = result.returncode == 0
