@@ -215,9 +215,9 @@ def process_config(config_path: Path, plotting_defaults: dict,
         overrides = {k: v for k, v in graph.items() if k != "type"}
         merged = {**defaults, **overrides}
 
-        # Handle per-graph filters
+        # Handle per-graph filters for index-based graphs
         graph_index_df = index_df
-        if "filters" in merged and graph_index_df is not None:
+        if "filters" in merged and graph_index_df is not None and pipeline == "index":
             graph_index_df = sa.apply_filters(graph_index_df, merged.pop("filters"))
 
         # Determine output suffix for filtered views

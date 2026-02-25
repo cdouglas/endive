@@ -1942,9 +1942,15 @@ def apply_filters(df: pd.DataFrame, filter_expressions: List[str]) -> pd.DataFra
 # ---------------------------------------------------------------------------
 
 def _extract_heatmap_params(experiments_dir: str, pattern: str,
-                            x_param: str, y_param: str) -> pd.DataFrame:
-    """Extract parameters for heatmap from experiment directories and consolidated."""
+                            x_param: str, y_param: str,
+                            extra_params: list = None) -> pd.DataFrame:
+    """Extract parameters for heatmap from experiment directories and consolidated.
+
+    Args:
+        extra_params: Additional parameter names to extract (e.g. for filtering).
+    """
     import tomli
+    extra_params = extra_params or []
     records = []
     seen_keys = set()
 
@@ -1964,12 +1970,15 @@ def _extract_heatmap_params(experiments_dir: str, pattern: str,
             continue
 
         seed_dirs = [d for d in exp_dir.iterdir() if d.is_dir() and d.name.isdigit()]
-        records.append({
+        record = {
             "exp_dir": str(exp_dir),
             x_param: x_val,
             y_param: y_val,
             "num_seeds": len(seed_dirs),
-        })
+        }
+        for ep in extra_params:
+            record[ep] = _extract_param_value(cfg, ep)
+        records.append(record)
         seen_keys.add(exp_dir.name)
 
     # Augment with consolidated-only experiments
@@ -1983,14 +1992,17 @@ def _extract_heatmap_params(experiments_dir: str, pattern: str,
             y_val = _extract_param_value(cfg, y_param)
             if x_val is None or y_val is None:
                 continue
-            records.append({
+            record = {
                 "exp_dir": None,
                 x_param: x_val,
                 y_param: y_val,
                 "num_seeds": len(exp_info['seeds']),
                 "_exp_label": exp_info['label'],
                 "_exp_hash": exp_info['hash'],
-            })
+            }
+            for ep in extra_params:
+                record[ep] = _extract_param_value(cfg, ep)
+            records.append(record)
 
     return pd.DataFrame(records)
 
@@ -2198,12 +2210,31 @@ def generate_heatmap_plots(base_dir: str, pattern: str, output_dir: str,
     cmap = config.get("cmap", "viridis")
     fmt = config.get("fmt", ".1f")
     dpi = config.get("dpi", 300)
+    filters = config.get("filters", [])
+
+    # Determine extra params needed for filtering
+    extra_params = []
+    for f in filters:
+        param_name, _, _ = parse_filter_expression(f)
+        if param_name not in (x_param, y_param) and param_name not in extra_params:
+            extra_params.append(param_name)
 
     print(f"Generating heatmaps for {pattern}...")
-    params_df = _extract_heatmap_params(base_dir, pattern, x_param, y_param)
+    params_df = _extract_heatmap_params(base_dir, pattern, x_param, y_param,
+                                        extra_params=extra_params)
     if len(params_df) == 0:
         print(f"  No experiments found matching {pattern}")
         return
+
+    if filters:
+        params_df = apply_filters(params_df, filters)
+        if len(params_df) == 0:
+            print(f"  No experiments remain after filtering")
+            return
+        # Drop extra filter columns before passing to _load_heatmap_results
+        drop_cols = [c for c in extra_params if c in params_df.columns]
+        if drop_cols:
+            params_df = params_df.drop(columns=drop_cols)
 
     results_df = _load_heatmap_results(params_df, x_param, y_param)
     if len(results_df) == 0:

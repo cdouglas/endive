@@ -78,12 +78,59 @@ x_param = "num_tables"
 y_param = "inter_arrival_scale"
 metrics = ["success_rate", "throughput", "mean_latency", "p99_latency"]
 per_type_metrics = ["success_rate", "mean_latency"]
-# One heatmap per catalog latency (filtered externally)
+filters = ["catalog_service_latency_ms==1.0"]
+output_suffix = "cas_1ms"
+
+[[plots.graphs]]
+type = "heatmap"
+x_param = "num_tables"
+y_param = "inter_arrival_scale"
+metrics = ["success_rate", "throughput", "mean_latency", "p99_latency"]
+per_type_metrics = ["success_rate", "mean_latency"]
+filters = ["catalog_service_latency_ms==10.0"]
+output_suffix = "cas_10ms"
+
+[[plots.graphs]]
+type = "heatmap"
+x_param = "num_tables"
+y_param = "inter_arrival_scale"
+metrics = ["success_rate", "throughput", "mean_latency", "p99_latency"]
+per_type_metrics = ["success_rate", "mean_latency"]
+filters = ["catalog_service_latency_ms==50.0"]
+output_suffix = "cas_50ms"
+
+[[plots.graphs]]
+type = "heatmap"
+x_param = "num_tables"
+y_param = "inter_arrival_scale"
+metrics = ["success_rate", "throughput", "mean_latency", "p99_latency"]
+per_type_metrics = ["success_rate", "mean_latency"]
+filters = ["catalog_service_latency_ms==120.0"]
+output_suffix = "cas_120ms"
 
 [[plots.graphs]]
 type = "latency_vs_throughput"
 group_by = "num_tables"
-# One plot per catalog latency (filtered externally)
+filters = ["catalog_service_latency_ms==1.0"]
+output_suffix = "cas_1ms"
+
+[[plots.graphs]]
+type = "latency_vs_throughput"
+group_by = "num_tables"
+filters = ["catalog_service_latency_ms==10.0"]
+output_suffix = "cas_10ms"
+
+[[plots.graphs]]
+type = "latency_vs_throughput"
+group_by = "num_tables"
+filters = ["catalog_service_latency_ms==50.0"]
+output_suffix = "cas_50ms"
+
+[[plots.graphs]]
+type = "latency_vs_throughput"
+group_by = "num_tables"
+filters = ["catalog_service_latency_ms==120.0"]
+output_suffix = "cas_120ms"
 
 [[plots.graphs]]
 type = "operation_types"
