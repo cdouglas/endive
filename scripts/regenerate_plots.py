@@ -289,7 +289,12 @@ def process_config(config_path: Path, plotting_defaults: dict,
 def _process_config_wrapper(args):
     """Wrapper for ProcessPoolExecutor (must be picklable)."""
     config_path, plotting_defaults, input_dir = args
-    return process_config(config_path, plotting_defaults, input_dir)
+    try:
+        return process_config(config_path, plotting_defaults, input_dir)
+    except Exception as e:
+        label = Path(config_path).stem
+        return {"config": str(config_path), "label": label,
+                "status": "error", "reason": str(e), "graphs": []}
 
 
 def main():
@@ -333,12 +338,18 @@ def main():
             process_config(config_path, plotting_defaults, args.input_dir, dry_run=True)
         return
 
-    # Process configs (sequentially for now — each config can be I/O heavy)
-    # Parallelism is within-config if needed
     results = []
-    for config_path in configs:
-        result = process_config(config_path, plotting_defaults, args.input_dir)
-        results.append(result)
+    if args.parallel > 1 and len(configs) > 1:
+        tasks = [(c, plotting_defaults, args.input_dir) for c in configs]
+        with ProcessPoolExecutor(max_workers=args.parallel) as pool:
+            futures = {pool.submit(_process_config_wrapper, t): t[0] for t in tasks}
+            for future in as_completed(futures):
+                results.append(future.result())
+        # Sort by label for deterministic summary output
+        results.sort(key=lambda r: r.get("label", ""))
+    else:
+        for config_path in configs:
+            results.append(process_config(config_path, plotting_defaults, args.input_dir))
 
     # Summary
     print(f"\n{'='*60}")
@@ -349,6 +360,8 @@ def main():
         status = r.get("status", "?")
         if status == "skipped":
             print(f"  {label}: SKIPPED ({r.get('reason', '')})")
+        elif status == "error":
+            print(f"  {label}: ERROR ({r.get('reason', '')})")
         else:
             graphs = r.get("graphs", [])
             ok = sum(1 for g in graphs if g.get("status") == "ok")
