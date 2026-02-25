@@ -3,188 +3,257 @@
 Experiments 4a and 4b sweep num_tables (1-50), catalog CAS latency (1-120ms),
 and arrival rate on a single-file catalog (num_groups=1). Exp4a uses 100%
 FastAppend; exp4b uses 90% FA / 10% ValidatedOverwrite. S3 storage, zero real
-conflict probability. 5 seeds per point, 1200 runs per config.
+conflict probability. 5 seeds per point, 1200 runs per config (480 total
+experiment directories).
+
+These experiments ran after commit 7da2c84, which fixed cross-table CAS retry
+cost: when a CAS failure is caused by a commit to a different table, the retry
+skips per-attempt I/O (manifest list read/write) and just re-reads the catalog
+and re-CAS.
 
 ## The question
 
-Does adding more tables to a single-file catalog increase contention on the
-shared global `seq` pointer?
+Does adding more tables to a single-file catalog increase or decrease
+contention on the shared global `seq` pointer?
 
-The hypothesis from EXP3_REPORT.md predicted that at moderate load levels where
-exp3 shows eta-sq ~ 0 for catalog latency, adding enough tables would push
-eta-sq back toward 1 — because the aggregate commit rate on the shared seq
-grows with num_tables.
+## Result: num_tables dramatically reduces contention
 
-## Result: num_tables has zero effect
+Adding tables from 1 to 50 produces up to 6x throughput improvement at high
+load. The mechanism is cross-table retry cost: with more tables, CAS failures
+are more likely to be cross-table (non-overlapping), making retries cheap.
 
-**The hypothesis is falsified.** Adding tables from 1 to 50 produces no
-measurable change in throughput, success rate, or latency at any operating point.
+### Throughput
 
-### Evidence
+Throughput (commits/sec) at CAS=1ms, exp4a (100% FA):
 
-Throughput (commits/sec) at catalog_latency=1ms, exp4a (100% FA):
+| Load \ Tables | 1    | 2     | 5     | 10    | 20    | 50    |
+|---------------|------|-------|-------|-------|-------|-------|
+| 20ms          | 6.54 | 12.46 | 28.84 | 38.89 | 39.38 | 39.42 |
+| 50ms          | 6.20 | 11.57 | 15.72 | 15.75 | 15.72 | 15.74 |
+| 100ms         | 5.84 |  7.81 |  7.89 |  7.88 |  7.85 |  7.88 |
+| 200ms         | 3.92 |  3.95 |  3.94 |  3.94 |  3.96 |  3.94 |
+| 500ms         | 1.58 |  1.58 |  1.58 |  1.58 |  1.58 |  1.58 |
 
-| Load \ Tables | 1    | 2    | 5    | 10   | 20   | 50   |
-|---------------|------|------|------|------|------|------|
-| 20ms          | 6.78 | 6.77 | 6.78 | 6.78 | 6.78 | 6.78 |
-| 100ms         | 5.91 | 5.91 | 5.91 | 5.90 | 5.91 | 5.90 |
-| 200ms         | 3.86 | 3.85 | 3.85 | 3.86 | 3.85 | 3.86 |
-| 500ms         | 1.55 | 1.56 | 1.55 | 1.54 | 1.54 | 1.54 |
+At ias=20ms, throughput scales from 6.54 (1 table) to 39.42 (50 tables) - a
+6.0x improvement. The arrival-rate ceiling is 1000/20 = 50 txn/s, so 50 tables
+reaches 79% of theoretical maximum. By ias=200ms, the effect disappears.
 
-Throughput at catalog_latency=120ms, exp4a:
-
-| Load \ Tables | 1    | 2    | 5    | 10   | 20   | 50   |
-|---------------|------|------|------|------|------|------|
-| 20ms          | 3.75 | 3.75 | 3.75 | 3.75 | 3.75 | 3.75 |
-| 100ms         | 3.52 | 3.52 | 3.52 | 3.52 | 3.52 | 3.52 |
-| 200ms         | 3.20 | 3.20 | 3.20 | 3.20 | 3.20 | 3.20 |
-| 500ms         | 1.55 | 1.56 | 1.54 | 1.55 | 1.55 | 1.55 |
-
-Every row is constant across 1-50 tables, within seed-to-seed noise (<0.02 c/s).
-
-Success rate at catalog_latency=120ms, exp4b (90/10 mix):
+Throughput at CAS=120ms, exp4a:
 
 | Load \ Tables | 1    | 2    | 5    | 10   | 20   | 50   |
 |---------------|------|------|------|------|------|------|
-| 20ms          | 9.7  | 9.7  | 9.7  | 9.7  | 9.7  | 9.7  |
-| 100ms         | 45.3 | 45.2 | 45.3 | 45.3 | 45.3 | 45.3 |
-| 200ms         | 81.2 | 81.0 | 81.1 | 80.9 | 81.0 | 80.8 |
-| 500ms         | 99.7 | 99.8 | 99.6 | 99.7 | 99.7 | 99.7 |
+| 20ms          | 3.63 | 4.14 | 7.52 | 7.75 | 7.81 | 7.83 |
+| 50ms          | 3.55 | 4.06 | 6.99 | 7.38 | 7.48 | 7.53 |
+| 100ms         | 3.40 | 3.93 | 5.83 | 6.27 | 6.36 | 6.37 |
+| 200ms         | 2.89 | 3.34 | 3.80 | 3.87 | 3.88 | 3.87 |
+| 500ms         | 1.57 | 1.57 | 1.58 | 1.58 | 1.59 | 1.59 |
 
-### Eta-squared confirms the null
+At CAS=120ms, the improvement is 2.2x (3.63 to 7.83). The catalog service
+itself imposes a throughput ceiling of ~7.8 c/s at the heaviest loads. Even
+with 50 tables eliminating cross-table retry cost, each CAS attempt still
+takes 120ms, limiting total throughput.
 
-One-way ANOVA for num_tables at each (catalog_latency, load) cell:
+### Success rate
 
-Every eta-squared value for num_tables is non-significant. Representative
-values at catalog_latency=1ms (exp4a):
+Success rate (%) at CAS=1ms, exp4a:
 
-| Load (ms) | num_tables eta-sq | Significance |
-|-----------|-------------------|--------------|
-| 20        | 0.172             | ns           |
-| 100       | 0.330             | ns           |
-| 200       | 0.114             | ns           |
-| 500       | 0.357             | ns           |
-| 1000      | 0.170             | ns           |
+| Load \ Tables | 1    | 2    | 5    | 10   | 20    | 50    |
+|---------------|------|------|------|------|-------|-------|
+| 20ms          | 16.6 | 31.7 | 73.4 | 98.9 | 100.0 | 100.0 |
+| 50ms          | 39.3 | 73.4 | 99.8 | 100  | 100   | 100   |
+| 100ms         | 74.2 | 99.1 | 100  | 100  | 100   | 100   |
+| 200ms         | 99.2 | 100  | 100  | 100  | 100   | 100   |
 
-The few nominally "significant" cells (e.g., load=5000ms at cat=1ms, p < .01,
-eta-sq=0.457) are spurious — the absolute throughput differences are <0.01 c/s,
-and the signal comes from tiny seed-to-seed variance at very low throughput
-making any noise look proportionally large.
+At 1 table and ias=20ms, only 16.6% of transactions commit. At 10 tables,
+98.9% commit. At 20+ tables, 100%.
 
-### Two-way ANOVA: catalog latency dominates everywhere
+Success rate (%) at CAS=120ms, exp4a:
 
-Partial eta-squared from two-way ANOVA (catalog_latency x num_tables) at each load:
+| Load \ Tables | 1    | 2    | 5    | 10   | 20   | 50   |
+|---------------|------|------|------|------|------|------|
+| 20ms          |  9.2 | 10.5 | 19.1 | 19.7 | 19.9 | 19.9 |
+| 100ms         | 43.2 | 49.7 | 74.3 | 79.5 | 80.9 | 80.9 |
+| 200ms         | 73.4 | 85.2 | 96.8 | 98.3 | 98.6 | 98.5 |
+| 500ms         | 99.5 | 99.9 | 100  | 100  | 100  | 100  |
 
-**Exp4a (100% FastAppend):**
+At CAS=120ms and ias=20ms, even 50 tables only reaches 19.9% success. The
+120ms CAS round-trip consumes most of the retry budget regardless of how cheap
+the retry itself is.
 
-| Load (ms) | Catalog lat. partial eta | num_tables partial eta |
-|-----------|-------------------------|----------------------|
-| 20        | 1.000                   | 0.019                |
-| 50        | 1.000                   | 0.024                |
-| 100       | 1.000                   | 0.079                |
-| 200       | 0.997                   | 0.022                |
-| 300       | 0.705                   | 0.052                |
-| 400       | 0.032                   | 0.069                |
-| 500       | 0.006                   | 0.069                |
-| 1000      | 0.029                   | 0.042                |
+### Retries
 
-**Exp4b (90/10 FA/VO mix):**
+Mean retries at CAS=1ms, exp4a:
 
-| Load (ms) | Catalog lat. partial eta | num_tables partial eta |
-|-----------|-------------------------|----------------------|
-| 20        | 1.000                   | 0.016                |
-| 50        | 1.000                   | 0.015                |
-| 100       | 1.000                   | 0.032                |
-| 200       | 0.996                   | 0.104                |
-| 300       | 0.886                   | 0.026                |
-| 400       | 0.328                   | 0.025                |
-| 500       | 0.044                   | 0.025                |
-| 1000      | 0.010                   | 0.031                |
+| Load \ Tables | 1    | 2    | 5    | 10   | 20   | 50   |
+|---------------|------|------|------|------|------|------|
+| 20ms          | 9.18 | 8.61 | 6.76 | 3.59 | 2.50 | 2.19 |
+| 50ms          | 8.02 | 6.69 | 2.93 | 2.27 | 2.08 | 1.98 |
+| 100ms         | 6.23 | 3.16 | 2.02 | 1.84 | 1.77 | 1.74 |
+| 200ms         | 2.56 | 1.76 | 1.55 | 1.50 | 1.48 | 1.46 |
 
-At every load level, catalog latency partial eta-squared dominates num_tables
-partial eta-squared. The num_tables column never exceeds 0.10.
+At 1 table and ias=20ms, transactions average 9.18 retries (near the retry
+limit of 10). At 50 tables, only 2.19 retries. The retry count reflects the
+probability of same-table conflicts: with 50 tables, each CAS failure has a
+1/50 chance of hitting the same table.
 
-The catalog latency transition matches exp3 exactly: eta-sq ~ 1 at load <= 200ms,
-crossing to ~0 at load >= 500ms (exp4a) or >= 400ms (exp4b).
+Mean retries at CAS=120ms, exp4a:
 
-## Why the null result?
+| Load \ Tables | 1    | 2    | 5    | 10   | 20   | 50   |
+|---------------|------|------|------|------|------|------|
+| 20ms          | 9.58 | 9.52 | 9.23 | 9.19 | 9.19 | 9.20 |
+| 100ms         | 7.83 | 7.62 | 6.27 | 5.86 | 5.69 | 5.60 |
+| 200ms         | 5.59 | 4.83 | 3.59 | 3.25 | 3.10 | 3.04 |
 
-Two compounding reasons:
+At CAS=120ms and ias=20ms, retry count barely changes with table count (9.58
+to 9.20). The 120ms CAS latency means each retry takes so long that
+transactions exhaust their retry budget before the cheaper retry cost can help.
+At ias=100ms the reduction is more visible (7.83 to 5.60).
 
-### 1. Global arrival rate, not per-table
+## ANOVA
 
-`inter_arrival.scale` controls the **global** arrival rate, not the per-table
-rate. With num_tables=50 and inter_arrival=100ms, the same 10 transactions/sec
-are spread across 50 tables (0.2/sec each). Adding tables dilutes per-table
-contention without changing aggregate CAS contention.
+### One-way: num_tables effect on throughput
 
-### 2. Cross-table retries are incorrectly expensive (modeling bug)
+| CAS (ms) | Load (ms) | F         | p         | eta-sq |
+|-----------|-----------|-----------|-----------|--------|
+| 1         | 20        | 363,665   | 1.0e-57   | 1.0000 |
+| 1         | 50        | 48,441    | 3.3e-47   | 0.9999 |
+| 1         | 100       | 3,863     | 4.8e-34   | 0.9988 |
+| 1         | 200       | 2.1       | 9.9e-02   | 0.3052 |
+| 1         | 500       | 0.2       | 9.5e-01   | 0.0422 |
+| 120       | 20        | 135,965   | 1.4e-52   | 1.0000 |
+| 120       | 50        | 89,699    | 2.0e-50   | 0.9999 |
+| 120       | 100       | 39,775    | 3.5e-46   | 0.9999 |
+| 120       | 200       | 4,259     | 1.5e-34   | 0.9989 |
+| 120       | 500       | 1.5       | 2.2e-01   | 0.2395 |
 
-Even with the same aggregate CAS failure rate, more tables should help: with
-50 tables, 49/50 CAS failures are cross-table and should be nearly free to
-retry (just re-read catalog + re-CAS). Only 1/50 same-table failures need
-manifest I/O.
+At CAS=1ms, the effect is significant through ias=100ms (eta-sq > 0.99). At
+CAS=120ms, significance extends through ias=200ms. Beyond ias=200-500ms, load
+is low enough that contention disappears regardless of table count.
 
-However, the simulator charges full per-attempt I/O cost (1 ML read + 1 MF
-write + 1 ML write, ~160ms on S3) on every retry regardless of whether the
-conflicting commit touched the same table. This masks the benefit of table
-diversity. See endive-s5j and SPEC.md §3.3.
+### Two-way partial eta-sq: catalog_latency x num_tables
 
-With both issues, num_tables has zero observed effect. Fixing the modeling
-bug alone would show some benefit (cheaper retries with more tables), but
-the full multi-tenant scenario also requires fixing the arrival rate.
+Exp4a (100% FastAppend):
 
-## What would be needed to test the hypothesis
+| Load (ms) | cat_lat partial eta-sq | num_tables partial eta-sq |
+|-----------|------------------------|---------------------------|
+| 20        | 1.0000                 | 1.0000                    |
+| 50        | 0.9999                 | 0.9999                    |
+| 100       | 0.9994                 | 0.9996                    |
+| 200       | 0.9848                 | 0.9867                    |
+| 300       | 0.6815                 | 0.6965                    |
+| 400       | 0.1226                 | 0.1175                    |
+| 500       | 0.0609                 | 0.0177                    |
 
-### Fix 1: Cross-table retry cost (endive-s5j)
+Exp4b (90/10 FA/VO mix):
 
-After CAS failure, check whether intervening commits overlap with this
-transaction's tables/partitions. If no overlap (cross-table or disjoint
-partitions), skip manifest I/O and just re-CAS. SPEC.md has been updated
-with the corrected commit loop (§3.2-3.3).
+| Load (ms) | cat_lat partial eta-sq | num_tables partial eta-sq |
+|-----------|------------------------|---------------------------|
+| 20        | 1.0000                 | 1.0000                    |
+| 50        | 0.9999                 | 0.9999                    |
+| 100       | 0.9995                 | 0.9997                    |
+| 200       | 0.9839                 | 0.9904                    |
+| 300       | 0.7470                 | 0.8419                    |
+| 400       | 0.1839                 | 0.3588                    |
+| 500       | 0.0468                 | 0.0826                    |
 
-### Fix 2: Per-table arrival rate
+Both factors have approximately equal explanatory power at every load level.
+This is the key finding relative to exp3: the earlier experiment (which had a
+modeling bug making cross-table retries expensive) showed num_tables partial
+eta-sq near zero at all loads. With the fix, num_tables is as important as
+catalog latency.
 
-To model N independent writer streams on a shared catalog, scale the total
-arrival rate proportionally to num_tables:
+In exp4b, num_tables has slightly higher partial eta-sq than catalog latency at
+ias=300-400ms. ValidatedOverwrite operations are more sensitive to table count
+because their retry cost is higher (manifest reads + writes), so the savings
+from skipping that I/O on cross-table retries is proportionally larger.
 
-    effective_inter_arrival = base_inter_arrival / num_tables
+## Per-operation-type breakdown (exp4b)
 
-With 50 tables and base_inter_arrival=100ms, the effective rate would be
-50 * 10/sec = 500 transactions/sec. This requires either:
+ValidatedOverwrite success rate (%) at CAS=1ms:
 
-1. **A per-table arrival rate parameter** in the workload generator, or
-2. **Scaling the sweep**: For each num_tables value, divide inter_arrival.scale
-   by num_tables in the experiment runner
+| Load \ Tables | 1    | 2    | 5    | 10   | 20   | 50   |
+|---------------|------|------|------|------|------|------|
+| 20ms          | 0.0  | 0.0  | 0.0  | 0.0  | 0.0  | 0.0  |
+| 50ms          | 0.0  | 0.0  | 0.0  | 0.2  | 0.8  | 4.4  |
+| 100ms         | 1.8  | 23.6 | 61.2 | 80.9 | 91.8 | 98.5 |
+| 200ms         | 67.1 | 95.7 | 100  | 100  | 100  | 100  |
 
-Option 2 is simpler and doesn't require simulator changes:
+VO is far more fragile than FA at every operating point. At ias=50ms, even 50
+tables only achieves 4.4% VO success. At ias=100ms, 50 tables reaches 98.5%
+while 1 table is at 1.8%. The 50x improvement from table diversity is much
+larger for VO than for FA (which goes from 80.5% to 100% at the same point).
 
-```python
-params = {
-    "catalog.num_tables": num_t,
-    "catalog.service.latency_ms": cat_latency,
-    "inter_arrival.scale": float(load) / num_t,  # per-table rate
-}
-```
+ValidatedOverwrite success rate (%) at CAS=120ms:
 
-## Catalog latency effect confirmed
+| Load \ Tables | 1    | 2    | 5    | 10   | 20   | 50   |
+|---------------|------|------|------|------|------|------|
+| 20ms          | 0.0  | 0.0  | 0.1  | 3.4  | 7.5  | 11.0 |
+| 100ms         | 0.4  | 4.3  | 27.1 | 48.7 | 59.9 | 68.1 |
+| 200ms         | 19.7 | 40.6 | 85.1 | 93.6 | 95.5 | 96.6 |
+| 500ms         | 91.7 | 99.2 | 100  | 100  | 100  | 100  |
 
-Despite the null result for num_tables, exp4 provides additional confirmation of
-the exp3 findings with much larger sample sizes (6x more data at each
-catalog_latency x load point due to pooling across num_tables).
+At CAS=120ms and ias=100ms, VO success goes from 0.4% (1 table) to 68.1%
+(50 tables). The corresponding FA success goes from 47.5% to 82.1%. VO
+benefits more from table diversity in both absolute and relative terms.
 
-One-way ANOVA eta-squared for catalog_latency (pooled across all num_tables):
+## Why num_tables helps
 
-| Load (ms) | Exp4a eta-sq | Exp4b eta-sq (approx) |
-|-----------|-------------|----------------------|
-| 20        | 1.000       | 1.000                |
-| 50        | 1.000       | 1.000                |
-| 100       | 1.000       | 1.000                |
-| 200       | 0.997       | 0.996                |
-| 300       | 0.694       | 0.886                |
-| 400       | 0.030       | 0.328                |
-| 500       | 0.006       | 0.044                |
-| 1000      | 0.028       | 0.010                |
+### Cross-table retry savings
 
-These match exp3 within expected variation, confirming the contention amplifier
-mechanism is robust.
+With N tables and uniform random table selection, a CAS failure caused by a
+commit to a different table (probability (N-1)/N) skips manifest I/O on retry.
+On S3, this saves ~160ms per retry (1 ML read + 1 MF write + 1 ML write). At
+N=50, 98% of CAS failures are cross-table and nearly free.
+
+The effect is visible in the retry data: at CAS=1ms and ias=20ms, mean retries
+drop from 9.18 (1 table) to 2.19 (50 tables). The retries themselves are
+cheaper, so more transactions complete within their retry budget.
+
+### Saturation behavior
+
+The benefit saturates around 10-20 tables at CAS=1ms because the throughput
+ceiling is set by the arrival rate. At ias=20ms, the theoretical maximum is 50
+txn/s. With 10 tables, the system already reaches 38.89 c/s (78% of max),
+leaving little room for improvement.
+
+At CAS=120ms, the benefit saturates later (around 5-10 tables) and at a lower
+throughput ceiling (~7.8 c/s). The CAS round-trip itself becomes the
+bottleneck: even if every retry is free, a transaction that needs 9 retries at
+120ms each takes over a second just for CAS attempts.
+
+### Catalog latency interaction
+
+The two factors interact multiplicatively. Low CAS + many tables: retries are
+cheap AND fast, so nearly everything commits. High CAS + few tables: retries
+are expensive AND slow, so most transactions exhaust their retry budget.
+
+The intermediate regimes are where the distinction matters for system design:
+- CAS=50ms, 5 tables, ias=50ms: 12.05 c/s, compared to 4.75 c/s at 1 table
+- CAS=50ms, 10 tables, ias=50ms: 13.58 c/s (diminishing returns beyond 5)
+
+## Design implications
+
+1. **Single-file catalog contention is table-count-dependent.** The original
+   hypothesis (more tables = more contention) was backwards. With the correct
+   cross-table retry semantics, more tables means cheaper retries and higher
+   throughput.
+
+2. **The benefit caps at 5-20 tables** depending on catalog latency and load.
+   Beyond this, nearly all CAS failures are already cross-table.
+
+3. **VO is the bottleneck in mixed workloads.** At every operating point, VO
+   success is lower than FA. Table diversity helps VO more than FA, but VO
+   still fails catastrophically at high load (0% success at ias <= 50ms
+   regardless of table count at CAS=1ms).
+
+4. **Catalog service latency sets a hard ceiling.** At CAS=120ms, no amount of
+   table diversity pushes throughput past ~7.8 c/s. Fast catalog implementations
+   (CAS < 10ms) are necessary to realize the full benefit of multi-table
+   deployments.
+
+5. **The arrival rate in these experiments is global, not per-table.** With 50
+   tables and ias=20ms, each table sees only 1 txn/s on average. A per-table
+   arrival rate (effective_ias = base_ias / num_tables) would be needed to
+   model N independent writer streams sharing a catalog. That experiment would
+   test whether the cross-table savings keep up as aggregate load scales with
+   table count.
