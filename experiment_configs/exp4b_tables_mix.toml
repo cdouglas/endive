@@ -79,6 +79,7 @@ y_param = "num_tables"
 metrics = ["success_rate", "throughput", "mean_latency", "p99_latency"]
 per_type_metrics = ["success_rate", "mean_latency"]
 filters = ["catalog_service_latency_ms==1.0"]
+title_suffix = " (CAS=1ms)"
 output_suffix = "cas_1ms"
 
 [[plots.graphs]]
@@ -88,6 +89,7 @@ y_param = "num_tables"
 metrics = ["success_rate", "throughput", "mean_latency", "p99_latency"]
 per_type_metrics = ["success_rate", "mean_latency"]
 filters = ["catalog_service_latency_ms==10.0"]
+title_suffix = " (CAS=10ms)"
 output_suffix = "cas_10ms"
 
 [[plots.graphs]]
@@ -97,6 +99,7 @@ y_param = "num_tables"
 metrics = ["success_rate", "throughput", "mean_latency", "p99_latency"]
 per_type_metrics = ["success_rate", "mean_latency"]
 filters = ["catalog_service_latency_ms==50.0"]
+title_suffix = " (CAS=50ms)"
 output_suffix = "cas_50ms"
 
 [[plots.graphs]]
@@ -106,6 +109,7 @@ y_param = "num_tables"
 metrics = ["success_rate", "throughput", "mean_latency", "p99_latency"]
 per_type_metrics = ["success_rate", "mean_latency"]
 filters = ["catalog_service_latency_ms==120.0"]
+title_suffix = " (CAS=120ms)"
 output_suffix = "cas_120ms"
 
 [[plots.graphs]]

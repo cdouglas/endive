@@ -2211,6 +2211,7 @@ def generate_heatmap_plots(base_dir: str, pattern: str, output_dir: str,
     fmt = config.get("fmt", ".1f")
     dpi = config.get("dpi", 300)
     filters = config.get("filters", [])
+    title_suffix = config.get("title_suffix", "")
 
     # Determine extra params needed for filtering
     extra_params = []
@@ -2258,14 +2259,14 @@ def generate_heatmap_plots(base_dir: str, pattern: str, output_dir: str,
             print(f"  Skipping metric '{metric}' (not in results)")
             continue
 
-        title_suffix, m_cmap, m_vmin, m_vmax = metric_configs.get(
+        metric_label, m_cmap, m_vmin, m_vmax = metric_configs.get(
             metric, (metric.replace("_", " ").title(), cmap, None, None)
         )
         m_fmt = ".0f" if metric in ("throughput", "mean_latency", "p99_latency", "p95_latency", "p50_latency") else fmt
 
         _create_single_heatmap(
             results_df, x_param, y_param, metric,
-            title=f"{title_suffix} by {y_param.replace('_', ' ').title()} and {x_param.replace('_', ' ').title()}",
+            title=f"{metric_label} by {y_param.replace('_', ' ').title()} and {x_param.replace('_', ' ').title()}{title_suffix}",
             output_path=os.path.join(output_dir, f"heatmap_{metric}.png"),
             cmap=m_cmap, vmin=m_vmin, vmax=m_vmax, fmt=m_fmt,
             figsize=figsize, dpi=dpi,
@@ -2289,14 +2290,14 @@ def generate_heatmap_plots(base_dir: str, pattern: str, output_dir: str,
                     print(f"    Skipping metric '{metric}' for {op_type}")
                     continue
 
-                title_suffix, m_cmap, m_vmin, m_vmax = metric_configs.get(
+                metric_label, m_cmap, m_vmin, m_vmax = metric_configs.get(
                     metric, (metric.replace("_", " ").title(), cmap, None, None)
                 )
                 m_fmt = ".0f" if metric in ("throughput", "mean_latency", "p99_latency", "p95_latency", "p50_latency") else fmt
 
                 _create_single_heatmap(
                     type_results, x_param, y_param, metric,
-                    title=f"{op_label} {title_suffix}",
+                    title=f"{op_label} {metric_label}{title_suffix}",
                     output_path=os.path.join(output_dir, f"heatmap_{prefix}_{metric}.png"),
                     cmap=m_cmap, vmin=m_vmin, vmax=m_vmax, fmt=m_fmt,
                     figsize=figsize, dpi=dpi,
