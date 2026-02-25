@@ -2147,7 +2147,10 @@ def _load_heatmap_results(params_df: pd.DataFrame,
 def _create_single_heatmap(data: pd.DataFrame, x_param: str, y_param: str,
                            value_col: str, title: str, output_path,
                            cmap: str = "viridis", vmin=None, vmax=None,
-                           fmt: str = ".1f", figsize=None, dpi: int = 300):
+                           fmt: str = ".1f", figsize=None, dpi: int = 300,
+                           success_rate_data: pd.DataFrame = None,
+                           implausible_threshold: float = 95.0,
+                           unreliable_threshold: float = 80.0):
     """Create a single heatmap from 2D parameter sweep data."""
     pivot = data.pivot_table(
         index=y_param, columns=x_param,
@@ -2184,6 +2187,46 @@ def _create_single_heatmap(data: pd.DataFrame, x_param: str, y_param: str,
                 ax.text(j, i, f"{val:{fmt}}", ha="center", va="center",
                         color=text_color, fontsize=8)
 
+    if success_rate_data is not None and value_col != "success_rate":
+        sr_pivot = success_rate_data.pivot_table(
+            index=y_param, columns=x_param,
+            values="success_rate", aggfunc="mean"
+        )
+        sr_pivot = sr_pivot.reindex(index=pivot.index, columns=pivot.columns)
+
+        for i in range(len(pivot.index)):
+            for j in range(len(pivot.columns)):
+                sr = sr_pivot.values[i, j]
+                if np.isnan(sr):
+                    continue
+                val = pivot.values[i, j]
+                if not np.isnan(val):
+                    rgba = colormap(norm(val))
+                    lum = 0.299 * rgba[0] + 0.587 * rgba[1] + 0.114 * rgba[2]
+                    hatch_color = 'white' if lum < 0.5 else 'black'
+                else:
+                    hatch_color = 'black'
+                if sr < unreliable_threshold:
+                    rect = plt.Rectangle((j - 0.5, i - 0.5), 1, 1,
+                        fill=False, hatch='xx', edgecolor=hatch_color,
+                        linewidth=0, alpha=0.5)
+                    ax.add_patch(rect)
+                elif sr < implausible_threshold:
+                    rect = plt.Rectangle((j - 0.5, i - 0.5), 1, 1,
+                        fill=False, hatch='//', edgecolor=hatch_color,
+                        linewidth=0, alpha=0.5)
+                    ax.add_patch(rect)
+
+        from matplotlib.patches import Patch
+        legend_elements = [
+            Patch(facecolor='none', edgecolor='gray', hatch='//',
+                  label=f'Success < {implausible_threshold:.0f}%'),
+            Patch(facecolor='none', edgecolor='gray', hatch='xx',
+                  label=f'Success < {unreliable_threshold:.0f}%'),
+        ]
+        ax.legend(handles=legend_elements, loc='lower right',
+                  fontsize=7, framealpha=0.8)
+
     plt.tight_layout()
     plt.savefig(output_path, dpi=dpi)
     plt.close()
@@ -2212,6 +2255,8 @@ def generate_heatmap_plots(base_dir: str, pattern: str, output_dir: str,
     dpi = config.get("dpi", 300)
     filters = config.get("filters", [])
     title_suffix = config.get("title_suffix", "")
+    implausible_threshold = config.get("implausible_threshold", 95.0)
+    unreliable_threshold = config.get("unreliable_threshold", 80.0)
 
     # Determine extra params needed for filtering
     extra_params = []
@@ -2272,6 +2317,18 @@ def generate_heatmap_plots(base_dir: str, pattern: str, output_dir: str,
             figsize=figsize, dpi=dpi,
         )
 
+        if metric != "success_rate":
+            _create_single_heatmap(
+                results_df, x_param, y_param, metric,
+                title=f"{metric_label} by {y_param.replace('_', ' ').title()} and {x_param.replace('_', ' ').title()}{title_suffix}",
+                output_path=os.path.join(output_dir, f"xheatmap_{metric}.png"),
+                cmap=m_cmap, vmin=m_vmin, vmax=m_vmax, fmt=m_fmt,
+                figsize=figsize, dpi=dpi,
+                success_rate_data=results_df,
+                implausible_threshold=implausible_threshold,
+                unreliable_threshold=unreliable_threshold,
+            )
+
     # Per-operation-type heatmaps
     per_type_metrics = config.get("per_type_metrics", [])
     if per_type_metrics:
@@ -2302,6 +2359,18 @@ def generate_heatmap_plots(base_dir: str, pattern: str, output_dir: str,
                     cmap=m_cmap, vmin=m_vmin, vmax=m_vmax, fmt=m_fmt,
                     figsize=figsize, dpi=dpi,
                 )
+
+                if metric != "success_rate":
+                    _create_single_heatmap(
+                        type_results, x_param, y_param, metric,
+                        title=f"{op_label} {metric_label}{title_suffix}",
+                        output_path=os.path.join(output_dir, f"xheatmap_{prefix}_{metric}.png"),
+                        cmap=m_cmap, vmin=m_vmin, vmax=m_vmax, fmt=m_fmt,
+                        figsize=figsize, dpi=dpi,
+                        success_rate_data=type_results,
+                        implausible_threshold=implausible_threshold,
+                        unreliable_threshold=unreliable_threshold,
+                    )
 
 
 # ---------------------------------------------------------------------------
