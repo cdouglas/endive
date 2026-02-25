@@ -8,6 +8,7 @@ aggregates results across multiple seeds, and produces visualization.
 """
 
 import argparse
+import fnmatch
 import os
 from collections import defaultdict
 from glob import glob
@@ -224,6 +225,70 @@ def scan_experiment_directories(base_dir: str, pattern: str) -> Dict[str, Dict]:
     return experiments
 
 
+def scan_consolidated_experiments(consolidated_path: str, pattern: str) -> Dict[str, Dict]:
+    """Discover experiments from consolidated parquet when directories are absent.
+
+    Returns the same dict structure as scan_experiment_directories(), keyed by
+    ``"<exp_name>-<exp_hash>"``.  For experiments found only in the consolidated
+    file the ``'dir'`` value is ``None`` and ``'seeds'`` is a list of int seed
+    values (not directory paths).
+    """
+    import pyarrow.parquet as pq
+
+    if not os.path.exists(consolidated_path):
+        return {}
+
+    # Read only metadata columns (fast — skips the heavy transaction data)
+    try:
+        table = pq.read_table(
+            consolidated_path,
+            columns=['exp_name', 'exp_hash', 'seed', 'config'],
+        )
+    except Exception as e:
+        print(f"Warning: Could not read consolidated file {consolidated_path}: {e}")
+        return {}
+
+    if table.num_rows == 0:
+        return {}
+
+    # Convert to Python for grouping (only the lightweight columns)
+    exp_names = table.column('exp_name').to_pylist()
+    exp_hashes = table.column('exp_hash').to_pylist()
+    seeds = table.column('seed').to_pylist()
+    configs = table.column('config').to_pylist()
+
+    # Group by (exp_name, exp_hash)
+    groups: Dict[Tuple[str, str], Dict] = {}
+    for i in range(len(exp_names)):
+        key = (exp_names[i], exp_hashes[i])
+        if key not in groups:
+            groups[key] = {'seeds': set(), 'config_row': i}
+        groups[key]['seeds'].add(seeds[i])
+
+    experiments = {}
+    min_seeds = CONFIG.get('analysis', {}).get('min_seeds', 3)
+
+    for (exp_name, exp_hash), info in groups.items():
+        dir_key = f"{exp_name}-{exp_hash}"
+        if not fnmatch.fnmatch(dir_key, pattern):
+            continue
+        if len(info['seeds']) < min_seeds:
+            continue
+
+        # Reconstruct config from the first row's flattened config map
+        config = unflatten_config(configs[info['config_row']])
+
+        experiments[dir_key] = {
+            'config': config,
+            'seeds': sorted(info['seeds']),
+            'label': exp_name,
+            'hash': exp_hash,
+            'dir': None,  # no directory on disk
+        }
+
+    return experiments
+
+
 def compute_transient_period_duration(config: Dict) -> float:
     """
     Compute transient period duration using transaction-runtime multiple approach.
@@ -285,6 +350,45 @@ def compute_cooldown_duration(config: Dict) -> float:
         Cooldown duration in milliseconds
     """
     return compute_transient_period_duration(config)
+
+
+def _infer_type(value: str):
+    """Infer Python type from a stringified config value."""
+    if value in ('True', 'true'):
+        return True
+    if value in ('False', 'false'):
+        return False
+    try:
+        int_val = int(value)
+        # Only return int if round-trips exactly (avoid '3.0' -> 3)
+        if str(int_val) == value:
+            return int_val
+    except (ValueError, OverflowError):
+        pass
+    try:
+        return float(value)
+    except (ValueError, OverflowError):
+        pass
+    return value
+
+
+def unflatten_config(flat_config) -> Dict:
+    """Reconstruct nested dict from flattened (key, value) pairs.
+
+    Reverses flatten_config() used during consolidation.  Accepts any
+    iterable of (key, value) tuples — including a PyArrow MapArray row.
+    """
+    result: Dict = {}
+    for key, value in flat_config:
+        # PyArrow may return pyarrow StringScalar; coerce to str
+        key = str(key)
+        value = str(value)
+        parts = key.split('.')
+        d = result
+        for part in parts[:-1]:
+            d = d.setdefault(part, {})
+        d[parts[-1]] = _infer_type(value)
+    return result
 
 
 def extract_key_parameters(config: Dict) -> Dict:
@@ -671,10 +775,19 @@ def build_experiment_index(base_dir: str, pattern: str) -> pd.DataFrame:
     """
     experiments = scan_experiment_directories(base_dir, pattern)
 
+    # Augment with consolidated-only experiments (dirs may not exist on disk)
+    consolidated_path = os.path.join(base_dir, 'consolidated.parquet')
+    if CONFIG.get('analysis', {}).get('use_consolidated', True) and os.path.exists(consolidated_path):
+        for key, exp_info in scan_consolidated_experiments(consolidated_path, pattern).items():
+            if key not in experiments:
+                experiments[key] = exp_info
+
     if not experiments:
         raise ValueError(f"No experiments found in {base_dir} matching {pattern}")
 
-    print(f"Found {len(experiments)} experiment directories")
+    n_disk = sum(1 for e in experiments.values() if e['dir'] is not None)
+    n_consolidated = len(experiments) - n_disk
+    print(f"Found {len(experiments)} experiments ({n_disk} on disk, {n_consolidated} consolidated-only)")
 
     rows = []
 
@@ -703,11 +816,17 @@ def build_experiment_index(base_dir: str, pattern: str) -> pd.DataFrame:
             # Check if consolidated file exists before trying to use it
             if os.path.exists(consolidated_path):
                 df = load_and_aggregate_results_consolidated(exp_info, consolidated_path)
-            else:
+            elif exp_info['dir'] is not None:
                 # Consolidated file doesn't exist, use individual files
                 df = load_and_aggregate_results(exp_info)
-        else:
+            else:
+                print(" consolidated-only experiment but consolidated file missing")
+                continue
+        elif exp_info['dir'] is not None:
             df = load_and_aggregate_results(exp_info)
+        else:
+            print(" consolidated-only experiment but consolidated loading disabled")
+            continue
 
         if df is None:
             print(" no data")
@@ -1207,6 +1326,26 @@ def plot_overhead_vs_throughput(
     plt.close()
 
 
+def _load_from_consolidated(consolidated_path: str, exp_info: Dict) -> Optional[pd.DataFrame]:
+    """Load raw transaction data for one experiment from consolidated parquet.
+
+    Returns a DataFrame with the transaction columns (exp metadata columns
+    dropped), or None if no rows match.
+    """
+    filters = [
+        ('exp_name', '==', exp_info['label']),
+        ('exp_hash', '==', exp_info['hash']),
+    ]
+    try:
+        df = pd.read_parquet(consolidated_path, filters=filters)
+    except Exception:
+        return None
+    if len(df) == 0:
+        return None
+    df = df.drop(columns=['exp_name', 'exp_hash', 'config'], errors='ignore')
+    return df
+
+
 def plot_commit_rate_over_time(
     base_dir: str,
     pattern: str,
@@ -1229,6 +1368,13 @@ def plot_commit_rate_over_time(
     """
     experiments = scan_experiment_directories(base_dir, pattern)
 
+    # Augment with consolidated-only experiments
+    consolidated_path = os.path.join(base_dir, 'consolidated.parquet')
+    if CONFIG.get('analysis', {}).get('use_consolidated', True) and os.path.exists(consolidated_path):
+        for key, exp_info in scan_consolidated_experiments(consolidated_path, pattern).items():
+            if key not in experiments:
+                experiments[key] = exp_info
+
     if not experiments:
         print(f"No experiments found for commit rate plot")
         return
@@ -1250,12 +1396,19 @@ def plot_commit_rate_over_time(
     for (exp_dir, exp_info), color in zip(experiments.items(), colors):
         # Load raw data (no warmup/cooldown filtering) for full time range
         all_results = []
-        for seed_dir in exp_info['seeds']:
-            parquet_path = os.path.join(seed_dir, "results.parquet")
-            if os.path.exists(parquet_path):
-                df = pd.read_parquet(parquet_path)
-                df['seed'] = os.path.basename(seed_dir)
+
+        if exp_info['dir'] is None:
+            # Consolidated-only: load from consolidated parquet
+            df = _load_from_consolidated(consolidated_path, exp_info)
+            if df is not None and len(df) > 0:
                 all_results.append(df)
+        else:
+            for seed_dir in exp_info['seeds']:
+                parquet_path = os.path.join(seed_dir, "results.parquet")
+                if os.path.exists(parquet_path):
+                    df = pd.read_parquet(parquet_path)
+                    df['seed'] = os.path.basename(seed_dir)
+                    all_results.append(df)
 
         if not all_results:
             continue
@@ -1790,9 +1943,10 @@ def apply_filters(df: pd.DataFrame, filter_expressions: List[str]) -> pd.DataFra
 
 def _extract_heatmap_params(experiments_dir: str, pattern: str,
                             x_param: str, y_param: str) -> pd.DataFrame:
-    """Extract parameters for heatmap from experiment directories."""
+    """Extract parameters for heatmap from experiment directories and consolidated."""
     import tomli
     records = []
+    seen_keys = set()
 
     base_dir = Path(experiments_dir)
     for exp_dir in sorted(base_dir.glob(pattern)):
@@ -1802,8 +1956,6 @@ def _extract_heatmap_params(experiments_dir: str, pattern: str,
 
         with open(cfg_path, "rb") as f:
             cfg = tomli.load(f)
-
-        txn = cfg.get("transaction", {})
 
         # Extract x and y parameter values from config
         x_val = _extract_param_value(cfg, x_param)
@@ -1818,6 +1970,27 @@ def _extract_heatmap_params(experiments_dir: str, pattern: str,
             y_param: y_val,
             "num_seeds": len(seed_dirs),
         })
+        seen_keys.add(exp_dir.name)
+
+    # Augment with consolidated-only experiments
+    consolidated_path = os.path.join(experiments_dir, 'consolidated.parquet')
+    if CONFIG.get('analysis', {}).get('use_consolidated', True) and os.path.exists(consolidated_path):
+        for key, exp_info in scan_consolidated_experiments(consolidated_path, pattern).items():
+            if key in seen_keys:
+                continue
+            cfg = exp_info['config']
+            x_val = _extract_param_value(cfg, x_param)
+            y_val = _extract_param_value(cfg, y_param)
+            if x_val is None or y_val is None:
+                continue
+            records.append({
+                "exp_dir": None,
+                x_param: x_val,
+                y_param: y_val,
+                "num_seeds": len(exp_info['seeds']),
+                "_exp_label": exp_info['label'],
+                "_exp_hash": exp_info['hash'],
+            })
 
     return pd.DataFrame(records)
 
@@ -1850,6 +2023,42 @@ def _extract_param_value(cfg: dict, param_name: str):
     return None
 
 
+def _compute_seed_metrics(df: pd.DataFrame, op_type_filter: str = None) -> Optional[Dict]:
+    """Compute per-seed heatmap metrics from a transaction DataFrame."""
+    if op_type_filter:
+        if "operation_type" not in df.columns:
+            return None
+        df = df[df["operation_type"] == op_type_filter]
+        if len(df) == 0:
+            return None
+
+    total = len(df)
+    committed = (df["status"].str.lower() == "committed").sum()
+
+    # Filter to steady state (middle 80%)
+    duration = df["t_commit"].max() - df["t_submit"].min()
+    warmup = duration * 0.1
+    t_min = df["t_submit"].min() + warmup
+    t_max = df["t_commit"].max() - duration * 0.1
+    df_steady = df[(df["t_submit"] >= t_min) & (df["t_commit"] <= t_max)]
+
+    steady_committed = df_steady[df_steady["status"].str.lower() == "committed"]
+    if len(steady_committed) == 0:
+        return None
+
+    throughput = len(steady_committed) / (duration / 1000 / 3600)
+    latency = steady_committed["commit_latency"]
+
+    return {
+        "success_rate": committed / total * 100 if total > 0 else 0,
+        "throughput": throughput,
+        "mean_latency": latency.mean(),
+        "p50_latency": latency.median(),
+        "p95_latency": latency.quantile(0.95),
+        "p99_latency": latency.quantile(0.99),
+    }
+
+
 def _load_heatmap_results(params_df: pd.DataFrame,
                           x_param: str, y_param: str,
                           op_type_filter: str = None) -> pd.DataFrame:
@@ -1864,52 +2073,47 @@ def _load_heatmap_results(params_df: pd.DataFrame,
     """
     all_results = []
 
+    # Determine consolidated path for consolidated-only experiments
+    consolidated_path = None
+    if "_exp_label" in params_df.columns:
+        # There may be consolidated-only rows — find the consolidated file
+        # Use the base_dir from a directory-based row, or infer from CONFIG
+        for _, r in params_df.iterrows():
+            if r["exp_dir"] is not None:
+                consolidated_path = os.path.join(
+                    str(Path(r["exp_dir"]).parent), 'consolidated.parquet')
+                break
+        if consolidated_path is None:
+            consolidated_path = CONFIG.get('paths', {}).get(
+                'consolidated_file', 'experiments/consolidated.parquet')
+
     for _, row in params_df.iterrows():
-        exp_dir = Path(row["exp_dir"])
         seed_results = []
 
-        for seed_dir in exp_dir.iterdir():
-            if not seed_dir.is_dir() or not seed_dir.name.isdigit():
-                continue
-            results_path = seed_dir / "results.parquet"
-            if not results_path.exists():
-                continue
-
-            df = pd.read_parquet(results_path)
-
-            # Filter by operation type if requested
-            if op_type_filter:
-                if "operation_type" not in df.columns:
+        if row["exp_dir"] is None:
+            # Consolidated-only experiment
+            if consolidated_path and os.path.exists(consolidated_path):
+                exp_info = {'label': row["_exp_label"], 'hash': row["_exp_hash"]}
+                df = _load_from_consolidated(consolidated_path, exp_info)
+                if df is not None and len(df) > 0:
+                    # Split by seed and compute per-seed metrics
+                    for seed_val, seed_df in df.groupby('seed'):
+                        metrics = _compute_seed_metrics(seed_df, op_type_filter)
+                        if metrics:
+                            seed_results.append(metrics)
+        else:
+            exp_dir = Path(row["exp_dir"])
+            for seed_dir in exp_dir.iterdir():
+                if not seed_dir.is_dir() or not seed_dir.name.isdigit():
                     continue
-                df = df[df["operation_type"] == op_type_filter]
-                if len(df) == 0:
+                results_path = seed_dir / "results.parquet"
+                if not results_path.exists():
                     continue
 
-            total = len(df)
-            committed = (df["status"].str.lower() == "committed").sum()
-
-            # Filter to steady state (middle 80%)
-            duration = df["t_commit"].max() - df["t_submit"].min()
-            warmup = duration * 0.1
-            t_min = df["t_submit"].min() + warmup
-            t_max = df["t_commit"].max() - duration * 0.1
-            df_steady = df[(df["t_submit"] >= t_min) & (df["t_commit"] <= t_max)]
-
-            steady_committed = df_steady[df_steady["status"].str.lower() == "committed"]
-            if len(steady_committed) == 0:
-                continue
-
-            throughput = len(steady_committed) / (duration / 1000 / 3600)
-            latency = steady_committed["commit_latency"]
-
-            seed_results.append({
-                "success_rate": committed / total * 100 if total > 0 else 0,
-                "throughput": throughput,
-                "mean_latency": latency.mean(),
-                "p50_latency": latency.median(),
-                "p95_latency": latency.quantile(0.95),
-                "p99_latency": latency.quantile(0.99),
-            })
+                df = pd.read_parquet(results_path)
+                metrics = _compute_seed_metrics(df, op_type_filter)
+                if metrics:
+                    seed_results.append(metrics)
 
         if seed_results:
             seed_df = pd.DataFrame(seed_results)

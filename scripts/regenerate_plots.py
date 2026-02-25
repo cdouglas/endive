@@ -153,18 +153,31 @@ def process_config(config_path: Path, plotting_defaults: dict,
             print(f"  [{graph_type}] -> {output_dir}/{output_file}{extra}")
         return result
 
-    # Check experiments exist
+    # Check experiments exist (on disk or in consolidated file)
     base_dir = Path(input_dir)
     matching = list(base_dir.glob(pattern))
-    if not matching:
+    consolidated_path = base_dir / 'consolidated.parquet'
+    consolidated_exists = consolidated_path.exists()
+
+    if not matching and not consolidated_exists:
         return {"config": str(config_path), "label": label, "status": "skipped",
                 "reason": f"no experiments matching {pattern}"}
 
-    print(f"\n{'='*60}")
-    print(f"  {label} ({len(matching)} experiment dirs)")
-    print(f"{'='*60}")
-
-    verify_seed_consistency(input_dir, pattern)
+    if not matching and consolidated_exists:
+        from endive.saturation_analysis import scan_consolidated_experiments
+        consolidated_matches = scan_consolidated_experiments(
+            str(consolidated_path), pattern)
+        if not consolidated_matches:
+            return {"config": str(config_path), "label": label, "status": "skipped",
+                    "reason": f"no experiments matching {pattern}"}
+        print(f"\n{'='*60}")
+        print(f"  {label} ({len(consolidated_matches)} experiments from consolidated)")
+        print(f"{'='*60}")
+    else:
+        print(f"\n{'='*60}")
+        print(f"  {label} ({len(matching)} experiment dirs)")
+        print(f"{'='*60}")
+        verify_seed_consistency(input_dir, pattern)
 
     os.makedirs(output_dir, exist_ok=True)
 
