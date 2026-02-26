@@ -1546,17 +1546,17 @@ def generate_latency_vs_throughput_table(
                     p50 = format_value_with_stddev(
                         row['p50_commit_latency']/1000,
                         row.get('p50_commit_latency_std')/1000 if has_stddev and row.get('p50_commit_latency_std') else None,
-                        decimals=1
+                        decimals=2
                     )
                     p95 = format_value_with_stddev(
                         row['p95_commit_latency']/1000,
                         row.get('p95_commit_latency_std')/1000 if has_stddev and row.get('p95_commit_latency_std') else None,
-                        decimals=1
+                        decimals=2
                     )
                     p99 = format_value_with_stddev(
                         row['p99_commit_latency']/1000,
                         row.get('p99_commit_latency_std')/1000 if has_stddev and row.get('p99_commit_latency_std') else None,
-                        decimals=1
+                        decimals=2
                     )
                     f.write(f"| {throughput} | {success_rate} | {p50} | {p95} | {p99} | {row['mean_retries']:.1f} |\n")
                 f.write("\n")
@@ -1580,17 +1580,17 @@ def generate_latency_vs_throughput_table(
                 p50 = format_value_with_stddev(
                     row['p50_commit_latency']/1000,
                     row.get('p50_commit_latency_std')/1000 if has_stddev and row.get('p50_commit_latency_std') else None,
-                    decimals=1
+                    decimals=2
                 )
                 p95 = format_value_with_stddev(
                     row['p95_commit_latency']/1000,
                     row.get('p95_commit_latency_std')/1000 if has_stddev and row.get('p95_commit_latency_std') else None,
-                    decimals=1
+                    decimals=2
                 )
                 p99 = format_value_with_stddev(
                     row['p99_commit_latency']/1000,
                     row.get('p99_commit_latency_std')/1000 if has_stddev and row.get('p99_commit_latency_std') else None,
-                    decimals=1
+                    decimals=2
                 )
                 f.write(f"| {throughput} | {success_rate} | {p50} | {p95} | {p99} | {row['mean_retries']:.1f} |\n")
 
