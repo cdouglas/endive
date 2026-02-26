@@ -1,0 +1,188 @@
+# Experiment 4c: Multi-Table Contention Across Real Storage Providers
+#
+# Goal: Replace artificial catalog latency sweep (exp4a/4b) with real storage
+# provider profiles where backend = "storage" means the provider determines
+# BOTH catalog CAS latency and storage I/O latency end-to-end.
+#
+# Provider CAS latencies (from endive/providers/*.toml):
+#   s3x:    22ms median, sigma=0.22
+#   s3:     61ms median, sigma=0.14
+#   azurex: 64ms median, sigma=0.73
+#   azure:  93ms median, sigma=0.82
+#   gcp:   170ms median, sigma=0.91
+#
+# Sweep: provider x num_tables x fa_ratio x arrival_rate (4D)
+#   provider:     ["s3x", "s3", "azurex", "azure", "gcp"]
+#   num_tables:   [1, 2, 5, 10, 20, 50]
+#   fa_ratio:     [1.0, 0.9, 0.5]
+#   arrival_rate: LOAD_SWEEP
+#
+# Full mode: 5 x 6 x 3 x 10 = 900 configs
+# Quick mode: 3 x 3 x 2 x 3  = 54 configs
+#
+# Expected patterns:
+#   - s3x (22ms CAS) sustains highest throughput across all table counts
+#   - gcp (170ms CAS) saturates earliest; effect amplified by more tables
+#   - Mixed workload (FA=0.5) widens provider gap due to retry cost scaling
+#   - azurex/s3 similar CAS but different I/O profiles may diverge at saturation
+#
+# Validation:
+#   - Each provider's CAS latency visible in commit overhead
+#   - num_tables=1, FA=1.0 cross-validates against exp3a at matching latency
+
+[simulation]
+duration_ms = 3600000  # 1 hour
+output_path = "results.parquet"
+
+[experiment]
+label = "exp4c_tables_providers"
+
+[catalog]
+num_tables = 1           # Swept: [1, 2, 5, 10, 20, 50]
+num_groups = 1           # Single-file catalog: all tables share one seq
+table_metadata_inlined = true
+backend = "storage"      # CAS uses storage provider (no [catalog.service])
+
+[transaction]
+retry = 10
+runtime.min = 30000
+runtime.mean = 180000
+runtime.sigma = 1.5
+
+inter_arrival.distribution = "exponential"
+inter_arrival.scale = 100.0  # Swept: LOAD_SWEEP
+
+real_conflict_probability = 0.0
+
+conflicting_manifests.distribution = "exponential"
+conflicting_manifests.mean = 3.0
+conflicting_manifests.min = 1
+conflicting_manifests.max = 10
+manifest_list_mode = "rewrite"
+
+[transaction.operation_types]
+fast_append = 1.0           # Swept: [1.0, 0.9, 0.5]
+validated_overwrite = 0.0   # Swept: [0.0, 0.1, 0.5]
+
+[storage]
+provider = "s3"  # Swept: ["s3x", "s3", "azurex", "azure", "gcp"]
+max_parallel = 4
+
+[plots]
+output_dir = "plots/exp4c_tables_providers"
+
+# --- Heatmaps per provider at FA=1.0 (pure append) ---
+
+[[plots.graphs]]
+type = "heatmap"
+x_param = "inter_arrival_scale"
+y_param = "num_tables"
+metrics = ["success_rate", "throughput", "mean_latency", "p99_latency"]
+filters = ["storage_provider==s3x", "fast_append_ratio==1.0"]
+title_suffix = " (S3 Express, FA=100%)"
+output_suffix = "s3x_fa100"
+
+[[plots.graphs]]
+type = "heatmap"
+x_param = "inter_arrival_scale"
+y_param = "num_tables"
+metrics = ["success_rate", "throughput", "mean_latency", "p99_latency"]
+filters = ["storage_provider==s3", "fast_append_ratio==1.0"]
+title_suffix = " (S3, FA=100%)"
+output_suffix = "s3_fa100"
+
+[[plots.graphs]]
+type = "heatmap"
+x_param = "inter_arrival_scale"
+y_param = "num_tables"
+metrics = ["success_rate", "throughput", "mean_latency", "p99_latency"]
+filters = ["storage_provider==azurex", "fast_append_ratio==1.0"]
+title_suffix = " (Azure Express, FA=100%)"
+output_suffix = "azurex_fa100"
+
+[[plots.graphs]]
+type = "heatmap"
+x_param = "inter_arrival_scale"
+y_param = "num_tables"
+metrics = ["success_rate", "throughput", "mean_latency", "p99_latency"]
+filters = ["storage_provider==azure", "fast_append_ratio==1.0"]
+title_suffix = " (Azure, FA=100%)"
+output_suffix = "azure_fa100"
+
+[[plots.graphs]]
+type = "heatmap"
+x_param = "inter_arrival_scale"
+y_param = "num_tables"
+metrics = ["success_rate", "throughput", "mean_latency", "p99_latency"]
+filters = ["storage_provider==gcp", "fast_append_ratio==1.0"]
+title_suffix = " (GCP, FA=100%)"
+output_suffix = "gcp_fa100"
+
+# --- Heatmaps at FA=0.5 for extreme providers ---
+
+[[plots.graphs]]
+type = "heatmap"
+x_param = "inter_arrival_scale"
+y_param = "num_tables"
+metrics = ["success_rate", "throughput", "mean_latency", "p99_latency"]
+per_type_metrics = ["success_rate", "mean_latency"]
+filters = ["storage_provider==s3x", "fast_append_ratio==0.5"]
+title_suffix = " (S3 Express, FA=50%)"
+output_suffix = "s3x_fa50"
+
+[[plots.graphs]]
+type = "heatmap"
+x_param = "inter_arrival_scale"
+y_param = "num_tables"
+metrics = ["success_rate", "throughput", "mean_latency", "p99_latency"]
+per_type_metrics = ["success_rate", "mean_latency"]
+filters = ["storage_provider==gcp", "fast_append_ratio==0.5"]
+title_suffix = " (GCP, FA=50%)"
+output_suffix = "gcp_fa50"
+
+# --- Latency vs throughput: provider comparison at key slices ---
+
+[[plots.graphs]]
+type = "latency_vs_throughput"
+group_by = "storage_provider"
+filters = ["num_tables==1", "fast_append_ratio==1.0"]
+output_suffix = "t1_fa100"
+
+[[plots.graphs]]
+type = "latency_vs_throughput"
+group_by = "storage_provider"
+filters = ["num_tables==1", "fast_append_ratio==0.5"]
+output_suffix = "t1_fa50"
+
+[[plots.graphs]]
+type = "latency_vs_throughput"
+group_by = "storage_provider"
+filters = ["num_tables==20", "fast_append_ratio==1.0"]
+output_suffix = "t20_fa100"
+
+# --- Latency vs throughput: table-count comparison per provider ---
+
+[[plots.graphs]]
+type = "latency_vs_throughput"
+group_by = "num_tables"
+filters = ["storage_provider==s3x", "fast_append_ratio==1.0"]
+output_suffix = "s3x_fa100"
+
+[[plots.graphs]]
+type = "latency_vs_throughput"
+group_by = "num_tables"
+filters = ["storage_provider==gcp", "fast_append_ratio==1.0"]
+output_suffix = "gcp_fa100"
+
+# --- Operation type breakdown by provider ---
+
+[[plots.graphs]]
+type = "operation_types"
+group_by = "storage_provider"
+filters = ["num_tables==1", "fast_append_ratio==0.5"]
+output_suffix = "t1_fa50"
+
+# --- Commit rate over time ---
+
+[[plots.graphs]]
+type = "commit_rate_over_time"

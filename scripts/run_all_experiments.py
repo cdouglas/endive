@@ -70,6 +70,9 @@ EXPERIMENT_GROUPS = {
         "exp4a_tables_fa.toml",    # Multi-table contention × 100% FA
         "exp4b_tables_mix.toml",   # Multi-table contention × 90/10 mix
     ],
+    "providers": [
+        "exp4c_tables_providers.toml",  # Real provider profiles × tables × workload
+    ],
 }
 
 # Parameter sweeps
@@ -83,6 +86,9 @@ CATALOG_LATENCY_SWEEP = [1.0, 5.0, 10.0, 20.0, 50.0, 80.0, 120.0]
 # Multi-table sweep (exp4: single-file catalog contention)
 NUM_TABLES_SWEEP = [1, 2, 5, 10, 20, 50]
 NUM_TABLES_LATENCY_SWEEP = [1.0, 10.0, 50.0, 120.0]  # Subset of CATALOG_LATENCY_SWEEP
+# Real storage provider sweep (exp4c: provider determines CAS + I/O latency)
+PROVIDER_SWEEP = ["s3x", "s3", "azurex", "azure", "gcp"]
+PROVIDER_FA_SWEEP = [1.0, 0.9, 0.5]
 
 # Quick mode parameters
 QUICK_LOADS = [100, 500, 2000]
@@ -405,6 +411,33 @@ def generate_all_runs(groups: list, num_seeds: int, quick: bool = False) -> list
                                         "inter_arrival.scale": float(load),
                                     }
                                 ))
+
+            elif "exp4c_tables_providers" in config_name:
+                # Multi-table contention with real storage providers: provider x tables x fa_ratio x load
+                providers = ["s3x", "s3", "gcp"] if quick else PROVIDER_SWEEP
+                tables_list = [1, 5, 50] if quick else NUM_TABLES_SWEEP
+                fa_ratios = [1.0, 0.5] if quick else PROVIDER_FA_SWEEP
+                for provider in providers:
+                    for num_t in tables_list:
+                        for fa_ratio in fa_ratios:
+                            vo_ratio = round(1.0 - fa_ratio, 2)
+                            for load in loads:
+                                for seed_num in range(1, num_seeds + 1):
+                                    seed = generate_seed(nonce, base_name,
+                                        {"provider": provider, "num_tables": num_t,
+                                         "fa": fa_ratio, "load": load}, seed_num)
+                                    runs.append(ExperimentRun(
+                                        config_path=config_name,
+                                        label=base_name,
+                                        seed=seed,
+                                        params={
+                                            "storage.provider": provider,
+                                            "catalog.num_tables": num_t,
+                                            "transaction.operation_types.fast_append": fa_ratio,
+                                            "transaction.operation_types.validated_overwrite": vo_ratio,
+                                            "inter_arrival.scale": float(load),
+                                        }
+                                    ))
 
             else:
                 print(f"Warning: no sweep config for '{config_name}', skipping")
