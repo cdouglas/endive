@@ -75,8 +75,8 @@ type = "commit_rate_over_time"
 
 [[plots.graphs]]
 type = "heatmap"
-x_param = "num_tables"
-y_param = "inter_arrival_scale"
+x_param = "inter_arrival_scale"
+y_param = "num_tables"
 metrics = ["success_rate", "throughput", "mean_latency", "p99_latency"]
 filters = ["catalog_service_latency_ms==1.0"]
 title_suffix = " (CAS=1ms)"
@@ -84,8 +84,8 @@ output_suffix = "cas_1ms"
 
 [[plots.graphs]]
 type = "heatmap"
-x_param = "num_tables"
-y_param = "inter_arrival_scale"
+x_param = "inter_arrival_scale"
+y_param = "num_tables"
 metrics = ["success_rate", "throughput", "mean_latency", "p99_latency"]
 filters = ["catalog_service_latency_ms==10.0"]
 title_suffix = " (CAS=10ms)"
@@ -93,8 +93,8 @@ output_suffix = "cas_10ms"
 
 [[plots.graphs]]
 type = "heatmap"
-x_param = "num_tables"
-y_param = "inter_arrival_scale"
+x_param = "inter_arrival_scale"
+y_param = "num_tables"
 metrics = ["success_rate", "throughput", "mean_latency", "p99_latency"]
 filters = ["catalog_service_latency_ms==50.0"]
 title_suffix = " (CAS=50ms)"
@@ -102,8 +102,8 @@ output_suffix = "cas_50ms"
 
 [[plots.graphs]]
 type = "heatmap"
-x_param = "num_tables"
-y_param = "inter_arrival_scale"
+x_param = "inter_arrival_scale"
+y_param = "num_tables"
 metrics = ["success_rate", "throughput", "mean_latency", "p99_latency"]
 filters = ["catalog_service_latency_ms==120.0"]
 title_suffix = " (CAS=120ms)"
