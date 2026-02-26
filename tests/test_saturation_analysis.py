@@ -582,7 +582,7 @@ class TestConfigurationSystem:
         assert config['analysis']['group_by'] is None
 
         # Check plots section
-        assert config['plots']['dpi'] == 300
+        assert config['plots']['dpi'] == saturation_analysis.DEFAULT_DPI
         assert 'figsize' in config['plots']
         assert 'fonts' in config['plots']
         assert 'styles' in config['plots']
@@ -656,7 +656,7 @@ input_dir = "custom_experiments"
             # Default values should still be present
             assert config['paths']['output_dir'] == 'plots'
             assert config['analysis']['k_min_cycles'] == 5
-            assert config['plots']['dpi'] == 300
+            assert config['plots']['dpi'] == saturation_analysis.DEFAULT_DPI
             assert 'experiment_index' in config['output']['files']
 
             print("✓ Partial config merges with defaults")
@@ -709,7 +709,7 @@ title = 20
             assert config['plots']['fonts']['legend'] == 10
 
             # Other plot values should be present
-            assert config['plots']['dpi'] == 300
+            assert config['plots']['dpi'] == saturation_analysis.DEFAULT_DPI
             assert 'figsize' in config['plots']
 
             print("✓ Deep merge preserves nested structures")
@@ -925,7 +925,7 @@ tolerance = 10.0
             assert sat_config['tolerance'] == 10.0
 
             # Default values should still be present for other settings
-            assert config['plots']['dpi'] == 300
+            assert config['plots']['dpi'] == saturation_analysis.DEFAULT_DPI
 
             print("✓ Saturation config can be overridden")
 

@@ -23,6 +23,9 @@ import tomli
 # Global configuration (loaded from analysis.toml or defaults)
 CONFIG = {}
 
+# Default DPI for all plots (12in × 100dpi = 1200px wide)
+DEFAULT_DPI = 100
+
 
 def get_default_config() -> Dict:
     """Return default configuration if no config file is provided."""
@@ -42,11 +45,11 @@ def get_default_config() -> Dict:
             'use_consolidated': True
         },
         'plots': {
-            'dpi': 300,
+            'dpi': DEFAULT_DPI,
             'bbox_inches': 'tight',
             'figsize': {
                 'latency_vs_throughput': [12, 8],
-                'success_vs_load': [16, 6],
+                'success_vs_load': [12, 4.5],
                 'success_vs_throughput': [12, 8],
                 'overhead_vs_throughput': [12, 8]
             },
@@ -994,7 +997,7 @@ def plot_latency_vs_throughput(
     ax.set_ylim(bottom=0)
 
     plt.tight_layout()
-    plt.savefig(output_path, dpi=300, bbox_inches='tight')
+    plt.savefig(output_path, dpi=DEFAULT_DPI, bbox_inches='tight')
     print(f"\nSaved latency vs throughput plot to {output_path}")
     plt.close()
 
@@ -1098,7 +1101,7 @@ def plot_sustainable_throughput(
     )
 
     plt.tight_layout()
-    plt.savefig(output_path, dpi=300, bbox_inches='tight')
+    plt.savefig(output_path, dpi=DEFAULT_DPI, bbox_inches='tight')
     print(f"\nSaved sustainable throughput plot to {output_path}")
     plt.close()
 
@@ -1109,7 +1112,7 @@ def plot_success_rate_vs_load(
     title: str = "Success Rate vs Offered Load"
 ):
     """Plot success rate and throughput vs offered load (inter-arrival time)."""
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4.5))
 
     df_sorted = index_df.sort_values('inter_arrival_scale')
 
@@ -1163,7 +1166,7 @@ def plot_success_rate_vs_load(
     ax2.grid(True, alpha=0.3)
 
     plt.tight_layout()
-    plt.savefig(output_path, dpi=300, bbox_inches='tight')
+    plt.savefig(output_path, dpi=DEFAULT_DPI, bbox_inches='tight')
     print(f"Saved success rate plot to {output_path}")
     plt.close()
 
@@ -1243,7 +1246,7 @@ def plot_success_rate_vs_throughput(
     ax.set_ylim([0, 105])
 
     plt.tight_layout()
-    plt.savefig(output_path, dpi=300, bbox_inches='tight')
+    plt.savefig(output_path, dpi=DEFAULT_DPI, bbox_inches='tight')
     print(f"Saved success rate vs throughput plot to {output_path}")
     plt.close()
 
@@ -1321,7 +1324,7 @@ def plot_overhead_vs_throughput(
     ax.set_ylim([0, 100])
 
     plt.tight_layout()
-    plt.savefig(output_path, dpi=300, bbox_inches='tight')
+    plt.savefig(output_path, dpi=DEFAULT_DPI, bbox_inches='tight')
     print(f"Saved overhead vs throughput plot to {output_path}")
     plt.close()
 
@@ -1389,7 +1392,7 @@ def plot_commit_rate_over_time(
     cooldown_start_min = (sim_duration_ms - cooldown_ms) / 60000
     sim_duration_min = sim_duration_ms / 60000
 
-    fig, ax = plt.subplots(figsize=(14, 8))
+    fig, ax = plt.subplots(figsize=(12, 8))
 
     colors = plt.cm.viridis(np.linspace(0, 1, len(experiments)))
 
@@ -1474,7 +1477,7 @@ def plot_commit_rate_over_time(
     ax.set_ylim(bottom=0)
 
     plt.tight_layout()
-    plt.savefig(output_path, dpi=300, bbox_inches='tight')
+    plt.savefig(output_path, dpi=DEFAULT_DPI, bbox_inches='tight')
     print(f"Saved commit rate over time plot to {output_path}")
     plt.close()
 
@@ -2302,7 +2305,7 @@ def _load_heatmap_results(params_df: pd.DataFrame,
 def _create_single_heatmap(data: pd.DataFrame, x_param: str, y_param: str,
                            value_col: str, title: str, output_path,
                            cmap: str = "viridis", vmin=None, vmax=None,
-                           fmt: str = ".1f", figsize=None, dpi: int = 300,
+                           fmt: str = ".1f", figsize=None, dpi: int = 100,
                            success_rate_data: pd.DataFrame = None,
                            implausible_threshold: float = 95.0,
                            unreliable_threshold: float = 80.0):
@@ -2407,7 +2410,7 @@ def generate_heatmap_plots(base_dir: str, pattern: str, output_dir: str,
     figsize = config.get("figsize", [12, 8])
     cmap = config.get("cmap", "viridis")
     fmt = config.get("fmt", ".1f")
-    dpi = config.get("dpi", 300)
+    dpi = config.get("dpi", DEFAULT_DPI)
     filters = config.get("filters", [])
     title_suffix = config.get("title_suffix", "")
     implausible_threshold = config.get("implausible_threshold", 95.0)
@@ -2624,8 +2627,8 @@ def generate_operation_type_plots(base_dir: str, pattern: str, output_dir: str,
     config = config or {}
     group_by = group_by or "fa_ratio"
     os.makedirs(output_dir, exist_ok=True)
-    dpi = config.get("dpi", 300)
-    figsize = config.get("figsize", [16, 10])
+    dpi = config.get("dpi", DEFAULT_DPI)
+    figsize = config.get("figsize", [12, 7.5])
 
     print(f"Analyzing operation types for {pattern}...")
     df = _analyze_op_type_experiments(base_dir, pattern, group_by=group_by)
