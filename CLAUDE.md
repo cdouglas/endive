@@ -6,6 +6,24 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Endive is a discrete-event simulator for Apache Iceberg's optimistic concurrency control (OCC). It models catalog contention, conflict resolution, and commit latency under varying workloads. Its purpose is to evaluate changes to the commit protocol and table format.
 
+## Task Tracking (beads)
+
+**Use `bd` (beads) for ALL task tracking. Do NOT use TaskCreate/TaskUpdate/TaskList.**
+
+- Before starting work: `bd ready` to find available tasks, or `bd create` for new ones
+- When starting: `bd update <id> --status=in_progress`
+- When done: `bd close <id> --reason="what was done"`
+- Session end: `bd sync` before committing
+
+**Session close checklist (in order):**
+1. `bd close` all completed issues
+2. `bd sync`
+3. `git add` + `git commit`
+4. `bd sync`
+5. `git push`
+
+Leaving beads issues in `in_progress` blocks git push hooks. Always close before finishing.
+
 ## Development Commands
 
 ### Setup
