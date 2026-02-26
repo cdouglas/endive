@@ -1773,6 +1773,161 @@ def generate_overhead_table(
     print(f"Saved overhead table to {output_path}")
 
 
+def generate_success_rate_vs_throughput_table(
+    index_df: pd.DataFrame,
+    output_path: str,
+    title: str = None,
+    group_by: str = None
+):
+    """Generate markdown table for success rate vs throughput data with optional stddev."""
+    if index_df.empty or 'throughput' not in index_df.columns:
+        print(f"  Skipping {output_path}: No data or missing required columns")
+        return
+
+    has_stddev = 'success_rate_std' in index_df.columns
+
+    with open(output_path, 'w') as f:
+        f.write("# Success Rate vs Throughput\n\n")
+        f.write("Analysis of how transaction success rate degrades with achieved throughput.\n\n")
+        if has_stddev:
+            f.write("Values shown as mean ± standard deviation across seeds.\n\n")
+
+        if group_by and group_by in index_df.columns:
+            groups = sorted(index_df[group_by].unique())
+
+            for group_val in groups:
+                subset = index_df[index_df[group_by] == group_val].copy()
+                subset = subset.sort_values('throughput')
+
+                f.write(f"## {group_by} = {group_val}\n\n")
+                f.write("| Throughput (c/s) | Success Rate (%) |\n")
+                f.write("|------------------|------------------|\n")
+
+                for _, row in subset.iterrows():
+                    throughput = format_value_with_stddev(
+                        row['throughput'],
+                        row.get('throughput_std') if has_stddev else None,
+                        decimals=1
+                    )
+                    success_rate = format_value_with_stddev(
+                        row['success_rate'],
+                        row.get('success_rate_std') if has_stddev else None,
+                        decimals=1
+                    )
+                    f.write(f"| {throughput} | {success_rate} |\n")
+                f.write("\n")
+        else:
+            df_sorted = index_df.sort_values('throughput')
+
+            f.write("| Throughput (c/s) | Success Rate (%) |\n")
+            f.write("|------------------|------------------|\n")
+
+            for _, row in df_sorted.iterrows():
+                throughput = format_value_with_stddev(
+                    row['throughput'],
+                    row.get('throughput_std') if has_stddev else None,
+                    decimals=1
+                )
+                success_rate = format_value_with_stddev(
+                    row['success_rate'],
+                    row.get('success_rate_std') if has_stddev else None,
+                    decimals=1
+                )
+                f.write(f"| {throughput} | {success_rate} |\n")
+
+        f.write("\n## Notes\n\n")
+        if has_stddev:
+            f.write("- Values shown as mean ± standard deviation across multiple seeds\n")
+        f.write("- Throughput = commits per second during steady-state window\n")
+        f.write("- Success rate = percentage of transactions that committed successfully\n")
+        f.write("- Success rate typically degrades as throughput increases due to contention\n")
+
+    print(f"Saved success rate vs throughput table to {output_path}")
+
+
+def generate_commit_rate_over_time_table(
+    base_dir: str,
+    pattern: str,
+    output_path: str,
+    title: str = None,
+    window_size_sec: int = 60
+):
+    """Generate markdown table for commit rate over time data."""
+    experiments = scan_experiment_directories(base_dir, pattern)
+
+    # Augment with consolidated-only experiments
+    consolidated_path = os.path.join(base_dir, 'consolidated.parquet')
+    if CONFIG.get('analysis', {}).get('use_consolidated', True) and os.path.exists(consolidated_path):
+        for key, exp_info in scan_consolidated_experiments(consolidated_path, pattern).items():
+            if key not in experiments:
+                experiments[key] = exp_info
+
+    if not experiments:
+        print(f"  Skipping {output_path}: No experiments found")
+        return
+
+    with open(output_path, 'w') as f:
+        f.write("# Commit Rate Over Time\n\n")
+        f.write(f"Commit throughput in {window_size_sec}-second windows.\n\n")
+
+        for exp_dir, exp_info in experiments.items():
+            all_results = []
+
+            if exp_info['dir'] is None:
+                df = _load_from_consolidated(consolidated_path, exp_info)
+                if df is not None and len(df) > 0:
+                    all_results.append(df)
+            else:
+                for seed_dir in exp_info['seeds']:
+                    parquet_path = os.path.join(seed_dir, "results.parquet")
+                    if os.path.exists(parquet_path):
+                        df = pd.read_parquet(parquet_path)
+                        df['seed'] = os.path.basename(seed_dir)
+                        all_results.append(df)
+
+            if not all_results:
+                continue
+
+            df = pd.concat(all_results, ignore_index=True)
+            if len(df) == 0:
+                continue
+
+            committed = df[df['status'] == 'committed'].copy()
+            if len(committed) == 0:
+                continue
+
+            # Compute commit rate in time windows
+            window_size_ms = window_size_sec * 1000
+            max_time_ms = committed['t_submit'].max()
+            time_windows = np.arange(0, max_time_ms + window_size_ms, window_size_ms)
+
+            config = exp_info['config']
+            inter_arrival = config.get('transaction', {}).get('inter_arrival', {}).get('scale', 'N/A')
+            f.write(f"## inter_arrival={inter_arrival}ms\n\n")
+            f.write("| Time (min) | Commit Rate (c/s) |\n")
+            f.write("|------------|-------------------|\n")
+
+            for i in range(len(time_windows) - 1):
+                start = time_windows[i]
+                end = time_windows[i + 1]
+                window_commits = committed[
+                    (committed['t_submit'] >= start) &
+                    (committed['t_submit'] < end)
+                ]
+                rate = len(window_commits) / window_size_sec
+                midpoint_min = (start + end) / 2 / 60000
+                f.write(f"| {midpoint_min:.1f} | {rate:.1f} |\n")
+
+            f.write("\n")
+
+        f.write("## Notes\n\n")
+        f.write(f"- Rates computed in {window_size_sec}-second windows\n")
+        f.write("- Time shown as minutes from simulation start\n")
+        f.write("- Includes warmup and cooldown periods\n")
+
+    print(f"Saved commit rate over time table to {output_path}")
+
+
 def save_experiment_index(index_df: pd.DataFrame, output_path: str):
     """Save experiment index to CSV for reference."""
     # Handle empty dataframes

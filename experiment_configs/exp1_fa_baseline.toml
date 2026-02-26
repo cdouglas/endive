@@ -67,9 +67,6 @@ title = "Latency vs Throughput (with Success Rate)"
 output_file = "latency_vs_throughput_annotated.png"
 
 [[plots.graphs]]
-type = "latency_vs_throughput_table"
-
-[[plots.graphs]]
 type = "success_rate_vs_throughput"
 
 [[plots.graphs]]

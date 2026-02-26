@@ -52,6 +52,15 @@ OUTPUT_FILES = {
     # heatmap and operation_types handle their own output files
 }
 
+# Companion markdown tables auto-emitted alongside plots.
+# Maps graph type -> (table function name,).
+# Skips heatmap/operation_types (they already emit CSV data files).
+TABLE_COMPANIONS = {
+    "latency_vs_throughput":      "generate_latency_vs_throughput_table",
+    "success_rate_vs_throughput": "generate_success_rate_vs_throughput_table",
+    "commit_rate_over_time":      "generate_commit_rate_over_time_table",
+}
+
 
 def load_plotting_defaults() -> dict:
     """Load plotting.toml defaults."""
@@ -151,6 +160,9 @@ def process_config(config_path: Path, plotting_defaults: dict,
             if "filters" in graph:
                 extra += f" filters={graph['filters']}"
             print(f"  [{graph_type}] -> {output_dir}/{output_file}{extra}")
+            if graph_type in TABLE_COMPANIONS:
+                md_file = output_file.replace(".png", ".md")
+                print(f"  [{graph_type}] -> {output_dir}/{md_file} (companion table)")
         return result
 
     # Check experiments exist (on disk or in consolidated file)
@@ -274,6 +286,20 @@ def process_config(config_path: Path, plotting_defaults: dict,
                     kwargs["config"] = merged
 
                 func(input_dir, pattern, graph_output_dir, **kwargs)
+
+            # Auto-emit companion .md table if registered
+            if graph_type in TABLE_COMPANIONS:
+                companion_func_name = TABLE_COMPANIONS[graph_type]
+                companion_func = getattr(sa, companion_func_name)
+                # Filter kwargs to only those accepted by table functions
+                table_kwargs = {k: v for k, v in kwargs.items()
+                                if k in ("title", "group_by", "window_size_sec")}
+                if pipeline == "index":
+                    md_path = output_path.replace(".png", ".md")
+                    companion_func(graph_index_df, md_path, **table_kwargs)
+                elif pipeline == "time_series":
+                    md_path = output_path.replace(".png", ".md")
+                    companion_func(input_dir, pattern, md_path, **table_kwargs)
 
             result["graphs"].append({"type": graph_type, "status": "ok"})
             print(f"  [{graph_type}] OK")
