@@ -71,7 +71,103 @@ max_parallel = 4
 [plots]
 output_dir = "plots/exp4c_tables_providers"
 
-# --- Heatmaps per provider at FA=1.0 (pure append) ---
+# ===================================================================
+# Per-provider: latency vs throughput across FA/VO mixes (1 table)
+# ===================================================================
+# Each provider gets one plot showing 100/0, 90/10, 50/50 FA/VO curves.
+
+[[plots.graphs]]
+type = "latency_vs_throughput"
+group_by = "fast_append_ratio"
+filters = ["storage_provider==s3x", "num_tables==1"]
+output_suffix = "s3x_workload_mix"
+
+[[plots.graphs]]
+type = "latency_vs_throughput"
+group_by = "fast_append_ratio"
+filters = ["storage_provider==s3", "num_tables==1"]
+output_suffix = "s3_workload_mix"
+
+[[plots.graphs]]
+type = "latency_vs_throughput"
+group_by = "fast_append_ratio"
+filters = ["storage_provider==azurex", "num_tables==1"]
+output_suffix = "azurex_workload_mix"
+
+[[plots.graphs]]
+type = "latency_vs_throughput"
+group_by = "fast_append_ratio"
+filters = ["storage_provider==azure", "num_tables==1"]
+output_suffix = "azure_workload_mix"
+
+[[plots.graphs]]
+type = "latency_vs_throughput"
+group_by = "fast_append_ratio"
+filters = ["storage_provider==gcp", "num_tables==1"]
+output_suffix = "gcp_workload_mix"
+
+# ===================================================================
+# Per-provider: latency vs throughput across FA/VO mixes (20 tables)
+# ===================================================================
+
+[[plots.graphs]]
+type = "latency_vs_throughput"
+group_by = "fast_append_ratio"
+filters = ["storage_provider==s3x", "num_tables==20"]
+output_suffix = "s3x_workload_mix_20t"
+
+[[plots.graphs]]
+type = "latency_vs_throughput"
+group_by = "fast_append_ratio"
+filters = ["storage_provider==s3", "num_tables==20"]
+output_suffix = "s3_workload_mix_20t"
+
+[[plots.graphs]]
+type = "latency_vs_throughput"
+group_by = "fast_append_ratio"
+filters = ["storage_provider==azurex", "num_tables==20"]
+output_suffix = "azurex_workload_mix_20t"
+
+[[plots.graphs]]
+type = "latency_vs_throughput"
+group_by = "fast_append_ratio"
+filters = ["storage_provider==azure", "num_tables==20"]
+output_suffix = "azure_workload_mix_20t"
+
+[[plots.graphs]]
+type = "latency_vs_throughput"
+group_by = "fast_append_ratio"
+filters = ["storage_provider==gcp", "num_tables==20"]
+output_suffix = "gcp_workload_mix_20t"
+
+# ===================================================================
+# Cross-provider comparison at each workload mix (1 table)
+# ===================================================================
+
+[[plots.graphs]]
+type = "latency_vs_throughput"
+group_by = "storage_provider"
+filters = ["num_tables==1", "fast_append_ratio==1.0"]
+output_suffix = "providers_fa100_1t"
+
+[[plots.graphs]]
+type = "latency_vs_throughput"
+group_by = "storage_provider"
+filters = ["num_tables==1", "fast_append_ratio==0.9"]
+output_suffix = "providers_fa90_1t"
+
+[[plots.graphs]]
+type = "latency_vs_throughput"
+group_by = "storage_provider"
+filters = ["num_tables==1", "fast_append_ratio==0.5"]
+output_suffix = "providers_fa50_1t"
+
+# ===================================================================
+# Heatmaps: per-provider success rate (num_tables x inter_arrival)
+# ===================================================================
+# One per provider per FA ratio = 5 providers x 3 mixes = 15 heatmaps
+
+# --- FA=100% (pure append) ---
 
 [[plots.graphs]]
 type = "heatmap"
@@ -118,7 +214,59 @@ filters = ["storage_provider==gcp", "fast_append_ratio==1.0"]
 title_suffix = " (GCP, FA=100%)"
 output_suffix = "gcp_fa100"
 
-# --- Heatmaps at FA=0.5 for extreme providers ---
+# --- FA=90% (90/10 mix) ---
+
+[[plots.graphs]]
+type = "heatmap"
+x_param = "inter_arrival_scale"
+y_param = "num_tables"
+metrics = ["success_rate", "throughput", "mean_latency", "p99_latency"]
+per_type_metrics = ["success_rate", "mean_latency"]
+filters = ["storage_provider==s3x", "fast_append_ratio==0.9"]
+title_suffix = " (S3 Express, FA=90%)"
+output_suffix = "s3x_fa90"
+
+[[plots.graphs]]
+type = "heatmap"
+x_param = "inter_arrival_scale"
+y_param = "num_tables"
+metrics = ["success_rate", "throughput", "mean_latency", "p99_latency"]
+per_type_metrics = ["success_rate", "mean_latency"]
+filters = ["storage_provider==s3", "fast_append_ratio==0.9"]
+title_suffix = " (S3, FA=90%)"
+output_suffix = "s3_fa90"
+
+[[plots.graphs]]
+type = "heatmap"
+x_param = "inter_arrival_scale"
+y_param = "num_tables"
+metrics = ["success_rate", "throughput", "mean_latency", "p99_latency"]
+per_type_metrics = ["success_rate", "mean_latency"]
+filters = ["storage_provider==azurex", "fast_append_ratio==0.9"]
+title_suffix = " (Azure Express, FA=90%)"
+output_suffix = "azurex_fa90"
+
+[[plots.graphs]]
+type = "heatmap"
+x_param = "inter_arrival_scale"
+y_param = "num_tables"
+metrics = ["success_rate", "throughput", "mean_latency", "p99_latency"]
+per_type_metrics = ["success_rate", "mean_latency"]
+filters = ["storage_provider==azure", "fast_append_ratio==0.9"]
+title_suffix = " (Azure, FA=90%)"
+output_suffix = "azure_fa90"
+
+[[plots.graphs]]
+type = "heatmap"
+x_param = "inter_arrival_scale"
+y_param = "num_tables"
+metrics = ["success_rate", "throughput", "mean_latency", "p99_latency"]
+per_type_metrics = ["success_rate", "mean_latency"]
+filters = ["storage_provider==gcp", "fast_append_ratio==0.9"]
+title_suffix = " (GCP, FA=90%)"
+output_suffix = "gcp_fa90"
+
+# --- FA=50% (50/50 mix) ---
 
 [[plots.graphs]]
 type = "heatmap"
@@ -136,53 +284,53 @@ x_param = "inter_arrival_scale"
 y_param = "num_tables"
 metrics = ["success_rate", "throughput", "mean_latency", "p99_latency"]
 per_type_metrics = ["success_rate", "mean_latency"]
+filters = ["storage_provider==s3", "fast_append_ratio==0.5"]
+title_suffix = " (S3, FA=50%)"
+output_suffix = "s3_fa50"
+
+[[plots.graphs]]
+type = "heatmap"
+x_param = "inter_arrival_scale"
+y_param = "num_tables"
+metrics = ["success_rate", "throughput", "mean_latency", "p99_latency"]
+per_type_metrics = ["success_rate", "mean_latency"]
+filters = ["storage_provider==azurex", "fast_append_ratio==0.5"]
+title_suffix = " (Azure Express, FA=50%)"
+output_suffix = "azurex_fa50"
+
+[[plots.graphs]]
+type = "heatmap"
+x_param = "inter_arrival_scale"
+y_param = "num_tables"
+metrics = ["success_rate", "throughput", "mean_latency", "p99_latency"]
+per_type_metrics = ["success_rate", "mean_latency"]
+filters = ["storage_provider==azure", "fast_append_ratio==0.5"]
+title_suffix = " (Azure, FA=50%)"
+output_suffix = "azure_fa50"
+
+[[plots.graphs]]
+type = "heatmap"
+x_param = "inter_arrival_scale"
+y_param = "num_tables"
+metrics = ["success_rate", "throughput", "mean_latency", "p99_latency"]
+per_type_metrics = ["success_rate", "mean_latency"]
 filters = ["storage_provider==gcp", "fast_append_ratio==0.5"]
 title_suffix = " (GCP, FA=50%)"
 output_suffix = "gcp_fa50"
 
-# --- Latency vs throughput: provider comparison at key slices ---
-
-[[plots.graphs]]
-type = "latency_vs_throughput"
-group_by = "storage_provider"
-filters = ["num_tables==1", "fast_append_ratio==1.0"]
-output_suffix = "t1_fa100"
-
-[[plots.graphs]]
-type = "latency_vs_throughput"
-group_by = "storage_provider"
-filters = ["num_tables==1", "fast_append_ratio==0.5"]
-output_suffix = "t1_fa50"
-
-[[plots.graphs]]
-type = "latency_vs_throughput"
-group_by = "storage_provider"
-filters = ["num_tables==20", "fast_append_ratio==1.0"]
-output_suffix = "t20_fa100"
-
-# --- Latency vs throughput: table-count comparison per provider ---
-
-[[plots.graphs]]
-type = "latency_vs_throughput"
-group_by = "num_tables"
-filters = ["storage_provider==s3x", "fast_append_ratio==1.0"]
-output_suffix = "s3x_fa100"
-
-[[plots.graphs]]
-type = "latency_vs_throughput"
-group_by = "num_tables"
-filters = ["storage_provider==gcp", "fast_append_ratio==1.0"]
-output_suffix = "gcp_fa100"
-
-# --- Operation type breakdown by provider ---
+# ===================================================================
+# Operation type breakdown per provider
+# ===================================================================
 
 [[plots.graphs]]
 type = "operation_types"
 group_by = "storage_provider"
 filters = ["num_tables==1", "fast_append_ratio==0.5"]
-output_suffix = "t1_fa50"
+output_suffix = "op_types_fa50_1t"
 
-# --- Commit rate over time ---
+# ===================================================================
+# Commit rate over time
+# ===================================================================
 
 [[plots.graphs]]
 type = "commit_rate_over_time"

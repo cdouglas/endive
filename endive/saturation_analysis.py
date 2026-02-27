@@ -2180,6 +2180,7 @@ def _extract_param_value(cfg: dict, param_name: str):
         "real_conflict_probability": lambda: txn.get("real_conflict_probability"),
         "num_tables": lambda: catalog.get("num_tables"),
         "catalog_service_latency_ms": lambda: catalog.get("service", {}).get("latency_ms"),
+        "storage_provider": lambda: cfg.get("storage", {}).get("provider"),
     }
 
     if param_name in param_map:
