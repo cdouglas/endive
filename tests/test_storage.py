@@ -440,9 +440,9 @@ class TestLatencyRanges:
     @pytest.mark.parametrize("provider_name,expected_min,expected_max", [
         ("instant", 0.5, 3.0),
         ("s3x", 10, 50),
-        ("s3", 40, 120),
-        ("azure", 50, 200),
-        ("gcp", 100, 350),
+        ("s3", 15, 80),
+        ("azure", 20, 150),
+        ("gcp", 80, 500),
     ])
     def test_read_latency_range(self, provider_name, expected_min, expected_max):
         rng = np.random.RandomState(42)
@@ -549,10 +549,10 @@ class TestMinLatencyValues:
     @pytest.mark.parametrize("provider_name,expected_min_latency", [
         ("instant", 1),
         ("s3x", 10),
-        ("s3", 43),
-        ("azurex", 40),
-        ("azure", 51),
-        ("gcp", 118),
+        ("s3", 10),
+        ("azurex", 20),
+        ("azure", 20),
+        ("gcp", 80),
     ])
     def test_min_latency_value(self, provider_name, expected_min_latency, rng):
         p = create_provider(provider_name, rng)

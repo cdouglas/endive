@@ -1,19 +1,22 @@
 # AWS S3 Standard
-# Source: YCSB benchmark measurements (June 2025)
+# Source: Independent in-region benchmarks (2025), Durner et al. VLDB 2023 model
+# GET: p50=26.8ms, p90=46.9ms, p99=113.3ms (Dec 2025 microbenchmark, 4KiB reads)
+# PUT: p50=69.8ms, p95=101.1ms, p99=137.2ms (Mar 2025 benchmark, ~500KiB objects)
+# PUT base derived: 69.8 - 20*0.488 = ~60ms
 
 [provider]
 name = "s3"
 class = "S3StorageProvider"
-min_latency_ms = 43
+min_latency_ms = 10
 
 [read]
-median_ms = 61
-sigma = 0.14
+median_ms = 27
+sigma = 0.62
 
 [write]
-base_latency_ms = 30
+base_latency_ms = 60
 latency_per_mib_ms = 20
-sigma = 0.30
+sigma = 0.29
 
 [cas]
 median_ms = 61

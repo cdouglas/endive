@@ -1,19 +1,21 @@
 # Google Cloud Storage
-# Source: YCSB benchmark measurements (June 2025)
+# Source: JuiceFS benchmark note (Nov 2024), coarse 100-400ms range
+# GET: p50~200ms (est.), p99~400ms (est.) — no vendor percentile table available
+# PUT: p50~200ms (est.) — same coarse range, per-operation overhead dominates
 
 [provider]
 name = "gcp"
 class = "GCPStorageProvider"
-min_latency_ms = 118
+min_latency_ms = 80
 
 [read]
-median_ms = 170
-sigma = 0.91
+median_ms = 200
+sigma = 0.30
 
 [write]
-base_latency_ms = 40
+base_latency_ms = 200
 latency_per_mib_ms = 17
-sigma = 0.60
+sigma = 0.30
 
 [cas]
 median_ms = 170

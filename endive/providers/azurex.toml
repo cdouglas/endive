@@ -1,19 +1,21 @@
 # Azure Premium Block Blob
-# Source: YCSB benchmark measurements (June 2025)
+# Source: Independent in-region benchmark (May 2023), Durner et al. VLDB 2023 model
+# GET: p50=34.8ms, max=42ms (n=100 repeated downloads, West Europe)
+# PUT 10KiB: p50~41ms (est. from 1MB upload avg/max + download overhead model)
 
 [provider]
 name = "azurex"
 class = "AzureBlobStorageProvider"
-min_latency_ms = 40
+min_latency_ms = 20
 
 [read]
-median_ms = 70
-sigma = 0.23
+median_ms = 35
+sigma = 0.08
 
 [write]
-base_latency_ms = 30
+base_latency_ms = 41
 latency_per_mib_ms = 15
-sigma = 0.40
+sigma = 0.10
 
 [cas]
 median_ms = 64

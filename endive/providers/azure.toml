@@ -1,17 +1,19 @@
-# Azure Blob Storage (Standard tier)
-# Source: YCSB benchmark measurements (June 2025)
+# Azure Blob Storage (Standard/Hot tier)
+# Source: Independent in-region benchmark (May 2023), Durner et al. VLDB 2023 model
+# GET: p50=38.1ms, max=176ms (n=100 repeated downloads, West Europe)
+# PUT 10KiB: p50~45ms (est. from 1MB upload avg/max + download overhead model)
 
 [provider]
 name = "azure"
 class = "AzureBlobStorageProvider"
-min_latency_ms = 51
+min_latency_ms = 20
 
 [read]
-median_ms = 87
-sigma = 0.28
+median_ms = 38
+sigma = 0.66
 
 [write]
-base_latency_ms = 50
+base_latency_ms = 45
 latency_per_mib_ms = 25
 sigma = 0.50
 
