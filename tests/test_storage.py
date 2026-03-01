@@ -439,7 +439,7 @@ class TestLatencyRanges:
 
     @pytest.mark.parametrize("provider_name,expected_min,expected_max", [
         ("instant", 0.5, 3.0),
-        ("s3x", 10, 50),
+        ("s3x", 1, 10),
         ("s3", 15, 80),
         ("azure", 20, 150),
         ("gcp", 80, 500),
@@ -548,7 +548,7 @@ class TestMinLatencyValues:
 
     @pytest.mark.parametrize("provider_name,expected_min_latency", [
         ("instant", 1),
-        ("s3x", 10),
+        ("s3x", 1),
         ("s3", 10),
         ("azurex", 20),
         ("azure", 20),

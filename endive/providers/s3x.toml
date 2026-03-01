@@ -1,19 +1,21 @@
 # AWS S3 Express One Zone
-# Source: YCSB benchmark measurements (June 2025)
+# Source: Independent in-region benchmark (Dec 2025), derived PUT estimates
+# GET: p50=2.48ms, p90=3.77ms, p99=9.29ms (small-read benchmark, same AZ)
+# PUT: p50≈6.5ms, p90≈8ms, p99≈11ms (estimated from GET speedup ratios)
 
 [provider]
 name = "s3x"
 class = "S3ExpressStorageProvider"
-min_latency_ms = 10
+min_latency_ms = 1
 
 [read]
-median_ms = 22
-sigma = 0.22
+median_ms = 2.5
+sigma = 0.57
 
 [write]
-base_latency_ms = 10
+base_latency_ms = 6.5
 latency_per_mib_ms = 10
-sigma = 0.25
+sigma = 0.24
 
 [cas]
 median_ms = 22
