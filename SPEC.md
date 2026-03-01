@@ -1,7 +1,7 @@
 # Endive Simulator Specification
 
-**Version**: 2.0
-**Date**: 2026-02-23
+**Version**: 2.1
+**Date**: 2026-03-01
 
 ## Executive Summary
 
@@ -359,6 +359,9 @@ class TransactionResult:
     per_attempt_io_ms: float           # Total time in per-attempt storage I/O
     conflict_io_ms: float              # Total time in retry-specific I/O
     catalog_commit_ms: float           # Total time in catalog.commit() calls
+
+    # DES engine profiling
+    event_count: int = 0               # Number of SimPy events processed by this txn
 ```
 
 ### 3.2 Transaction ABC
@@ -635,24 +638,77 @@ class Statistics:
     def export_parquet(self, path: str) -> None: ...
 ```
 
-Output DataFrame columns: `txn_id`, `t_submit`, `t_runtime`, `t_commit`, `commit_latency`, `total_latency`, `n_retries`, `status`, `operation_type`, `abort_reason`, `manifest_list_reads`, `manifest_list_writes`, `manifest_file_reads`, `manifest_file_writes`, `catalog_read_ms`, `per_attempt_io_ms`, `conflict_io_ms`, `catalog_commit_ms`.
+Output DataFrame columns: `txn_id`, `t_submit`, `t_runtime`, `t_commit`, `commit_latency`, `total_latency`, `n_retries`, `status`, `operation_type`, `abort_reason`, `manifest_list_reads`, `manifest_list_writes`, `manifest_file_reads`, `manifest_file_writes`, `catalog_read_ms`, `per_attempt_io_ms`, `conflict_io_ms`, `catalog_commit_ms`, `event_count`.
 
-### 6.3 Simulation
+For streaming export (lower memory), pass `output_path` to the `Statistics` constructor or to `Simulation`. Results are written incrementally to parquet in batches, avoiding accumulation in memory.
+
+### 6.3 `_CountingEnvironment`
+
+```python
+class _CountingEnvironment(simpy.Environment):
+    """SimPy environment that counts discrete events processed."""
+    def __init__(self, initial_time: float = 0):
+        super().__init__(initial_time)
+        self.event_count: int = 0
+
+    def step(self) -> None:
+        self.event_count += 1
+        super().step()
+
+    @property
+    def queue_depth(self) -> int:
+        return len(self._queue)
+```
+
+Used instead of `simpy.Environment` to instrument DES engine performance. The `event_count` and `queue_depth` are sampled periodically for profiling output.
+
+### 6.4 Simulation
 
 ```python
 class Simulation:
-    def __init__(self, config: SimulationConfig): ...
+    def __init__(self, config: SimulationConfig,
+                 output_path: str | None = None,
+                 progress_path: str | None = None,
+                 profile: bool = False): ...
     def run(self) -> Statistics: ...
 ```
 
 The runner:
 1. Seeds `np.random` from `config.seed`
-2. Creates a `simpy.Environment`
+2. Creates a `_CountingEnvironment`
 3. Iterates `workload.generate()`, yielding `env.timeout(delay)` for each inter-arrival
 4. Launches each transaction as a SimPy process
 5. Uses `_drive_generator(env, gen)` to bridge latency-yielding generators with `env.timeout()`
 6. Records each `TransactionResult` in `Statistics`
-7. Runs until `duration_ms`
+7. Runs a progress reporter that writes `.progress.json` with DES rate, queue depth, and simulation speed
+8. If `profile=True`, collects periodic samples and writes `.profile.json` at completion
+9. Runs until `duration_ms`
+
+### 6.5 DES Engine Profiling
+
+When `profile=True`, the simulation samples engine metrics every 60 simulated seconds and writes `.profile.json` alongside the results:
+
+```json
+{
+    "summary": {
+        "des_events_total": 210000,
+        "des_rate_mean": 65000.0,
+        "des_rate_min": 55000.0,
+        "des_rate_max": 72000.0,
+        "queue_depth_max": 4200,
+        "queue_depth_mean": 2100.0,
+        "peak_processes": 4068,
+        "wall_clock_seconds": 3.2,
+        "sim_speed_min": 800.0
+    },
+    "samples": [
+        {"sim_time_ms": 60000, "wall_clock_s": 0.08, ...},
+        ...
+    ]
+}
+```
+
+The progress reporter always includes `des_rate` and `queue_depth` in `.progress.json` (backward-compatible). The `event_count` per transaction is written to the parquet output and tracks how many SimPy events each transaction consumed.
 
 ---
 

@@ -146,47 +146,21 @@ docker run -d \
 
 ### Critical Design Patterns
 
-#### 1. Snapshot Versioning (main.py:359-393, 527)
-```python
-# Transaction captures catalog version at creation
-txn.v_catalog_seq = catalog.seq  # Line 527
+#### 1. Generator-Based I/O
+All latency-bearing operations yield bare `float` values (milliseconds). Only `Simulation._drive_generator()` converts these to SimPy timeouts. This separates I/O modeling from the simulation engine.
 
-# On commit, checks current version
-success = (catalog.seq == txn.v_catalog_seq)  # CAS check
-
-# On failure, reads EXACTLY n manifest lists for n missed snapshots
-n_missed = catalog.seq - txn.v_catalog_seq
-# Must read one manifest list per intermediate snapshot
-```
+#### 2. Snapshot Versioning
+Transactions capture `catalog.seq` via `CatalogSnapshot` at creation. On commit, `catalog.commit()` checks the expected seq. On failure, the transaction reads the current snapshot and uses `has_write_overlap()` to determine if manifest I/O is needed.
 
 **Critical invariant**: `catalog.seq` advances by exactly 1 on each successful commit. Never skip versions.
 
-#### 2. Conflict Types (main.py:1600-1777)
-```python
-# False conflict: same table modified, but different partitions (no data overlap)
-# In rewrite mode: Read ML + Write new ML (~100ms) - must merge ML pointers
-# In ML+ mode: No ML operations needed (~10ms) - tentative entry still valid
-yield from resolve_false_conflict(...)
+#### 3. Write Overlap Check
+After a CAS failure, `has_write_overlap()` compares per-partition version vectors between old and new snapshots. Cross-table or disjoint-partition retries skip all manifest I/O — only catalog read + re-CAS. Same-table overlapping-partition retries pay type-specific conflict costs.
 
-# Real conflict: overlapping data changes (same partition)
-# Cost: Read ML + Read/Write N manifest files + Write ML (~400ms+)
-yield from resolve_real_conflict(...)
-```
-
-**Key distinction**:
-- False conflicts: No manifest FILE operations, but ML operations depend on mode
-- Real conflicts: Require expensive manifest file I/O in both modes
-- ML+ advantage: Saves ~100ms per false conflict by avoiding ML read/write on retry
-
-#### 3. Table Grouping (main.py:52-131)
-```python
-# Partition tables into G groups
-# Transactions NEVER span group boundaries
-# G=1: Catalog-level conflicts (all transactions conflict)
-# G=T: Table-level conflicts (only same-table writes conflict)
-```
-
-**Critical invariant**: Transaction isolation is per-group. Cross-group transactions would violate the model.
+#### 4. Conflict Types
+- **No overlap** (cross-table or disjoint partitions): Free retry (catalog read + CAS only)
+- **False conflict**: Same table + overlapping partitions, no data conflict — merge and retry with per-attempt I/O
+- **Real conflict**: Same table + overlapping partitions with data conflict — may abort (operation-dependent)
 
 #### 4. Experiment Organization
 ```
@@ -341,13 +315,12 @@ python -c "import pyarrow.parquet as pq; meta = pq.read_metadata('experiments/co
 
 ## Key Documentation
 
+- **SPEC.md** - Authoritative simulator specification (module APIs, invariants, config schema)
 - **README.md** - Concise getting started guide (installation, usage, analysis, testing)
 - **docs/APPENDIX_SIMULATOR_DETAILS.md** - Technical appendix for blog posts (distributions, parameters, formulas)
-- **docs/ARCHITECTURE.md** - Detailed design, invariants, code locations
 - **docs/QUICKSTART.md** - Installation and first simulation walkthrough
 - **docs/ANALYSIS_GUIDE.md** - How to generate plots and interpret results
 - **docs/CONSOLIDATED_FORMAT.md** - Consolidated parquet format details
-- **docs/DEVELOPER_NOTES.md** - Common issues, token-saving strategies, quick reference
 - **docs/DOCKER.md** - Container-based execution with EXP_ARGS
 - **docs/BASELINE_RESULTS.md** - Key findings from baseline experiments
 - **experiment_configs/README.md** - Experiment descriptions and parameter sweeps

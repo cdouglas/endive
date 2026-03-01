@@ -5,52 +5,49 @@ This document describes simplifications made in the Endive discrete-event simula
 ## Catalog Model
 
 ### Transaction Isolation
-- **Simplification**: Transactions are isolated by table groups (`num_groups`). When `num_groups = 1`, all writes conflict at catalog level.
-- **Reality**: Iceberg uses table-level isolation; cross-table transactions with ACID guarantees require external coordination.
+- **Simplification**: Transactions contend on a single global catalog sequence number (`seq`). All commits — regardless of target table — must increment the same `seq`, modeling a single-file `FileIOCatalog`.
+- **Reality**: Iceberg supports per-table versioning in REST catalogs backed by databases, which eliminates cross-table CAS failures entirely.
+- **Mitigation**: Cross-table CAS failures are modeled as cheap retries (catalog read + re-CAS, no manifest I/O). The write overlap check (`has_write_overlap()`) detects this and skips conflict resolution.
 
 ### Compare-and-Swap (CAS)
-- **Simplification**: CAS is atomic and instantaneous at the logical level; latency is added separately.
+- **Simplification**: CAS is atomic and instantaneous at the logical level; latency is added separately via `LatencyDistribution` objects.
 - **Reality**: CAS implementations vary by catalog backend (Hive Metastore, Nessie, REST, etc.) with different consistency guarantees.
 
-### Conflict Resolution
-- **Simplification**: False vs real conflicts determined by `REAL_CONFLICT_PROBABILITY` parameter.
+### Conflict Detection
+- **Simplification**: `ProbabilisticConflictDetector` determines real vs false conflicts by configured probability. `PartitionOverlapConflictDetector` uses per-partition version tracking.
 - **Reality**: Conflict type depends on actual data file overlap; partition pruning, schema evolution, and delete files affect conflict detection.
 
 ### Partition-Level Modeling
-- **Simplification**: Partitions are abstract; each has a version counter. Conflicts detected by comparing partition versions.
+- **Simplification**: Partitions are abstract; each has a version counter in `TableMetadata.partition_versions`. Conflicts detected by comparing partition version vectors between snapshots.
 - **Reality**: Partitions map to physical directory structures; conflict detection involves comparing manifest file lists and data file paths.
 
 ## Storage Model
 
 ### Latency Distributions
-- **Simplification**: All latencies drawn from lognormal distributions with provider-specific parameters.
+- **Simplification**: All latencies drawn from `LognormalLatency` distributions with provider-specific parameters loaded from `endive/providers/*.toml`.
 - **Reality**: Real cloud storage has multimodal latency distributions, regional variation, and time-of-day effects.
 
 ### Size-Based Latency
-- **Simplification**: PUT latency = `base + size_mib * rate + noise` (Durner et al. VLDB 2023 model).
+- **Simplification**: PUT latency = `base + size_mib * rate + noise` via `SizeBasedLatency` (Durner et al. VLDB 2023 model).
 - **Reality**: Object storage has step-function pricing tiers, multipart upload thresholds, and caching effects.
 
 ### Manifest Operations
 - **Simplification**: Manifest file reads/writes use fixed latency distributions; size not tracked per-file.
 - **Reality**: Manifest file sizes vary significantly based on partition count and metadata complexity.
 
-### Table Metadata
-- **Simplification**: Table metadata size is a static configuration (`TABLE_METADATA_SIZE_BYTES`, default 10KB).
-- **Reality**: Table metadata grows with schema evolution, property changes, and snapshot retention.
-
 ## Transaction Model
 
 ### Runtime Distribution
-- **Simplification**: Transaction runtime drawn from truncated lognormal distribution.
+- **Simplification**: Transaction runtime drawn from lognormal distribution via `WorkloadConfig.runtime`.
 - **Reality**: Query execution time depends on data volume, parallelism, resource contention, and query complexity.
 
-### Retry Behavior
-- **Simplification**: Failed transactions retry with optional exponential backoff.
-- **Reality**: Real systems may have circuit breakers, queue management, and priority scheduling.
+### Operation Types
+- **Simplification**: Three types (`FastAppend`, `MergeAppend`, `ValidatedOverwrite`) with probabilistic mix via `WorkloadConfig` weights. Each type has fixed conflict cost formulas.
+- **Reality**: Operation type is determined by the query, and conflict cost depends on actual manifest and data file sizes.
 
-### Manifest List Updates
-- **Simplification**: Manifest list size tracked as running sum of entry sizes.
-- **Reality**: Manifest lists are Avro files with compression; actual size depends on encoding efficiency.
+### Retry Behavior
+- **Simplification**: Failed transactions retry with optional exponential backoff. Per-attempt and conflict I/O costs modeled via `ConflictCost` dataclass.
+- **Reality**: Real systems may have circuit breakers, queue management, and priority scheduling.
 
 ## Append Operations (ML+ Mode)
 
@@ -58,12 +55,8 @@ This document describes simplifications made in the Endive discrete-event simula
 - **Simplification**: Append operations check offset only; no conditional checksums or ETags.
 - **Reality**: Cloud providers use ETags (AWS), leases (Azure), or preconditions for conditional operations.
 
-### Sealing and Compaction
-- **Simplification**: Manifest lists seal at byte threshold; rewrite resets offset to `MANIFEST_LIST_ENTRY_SIZE`.
-- **Reality**: Sealing may involve versioning, tombstones, or reader coordination.
-
 ### Tentative Entries
-- **Simplification**: Tentative ML entries are not stored; filtering is implicit in conflict resolution.
+- **Simplification**: Tentative ML entries are not stored; filtering is implicit in the transaction's commit protocol.
 - **Reality**: Readers must filter uncommitted entries or use snapshot isolation.
 
 ## What's NOT Modeled
@@ -86,7 +79,3 @@ The model has been validated against:
 - **Retry behavior**: Deterministic replay with fixed seeds
 
 See `tests/test_statistical_rigor.py` and `tests/test_numerical_accuracy.py` for validation tests.
-
----
-
-*For detailed technical debt and deferred tasks, see [errata.md](errata.md).*
