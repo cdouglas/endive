@@ -13,9 +13,12 @@ Supports two modes:
 """
 
 import argparse
+import os
+import queue
 import random
 import shutil
 import sys
+import threading
 from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
@@ -469,12 +472,52 @@ def verify_dataframes_match(original_df: pd.DataFrame, consolidated_df: pd.DataF
     return True
 
 
-def _find_consolidated_path_for_experiment(base_dir, exp_name, partitioned):
-    """Find the consolidated parquet file containing a given experiment."""
+
+def _verify_one_sample(consolidated_path, base_dir, file_path, partitioned):
+    """Verify a single original file against consolidated data."""
+    seed_dir = file_path.parent
+    exp_dir = seed_dir.parent
+    seed = int(seed_dir.name)
+    dir_name = exp_dir.name
+
+    if '-' not in dir_name:
+        return None
+
+    exp_name, exp_hash = dir_name.rsplit('-', 1)
+
     if partitioned:
-        return str(Path(base_dir) / f"{exp_name}.parquet")
+        lookup_path = str(Path(base_dir) / f"{exp_name}.parquet")
     else:
-        return str(Path(base_dir) / "consolidated.parquet")
+        lookup_path = consolidated_path
+
+    if not Path(lookup_path).exists():
+        return ('fail', f"{exp_name}-{exp_hash}/{seed}: Consolidated file not found: {lookup_path}")
+
+    # Load original with same normalization as consolidation
+    original_df = load_and_normalize_schema(str(file_path))
+    original_df = original_df.sort_values('t_submit').reset_index(drop=True)
+
+    # Load matching slice from consolidated using predicate pushdown
+    consolidated_df = pd.read_parquet(
+        lookup_path,
+        filters=[
+            ('exp_name', '==', exp_name),
+            ('exp_hash', '==', exp_hash),
+            ('seed', '==', seed)
+        ]
+    )
+
+    if len(consolidated_df) == 0:
+        return ('fail', f"{exp_name}-{exp_hash}/{seed}: Not found in consolidated")
+
+    # Drop metadata columns and reset index
+    consolidated_df = consolidated_df.drop(columns=['exp_name', 'exp_hash', 'seed', 'config'])
+    consolidated_df = consolidated_df.reset_index(drop=True)
+
+    if verify_dataframes_match(original_df, consolidated_df, exp_name, exp_hash, seed):
+        return ('pass', None)
+    else:
+        return ('fail', None)
 
 
 def verify_consolidation(
@@ -484,9 +527,10 @@ def verify_consolidation(
     partitioned: bool = False
 ) -> Tuple[int, int]:
     """
-    Verify consolidated data matches original files.
+    Verify a random sample of original files against consolidated data.
 
-    Uses predicate pushdown to efficiently seek within consolidated file.
+    Picks random individual results.parquet files and uses predicate pushdown
+    to find matching rows in the consolidated file.
 
     Returns:
         Tuple of (passed, failed) counts
@@ -501,7 +545,6 @@ def verify_consolidation(
         print("No result files found to verify")
         return 0, 0
 
-    # Sample files to verify
     files_to_verify = random.sample(all_files, min(sample_size, len(all_files)))
     print(f"\nVerifying random sample of {len(files_to_verify)} / {len(all_files)} files...")
 
@@ -509,65 +552,151 @@ def verify_consolidation(
     failed = 0
 
     for file_path in tqdm(files_to_verify, desc="Verifying", unit="file"):
-        # Extract metadata from path
-        seed_dir = file_path.parent
-        exp_dir = seed_dir.parent
-        seed = int(seed_dir.name)
-        dir_name = exp_dir.name
-
-        if '-' not in dir_name:
-            continue
-
-        exp_name, exp_hash = dir_name.rsplit('-', 1)
-
-        # Determine which consolidated file to read
-        lookup_path = _find_consolidated_path_for_experiment(base_dir, exp_name, partitioned)
-
-        if not Path(lookup_path).exists():
-            tqdm.write(f"  ❌ {exp_name}-{exp_hash}/{seed}: Consolidated file not found: {lookup_path}")
-            failed += 1
-            continue
-
         try:
-            # Load original with same normalization as consolidation
-            original_df = load_and_normalize_schema(str(file_path))
-            original_df = original_df.sort_values('t_submit').reset_index(drop=True)
-
-            # Load matching slice from consolidated using predicate pushdown
-            consolidated_df = pd.read_parquet(
-                lookup_path,
-                filters=[
-                    ('exp_name', '==', exp_name),
-                    ('exp_hash', '==', exp_hash),
-                    ('seed', '==', seed)
-                ]
-            )
-
-            if len(consolidated_df) == 0:
-                tqdm.write(f"  ❌ {exp_name}-{exp_hash}/{seed}: Not found in consolidated")
-                failed += 1
+            result = _verify_one_sample(consolidated_path, base_dir, file_path, partitioned)
+            if result is None:
                 continue
-
-            # Drop metadata columns and reset index
-            consolidated_df = consolidated_df.drop(columns=['exp_name', 'exp_hash', 'seed', 'config'])
-            consolidated_df = consolidated_df.reset_index(drop=True)
-
-            # Compare
-            if verify_dataframes_match(original_df, consolidated_df, exp_name, exp_hash, seed):
+            status, msg = result
+            if status == 'pass':
                 passed += 1
             else:
                 failed += 1
-
+                if msg:
+                    tqdm.write(f"  ❌ {msg}")
         except Exception as e:
-            tqdm.write(f"  ❌ {exp_name}-{exp_hash}/{seed}: Error - {e}")
+            seed_dir = file_path.parent
+            exp_dir = seed_dir.parent
+            tqdm.write(f"  ❌ {exp_dir.name}/{seed_dir.name}: Error - {e}")
             failed += 1
 
-    # Summary
     print(f"\nVerification: {passed} passed, {failed} failed")
     if failed == 0:
         print("✓ All sampled files match consolidated data")
     else:
         print("❌ Some files failed verification")
+
+    return passed, failed
+
+
+def verify_consolidation_full(
+    consolidated_path: str,
+    base_dir: str = 'experiments',
+    num_workers: int = None
+) -> Tuple[int, int]:
+    """
+    Full streaming verification of every row group in consolidated.parquet.
+
+    A producer thread reads row groups sequentially from the consolidated file
+    and puts work items on a bounded queue (size 2).  A thread pool of validators
+    loads the corresponding individual results.parquet and compares.  The bounded
+    queue pauses the scan when validators are busy.
+
+    Memory usage: ~2 seeds in flight per worker (one reading, one validating).
+
+    Returns:
+        Tuple of (passed, failed) counts
+    """
+    print("\n" + "-" * 80)
+    print("PHASE 3: Full Verification")
+    print("-" * 80)
+
+    if not Path(consolidated_path).exists():
+        print(f"Consolidated file not found: {consolidated_path}")
+        return 0, 0
+
+    if num_workers is None:
+        num_workers = os.cpu_count() or 4
+
+    pf = pq.ParquetFile(consolidated_path)
+    num_rg = pf.metadata.num_row_groups
+
+    print(f"\nVerifying all {num_rg} row groups with {num_workers} workers...")
+
+    passed = 0
+    failed = 0
+    missing = 0
+    lock = threading.Lock()
+    progress = tqdm(total=num_rg, desc="Verifying", unit="rg")
+
+    work_q = queue.Queue(maxsize=2)
+
+    def validator():
+        nonlocal passed, failed, missing
+        while True:
+            item = work_q.get()
+            if item is None:
+                work_q.task_done()
+                break
+            rg_idx, cons_df, exp_name, exp_hash, seed = item
+            try:
+                original_path = Path(base_dir) / f"{exp_name}-{exp_hash}" / str(seed) / 'results.parquet'
+                if not original_path.exists():
+                    with lock:
+                        missing += 1
+                        progress.update(1)
+                    work_q.task_done()
+                    continue
+
+                original_df = load_and_normalize_schema(str(original_path))
+                original_df = original_df.sort_values('t_submit').reset_index(drop=True)
+
+                if verify_dataframes_match(original_df, cons_df, exp_name, exp_hash, seed):
+                    with lock:
+                        passed += 1
+                else:
+                    with lock:
+                        failed += 1
+
+                del original_df, cons_df
+
+            except Exception as e:
+                tqdm.write(f"  ❌ Row group {rg_idx}: Error - {e}")
+                with lock:
+                    failed += 1
+            finally:
+                with lock:
+                    progress.update(1)
+                work_q.task_done()
+
+    # Start worker threads
+    threads = []
+    for _ in range(num_workers):
+        t = threading.Thread(target=validator, daemon=True)
+        t.start()
+        threads.append(t)
+
+    # Producer: stream row groups sequentially, bounded queue pauses when full
+    for i in range(num_rg):
+        table = pf.read_row_group(i)
+        cons_df = table.to_pandas()
+        del table
+
+        exp_name = cons_df['exp_name'].iloc[0]
+        exp_hash = cons_df['exp_hash'].iloc[0]
+        seed = int(cons_df['seed'].iloc[0])
+
+        cons_df = cons_df.drop(columns=['exp_name', 'exp_hash', 'seed', 'config'])
+        cons_df = cons_df.reset_index(drop=True)
+
+        work_q.put((i, cons_df, exp_name, exp_hash, seed))
+
+    # Send sentinels to stop workers
+    for _ in range(num_workers):
+        work_q.put(None)
+
+    # Wait for all work to drain
+    work_q.join()
+    for t in threads:
+        t.join()
+
+    progress.close()
+
+    # Summary
+    print(f"\nVerification: {passed} passed, {failed} failed, {missing} skipped (dir absent)")
+    if failed == 0:
+        print("✓ All row groups match original data")
+    else:
+        print("❌ Some row groups failed verification")
 
     return passed, failed
 
@@ -586,6 +715,9 @@ def main():
                         help='Number of random files to verify (default: 20)')
     parser.add_argument('--verify-only', action='store_true',
                         help='Only run verification (skip consolidation)')
+    parser.add_argument('--full', action='store_true',
+                        help='Full verification: stream every row group instead of random sampling. '
+                             'Uses a thread pool (--max-workers) with bounded queue for parallelism.')
     parser.add_argument('--destructive', action='store_true',
                         help='Delete experiment directories after writing to consolidated file. '
                              'Frees disk space incrementally but risks data loss if interrupted.')
@@ -604,8 +736,13 @@ def main():
 
     # Verify-only mode
     if args.verify_only:
-        if args.partition:
-            # Verify all partitioned files
+        if args.full and not args.partition:
+            passed, failed = verify_consolidation_full(
+                args.output,
+                args.base_dir,
+                num_workers=args.max_workers
+            )
+        elif args.partition:
             passed, failed = verify_consolidation(
                 None,  # not used in partitioned mode
                 args.base_dir,
@@ -660,11 +797,18 @@ def main():
 
     # Optional verification after consolidation
     if args.verify:
-        passed, failed = verify_consolidation(
-            args.output,
-            args.base_dir,
-            args.verify_sample
-        )
+        if args.full:
+            passed, failed = verify_consolidation_full(
+                args.output,
+                args.base_dir,
+                num_workers=args.max_workers
+            )
+        else:
+            passed, failed = verify_consolidation(
+                args.output,
+                args.base_dir,
+                args.verify_sample
+            )
         if failed > 0:
             sys.exit(1)
 
