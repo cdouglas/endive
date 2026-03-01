@@ -235,39 +235,95 @@ def scan_consolidated_experiments(consolidated_path: str, pattern: str) -> Dict[
     ``"<exp_name>-<exp_hash>"``.  For experiments found only in the consolidated
     file the ``'dir'`` value is ``None`` and ``'seeds'`` is a list of int seed
     values (not directory paths).
+
+    Uses row-group metadata to avoid reading any data for the discovery phase,
+    then reads only one row per experiment for config reconstruction.
     """
     import pyarrow.parquet as pq
 
     if not os.path.exists(consolidated_path):
         return {}
 
-    # Read only metadata columns (fast — skips the heavy transaction data)
     try:
-        table = pq.read_table(
-            consolidated_path,
-            columns=['exp_name', 'exp_hash', 'seed', 'config'],
-        )
+        pf = pq.ParquetFile(consolidated_path)
     except Exception as e:
-        print(f"Warning: Could not read consolidated file {consolidated_path}: {e}")
+        print(f"Warning: Could not open consolidated file {consolidated_path}: {e}")
         return {}
 
-    if table.num_rows == 0:
+    if pf.metadata.num_row_groups == 0:
         return {}
 
-    # Convert to Python for grouping (only the lightweight columns)
-    exp_names = table.column('exp_name').to_pylist()
-    exp_hashes = table.column('exp_hash').to_pylist()
-    seeds = table.column('seed').to_pylist()
-    configs = table.column('config').to_pylist()
+    # Phase 1: Scan row-group metadata (reads zero data bytes)
+    schema = pf.schema_arrow
+    try:
+        name_idx = schema.get_field_index('exp_name')
+        hash_idx = schema.get_field_index('exp_hash')
+        seed_idx = schema.get_field_index('seed')
+    except KeyError as e:
+        print(f"Warning: Consolidated file missing expected column: {e}")
+        return {}
 
-    # Group by (exp_name, exp_hash)
+    # Collect (exp_name, exp_hash) -> {seeds, first_rg} from row-group statistics
     groups: Dict[Tuple[str, str], Dict] = {}
-    for i in range(len(exp_names)):
-        key = (exp_names[i], exp_hashes[i])
-        if key not in groups:
-            groups[key] = {'seeds': set(), 'config_row': i}
-        groups[key]['seeds'].add(seeds[i])
+    has_stats = True
 
+    for i in range(pf.metadata.num_row_groups):
+        rg = pf.metadata.row_group(i)
+        name_col = rg.column(name_idx)
+        hash_col = rg.column(hash_idx)
+        seed_col = rg.column(seed_idx)
+
+        if not name_col.is_stats_set or not hash_col.is_stats_set or not seed_col.is_stats_set:
+            has_stats = False
+            break
+
+        exp_name = name_col.statistics.min
+        exp_hash = hash_col.statistics.min
+        seed = seed_col.statistics.min
+
+        # Each row group should have homogeneous exp_name/exp_hash/seed
+        # (consolidate.py writes one row group per experiment-seed)
+        key = (exp_name, exp_hash)
+        if key not in groups:
+            groups[key] = {'seeds': set(), 'first_rg': i}
+        groups[key]['seeds'].add(seed)
+
+    # Fallback: if statistics are absent, read only lightweight columns
+    if not has_stats:
+        try:
+            table = pq.read_table(
+                consolidated_path,
+                columns=['exp_name', 'exp_hash', 'seed'],
+            )
+        except Exception as e:
+            print(f"Warning: Could not read consolidated file {consolidated_path}: {e}")
+            return {}
+
+        if table.num_rows == 0:
+            return {}
+
+        exp_names = table.column('exp_name').to_pylist()
+        exp_hashes = table.column('exp_hash').to_pylist()
+        seeds = table.column('seed').to_pylist()
+
+        groups = {}
+        for idx in range(len(exp_names)):
+            key = (exp_names[idx], exp_hashes[idx])
+            if key not in groups:
+                groups[key] = {'seeds': set(), 'first_rg': None}
+            groups[key]['seeds'].add(seeds[idx])
+
+        # Map experiments to their first row group for config reads
+        for i in range(pf.metadata.num_row_groups):
+            rg_table = pf.read_row_group(i, columns=['exp_name', 'exp_hash'])
+            if rg_table.num_rows > 0:
+                rg_name = rg_table.column('exp_name')[0].as_py()
+                rg_hash = rg_table.column('exp_hash')[0].as_py()
+                rg_key = (rg_name, rg_hash)
+                if rg_key in groups and groups[rg_key]['first_rg'] is None:
+                    groups[rg_key]['first_rg'] = i
+
+    # Phase 2: Filter by pattern + min_seeds, then read config per experiment
     experiments = {}
     min_seeds = CONFIG.get('analysis', {}).get('min_seeds', 3)
 
@@ -278,8 +334,16 @@ def scan_consolidated_experiments(consolidated_path: str, pattern: str) -> Dict[
         if len(info['seeds']) < min_seeds:
             continue
 
-        # Reconstruct config from the first row's flattened config map
-        config = unflatten_config(configs[info['config_row']])
+        # Read config from one row of the first matching row group
+        rg_idx = info['first_rg']
+        if rg_idx is None:
+            continue
+        try:
+            rg_table = pf.read_row_group(rg_idx, columns=['config'])
+            config = unflatten_config(rg_table.column('config')[0].as_py())
+        except Exception as e:
+            print(f"Warning: Could not read config for {dir_key}: {e}")
+            continue
 
         experiments[dir_key] = {
             'config': config,
@@ -288,6 +352,29 @@ def scan_consolidated_experiments(consolidated_path: str, pattern: str) -> Dict[
             'hash': exp_hash,
             'dir': None,  # no directory on disk
         }
+
+    return experiments
+
+
+def scan_all_experiments(base_dir: str, pattern: str) -> Dict[str, Dict]:
+    """Scan disk directories and consolidated parquet, merge with dedup.
+
+    Returns dict keyed by ``"exp_name-exp_hash"``.  Disk experiments take
+    precedence over consolidated when both exist for the same key.
+    """
+    experiments = {}
+
+    # Phase 1: Scan disk directories (keyed by full path internally)
+    for exp_dir_path, exp_info in scan_experiment_directories(base_dir, pattern).items():
+        dir_key = os.path.basename(exp_dir_path)  # "exp_name-exp_hash"
+        experiments[dir_key] = exp_info
+
+    # Phase 2: Augment with consolidated-only experiments
+    consolidated_path = os.path.join(base_dir, 'consolidated.parquet')
+    if CONFIG.get('analysis', {}).get('use_consolidated', True) and os.path.exists(consolidated_path):
+        for key, exp_info in scan_consolidated_experiments(consolidated_path, pattern).items():
+            if key not in experiments:  # Both use "exp_name-exp_hash" keys now
+                experiments[key] = exp_info
 
     return experiments
 
@@ -776,14 +863,7 @@ def build_experiment_index(base_dir: str, pattern: str) -> pd.DataFrame:
     Returns:
         DataFrame with one row per experiment, including parameters and statistics.
     """
-    experiments = scan_experiment_directories(base_dir, pattern)
-
-    # Augment with consolidated-only experiments (dirs may not exist on disk)
-    consolidated_path = os.path.join(base_dir, 'consolidated.parquet')
-    if CONFIG.get('analysis', {}).get('use_consolidated', True) and os.path.exists(consolidated_path):
-        for key, exp_info in scan_consolidated_experiments(consolidated_path, pattern).items():
-            if key not in experiments:
-                experiments[key] = exp_info
+    experiments = scan_all_experiments(base_dir, pattern)
 
     if not experiments:
         raise ValueError(f"No experiments found in {base_dir} matching {pattern}")
@@ -1369,14 +1449,8 @@ def plot_commit_rate_over_time(
         title: Plot title
         window_size_sec: Window size in seconds for rate calculation
     """
-    experiments = scan_experiment_directories(base_dir, pattern)
-
-    # Augment with consolidated-only experiments
+    experiments = scan_all_experiments(base_dir, pattern)
     consolidated_path = os.path.join(base_dir, 'consolidated.parquet')
-    if CONFIG.get('analysis', {}).get('use_consolidated', True) and os.path.exists(consolidated_path):
-        for key, exp_info in scan_consolidated_experiments(consolidated_path, pattern).items():
-            if key not in experiments:
-                experiments[key] = exp_info
 
     if not experiments:
         print(f"No experiments found for commit rate plot")
@@ -1856,14 +1930,8 @@ def generate_commit_rate_over_time_table(
     window_size_sec: int = 60
 ):
     """Generate markdown table for commit rate over time data."""
-    experiments = scan_experiment_directories(base_dir, pattern)
-
-    # Augment with consolidated-only experiments
+    experiments = scan_all_experiments(base_dir, pattern)
     consolidated_path = os.path.join(base_dir, 'consolidated.parquet')
-    if CONFIG.get('analysis', {}).get('use_consolidated', True) and os.path.exists(consolidated_path):
-        for key, exp_info in scan_consolidated_experiments(consolidated_path, pattern).items():
-            if key not in experiments:
-                experiments[key] = exp_info
 
     if not experiments:
         print(f"  Skipping {output_path}: No experiments found")
@@ -2107,60 +2175,31 @@ def _extract_heatmap_params(experiments_dir: str, pattern: str,
     Args:
         extra_params: Additional parameter names to extract (e.g. for filtering).
     """
-    import tomli
     extra_params = extra_params or []
     records = []
-    seen_keys = set()
 
-    base_dir = Path(experiments_dir)
-    for exp_dir in sorted(base_dir.glob(pattern)):
-        cfg_path = exp_dir / "cfg.toml"
-        if not cfg_path.exists():
-            continue
+    experiments = scan_all_experiments(experiments_dir, pattern)
 
-        with open(cfg_path, "rb") as f:
-            cfg = tomli.load(f)
+    for dir_key, exp_info in experiments.items():
+        cfg = exp_info['config']
 
-        # Extract x and y parameter values from config
         x_val = _extract_param_value(cfg, x_param)
         y_val = _extract_param_value(cfg, y_param)
         if x_val is None or y_val is None:
             continue
 
-        seed_dirs = [d for d in exp_dir.iterdir() if d.is_dir() and d.name.isdigit()]
         record = {
-            "exp_dir": str(exp_dir),
+            "exp_dir": exp_info['dir'],
             x_param: x_val,
             y_param: y_val,
-            "num_seeds": len(seed_dirs),
+            "num_seeds": len(exp_info['seeds']),
         }
+        if exp_info['dir'] is None:
+            record["_exp_label"] = exp_info['label']
+            record["_exp_hash"] = exp_info['hash']
         for ep in extra_params:
             record[ep] = _extract_param_value(cfg, ep)
         records.append(record)
-        seen_keys.add(exp_dir.name)
-
-    # Augment with consolidated-only experiments
-    consolidated_path = os.path.join(experiments_dir, 'consolidated.parquet')
-    if CONFIG.get('analysis', {}).get('use_consolidated', True) and os.path.exists(consolidated_path):
-        for key, exp_info in scan_consolidated_experiments(consolidated_path, pattern).items():
-            if key in seen_keys:
-                continue
-            cfg = exp_info['config']
-            x_val = _extract_param_value(cfg, x_param)
-            y_val = _extract_param_value(cfg, y_param)
-            if x_val is None or y_val is None:
-                continue
-            record = {
-                "exp_dir": None,
-                x_param: x_val,
-                y_param: y_val,
-                "num_seeds": len(exp_info['seeds']),
-                "_exp_label": exp_info['label'],
-                "_exp_hash": exp_info['hash'],
-            }
-            for ep in extra_params:
-                record[ep] = _extract_param_value(cfg, ep)
-            records.append(record)
 
     return pd.DataFrame(records)
 
@@ -2538,7 +2577,7 @@ def generate_heatmap_plots(base_dir: str, pattern: str, output_dir: str,
 
 def _analyze_op_type_experiments(experiments_dir: str, pattern: str,
                                   group_by: str = None) -> pd.DataFrame:
-    """Extract per-operation-type metrics from experiment directories.
+    """Extract per-operation-type metrics from experiment directories and consolidated.
 
     Args:
         experiments_dir: Base directory containing experiment results.
@@ -2546,17 +2585,12 @@ def _analyze_op_type_experiments(experiments_dir: str, pattern: str,
         group_by: Additional config parameter to extract (e.g. 'catalog_service_latency_ms').
                   If None, defaults to 'fa_ratio'.
     """
-    import tomli
     records = []
+    experiments = scan_all_experiments(experiments_dir, pattern)
+    consolidated_path = os.path.join(experiments_dir, 'consolidated.parquet')
 
-    base_dir = Path(experiments_dir)
-    for exp_dir in sorted(base_dir.glob(pattern)):
-        cfg_path = exp_dir / "cfg.toml"
-        if not cfg_path.exists():
-            continue
-
-        with open(cfg_path, "rb") as f:
-            cfg = tomli.load(f)
+    for dir_key, exp_info in experiments.items():
+        cfg = exp_info['config']
 
         txn = cfg.get("transaction", {})
         fa_ratio = txn.get("operation_types", {}).get("fast_append", 0.5)
@@ -2567,38 +2601,72 @@ def _analyze_op_type_experiments(experiments_dir: str, pattern: str,
         if group_by and group_by not in ("fa_ratio", "inter_arrival_scale"):
             group_val = _extract_param_value(cfg, group_by)
 
-        for seed_dir in exp_dir.iterdir():
-            if not seed_dir.is_dir() or not seed_dir.name.isdigit():
-                continue
-            results_path = seed_dir / "results.parquet"
-            if not results_path.exists():
+        if exp_info['dir'] is None:
+            # Consolidated-only: load from consolidated parquet
+            df = _load_from_consolidated(consolidated_path, exp_info)
+            if df is None or len(df) == 0:
                 continue
 
-            df = pd.read_parquet(results_path)
+            for seed_val in df['seed'].unique() if 'seed' in df.columns else [0]:
+                seed_df = df[df['seed'] == seed_val] if 'seed' in df.columns else df
 
-            for op_type in df["operation_type"].dropna().unique():
-                op_df = df[df["operation_type"] == op_type]
-                if len(op_df) == 0:
+                for op_type in seed_df["operation_type"].dropna().unique():
+                    op_df = seed_df[seed_df["operation_type"] == op_type]
+                    if len(op_df) == 0:
+                        continue
+
+                    committed = op_df[op_df["status"].str.lower() == "committed"]
+
+                    record = {
+                        "seed": str(seed_val),
+                        "fa_ratio": fa_ratio,
+                        "inter_arrival_scale": scale,
+                        "operation_type": op_type,
+                        "total": len(op_df),
+                        "committed": len(committed),
+                        "aborted": len(op_df) - len(committed),
+                        "success_rate": len(committed) / len(op_df) * 100 if len(op_df) > 0 else 0,
+                        "mean_latency": committed["commit_latency"].mean() if len(committed) > 0 else np.nan,
+                        "p95_latency": committed["commit_latency"].quantile(0.95) if len(committed) > 0 else np.nan,
+                        "mean_retries": committed["n_retries"].mean() if len(committed) > 0 else np.nan,
+                    }
+                    if group_by and group_by not in ("fa_ratio", "inter_arrival_scale"):
+                        record[group_by] = group_val
+                    records.append(record)
+        else:
+            exp_dir = Path(exp_info['dir'])
+            for seed_dir in exp_dir.iterdir():
+                if not seed_dir.is_dir() or not seed_dir.name.isdigit():
+                    continue
+                results_path = seed_dir / "results.parquet"
+                if not results_path.exists():
                     continue
 
-                committed = op_df[op_df["status"].str.lower() == "committed"]
+                df = pd.read_parquet(results_path)
 
-                record = {
-                    "seed": seed_dir.name,
-                    "fa_ratio": fa_ratio,
-                    "inter_arrival_scale": scale,
-                    "operation_type": op_type,
-                    "total": len(op_df),
-                    "committed": len(committed),
-                    "aborted": len(op_df) - len(committed),
-                    "success_rate": len(committed) / len(op_df) * 100 if len(op_df) > 0 else 0,
-                    "mean_latency": committed["commit_latency"].mean() if len(committed) > 0 else np.nan,
-                    "p95_latency": committed["commit_latency"].quantile(0.95) if len(committed) > 0 else np.nan,
-                    "mean_retries": committed["n_retries"].mean() if len(committed) > 0 else np.nan,
-                }
-                if group_by and group_by not in ("fa_ratio", "inter_arrival_scale"):
-                    record[group_by] = group_val
-                records.append(record)
+                for op_type in df["operation_type"].dropna().unique():
+                    op_df = df[df["operation_type"] == op_type]
+                    if len(op_df) == 0:
+                        continue
+
+                    committed = op_df[op_df["status"].str.lower() == "committed"]
+
+                    record = {
+                        "seed": seed_dir.name,
+                        "fa_ratio": fa_ratio,
+                        "inter_arrival_scale": scale,
+                        "operation_type": op_type,
+                        "total": len(op_df),
+                        "committed": len(committed),
+                        "aborted": len(op_df) - len(committed),
+                        "success_rate": len(committed) / len(op_df) * 100 if len(op_df) > 0 else 0,
+                        "mean_latency": committed["commit_latency"].mean() if len(committed) > 0 else np.nan,
+                        "p95_latency": committed["commit_latency"].quantile(0.95) if len(committed) > 0 else np.nan,
+                        "mean_retries": committed["n_retries"].mean() if len(committed) > 0 else np.nan,
+                    }
+                    if group_by and group_by not in ("fa_ratio", "inter_arrival_scale"):
+                        record[group_by] = group_val
+                    records.append(record)
 
     return pd.DataFrame(records)
 

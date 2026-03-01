@@ -176,9 +176,9 @@ def process_config(config_path: Path, plotting_defaults: dict,
                 "reason": f"no experiments matching {pattern}"}
 
     if not matching and consolidated_exists:
-        from endive.saturation_analysis import scan_consolidated_experiments
-        consolidated_matches = scan_consolidated_experiments(
-            str(consolidated_path), pattern)
+        from endive.saturation_analysis import scan_all_experiments
+        consolidated_matches = scan_all_experiments(
+            str(base_dir), pattern)
         if not consolidated_matches:
             return {"config": str(config_path), "label": label, "status": "skipped",
                     "reason": f"no experiments matching {pattern}"}
