@@ -179,9 +179,8 @@ def _consolidate_experiments(experiments, output_path, schema, compression, comp
 
             # Track whether all seeds for this experiment succeeded
             exp_seeds_ok = True
-            exp_tables = []
 
-            # Process each seed
+            # Process each seed — stream directly to writer, no buffering
             for seed_dir in seed_dirs:
                 parquet_path = seed_dir / 'results.parquet'
                 if not parquet_path.exists():
@@ -214,33 +213,29 @@ def _consolidate_experiments(experiments, output_path, schema, compression, comp
 
                     # Convert to PyArrow table
                     table = pa.Table.from_pandas(df, schema=schema)
-                    exp_tables.append(table)
 
-                    # Clear dataframe memory
-                    del df
+                    # Write to file (append mode) — one row group per seed
+                    if writer is None:
+                        writer = pq.ParquetWriter(
+                            output_path,
+                            schema,
+                            compression=compression,
+                            compression_level=compression_level if compression == 'zstd' else None,
+                            use_dictionary=['exp_name', 'exp_hash', 'status'],
+                            write_statistics=True,
+                            version='2.6'
+                        )
+
+                    writer.write_table(table)
+                    total_rows += len(df)
+
+                    # Clear memory
+                    del df, table
 
                 except Exception as e:
                     print(f"\n  ERROR processing {parquet_path}: {e}")
                     exp_seeds_ok = False
                     continue
-
-            # Write all seeds for this experiment as one row group
-            if exp_tables:
-                if writer is None:
-                    writer = pq.ParquetWriter(
-                        output_path,
-                        schema,
-                        compression=compression,
-                        compression_level=compression_level if compression == 'zstd' else None,
-                        use_dictionary=['exp_name', 'exp_hash', 'status'],
-                        write_statistics=True,
-                        version='2.6'
-                    )
-
-                combined = pa.concat_tables(exp_tables)
-                writer.write_table(combined)
-                total_rows += combined.num_rows
-                del exp_tables, combined
 
             # Delete experiment directory after all seeds written
             if destructive and exp_seeds_ok:
