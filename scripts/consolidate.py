@@ -65,22 +65,40 @@ def load_and_normalize_schema(parquet_path: str) -> pd.DataFrame:
 
 
 def discover_schema(experiments):
-    """Discover schema from first available results.parquet."""
+    """Discover schema as union of all distinct result schemas.
+
+    Scans a sample of experiments to find all columns, then builds
+    a superset schema.  Missing columns are filled with defaults
+    during consolidation (see _consolidate_experiments).
+    """
+    # Collect field definitions from a sample of experiments
+    field_map = {}  # name -> pa.Field (first seen wins for type)
+    sampled = 0
     for _, _, _, seed_dirs in experiments:
         for seed_dir in seed_dirs:
             parquet_path = seed_dir / 'results.parquet'
             if parquet_path.exists():
                 df = load_and_normalize_schema(str(parquet_path))
                 table = pa.Table.from_pandas(df, preserve_index=False)
-                fields = list(table.schema)
-                fields.extend([
-                    pa.field('exp_name', pa.string()),
-                    pa.field('exp_hash', pa.string()),
-                    pa.field('seed', pa.int64()),
-                    pa.field('config', pa.map_(pa.string(), pa.string())),
-                ])
-                return pa.schema(fields)
-    raise ValueError("No results.parquet files found to discover schema")
+                for field in table.schema:
+                    if field.name not in field_map:
+                        field_map[field.name] = field
+                sampled += 1
+                break  # one seed per experiment is enough
+        if sampled >= 50:
+            break  # 50 experiments is enough to discover all columns
+
+    if not field_map:
+        raise ValueError("No results.parquet files found to discover schema")
+
+    fields = list(field_map.values())
+    fields.extend([
+        pa.field('exp_name', pa.string()),
+        pa.field('exp_hash', pa.string()),
+        pa.field('seed', pa.int64()),
+        pa.field('config', pa.map_(pa.string(), pa.string())),
+    ])
+    return pa.schema(fields)
 
 
 def scan_experiments(base_dir: str):
@@ -104,6 +122,35 @@ def scan_experiments(base_dir: str):
             experiments.append((exp_name, exp_hash, exp_dir, seed_dirs))
 
     return experiments
+
+
+def _experiment_sort_key(exp_name, exp_hash, exp_dir, seed_dirs):
+    """Sort key: (exp_name, provider, num_tables, scale, fa_ratio, p_real, service_latency).
+
+    Sorts experiments by swept parameters so that parameter sweep points
+    are contiguous in the consolidated file, improving predicate pushdown.
+    """
+    cfg_path = exp_dir / 'cfg.toml'
+    if not cfg_path.exists():
+        return (exp_name, '', 0, 0.0, 0.0, 0.0, 0.0)
+    try:
+        with open(cfg_path, 'rb') as f:
+            config = tomli.load(f)
+    except Exception:
+        return (exp_name, '', 0, 0.0, 0.0, 0.0, 0.0)
+    cat = config.get('catalog', {})
+    txn = config.get('transaction', {})
+    storage = config.get('storage', {})
+    svc = cat.get('service', {})
+    return (
+        exp_name,
+        storage.get('provider', ''),
+        cat.get('num_tables', 0),
+        txn.get('inter_arrival', {}).get('scale', 0.0),
+        txn.get('operation_types', {}).get('fast_append', 0.0),
+        txn.get('real_conflict_probability', 0.0),
+        svc.get('latency_ms', 0.0) if isinstance(svc, dict) else 0.0,
+    )
 
 
 def _consolidate_experiments(experiments, output_path, schema, compression, compression_level, destructive):
@@ -132,6 +179,7 @@ def _consolidate_experiments(experiments, output_path, schema, compression, comp
 
             # Track whether all seeds for this experiment succeeded
             exp_seeds_ok = True
+            exp_tables = []
 
             # Process each seed
             for seed_dir in seed_dirs:
@@ -152,31 +200,47 @@ def _consolidate_experiments(experiments, output_path, schema, compression, comp
                     # Sort by t_submit only
                     df = df.sort_values('t_submit')
 
+                    # Fill missing columns with type-appropriate defaults
+                    for field in schema:
+                        if field.name not in df.columns and field.name not in ('exp_name', 'exp_hash', 'seed', 'config'):
+                            if pa.types.is_integer(field.type):
+                                df[field.name] = 0
+                            elif pa.types.is_floating(field.type):
+                                df[field.name] = 0.0
+                            elif pa.types.is_string(field.type) or pa.types.is_large_string(field.type):
+                                df[field.name] = ''
+                            else:
+                                df[field.name] = None
+
                     # Convert to PyArrow table
                     table = pa.Table.from_pandas(df, schema=schema)
+                    exp_tables.append(table)
 
-                    # Write to file (append mode)
-                    if writer is None:
-                        writer = pq.ParquetWriter(
-                            output_path,
-                            schema,
-                            compression=compression,
-                            compression_level=compression_level if compression == 'zstd' else None,
-                            use_dictionary=['exp_name', 'exp_hash', 'status'],
-                            write_statistics=True,
-                            version='2.6'
-                        )
-
-                    writer.write_table(table)
-                    total_rows += len(df)
-
-                    # Clear memory
-                    del df, table
+                    # Clear dataframe memory
+                    del df
 
                 except Exception as e:
                     print(f"\n  ERROR processing {parquet_path}: {e}")
                     exp_seeds_ok = False
                     continue
+
+            # Write all seeds for this experiment as one row group
+            if exp_tables:
+                if writer is None:
+                    writer = pq.ParquetWriter(
+                        output_path,
+                        schema,
+                        compression=compression,
+                        compression_level=compression_level if compression == 'zstd' else None,
+                        use_dictionary=['exp_name', 'exp_hash', 'status'],
+                        write_statistics=True,
+                        version='2.6'
+                    )
+
+                combined = pa.concat_tables(exp_tables)
+                writer.write_table(combined)
+                total_rows += combined.num_rows
+                del exp_tables, combined
 
             # Delete experiment directory after all seeds written
             if destructive and exp_seeds_ok:
@@ -248,6 +312,7 @@ def consolidate_incremental(
     print("-" * 80)
 
     experiments = scan_experiments(base_dir)
+    experiments.sort(key=lambda e: _experiment_sort_key(*e))
 
     print(f"\nFound {len(experiments)} experiments")
     total_seeds = sum(len(seeds) for _, _, _, seeds in experiments)
@@ -307,6 +372,7 @@ def consolidate_partitioned(
     print("-" * 80)
 
     experiments = scan_experiments(base_dir)
+    experiments.sort(key=lambda e: _experiment_sort_key(*e))
     print(f"\nFound {len(experiments)} experiments")
     total_seeds = sum(len(seeds) for _, _, _, seeds in experiments)
     print(f"Total seeds: {total_seeds}")
