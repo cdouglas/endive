@@ -228,6 +228,11 @@ def cli():
         action="store_true",
         help="Disable progress bar"
     )
+    parser.add_argument(
+        "--profile",
+        action="store_true",
+        help="Enable DES engine profiling (writes .profile.json)"
+    )
     args = parser.parse_args()
 
     # Setup logging
@@ -298,7 +303,12 @@ def cli():
     temp_output_path = output_dir / ".running.parquet"
 
     progress_path = str(output_dir / ".progress.json")
-    sim = Simulation(sim_config, output_path=str(temp_output_path), progress_path=progress_path)
+    sim = Simulation(
+        sim_config,
+        output_path=str(temp_output_path),
+        progress_path=progress_path,
+        profile=getattr(args, 'profile', False),
+    )
     stats = sim.run()
 
     logger.info("Simulation complete")

@@ -83,6 +83,9 @@ class TransactionResult:
     conflict_io_ms: float = 0.0        # Total time in retry-specific I/O
     catalog_commit_ms: float = 0.0     # Total time in catalog.commit() calls
 
+    # DES engine profiling
+    event_count: int = 0               # Number of SimPy events processed by this txn
+
 
 # ---------------------------------------------------------------------------
 # Conflict detection interface (implementations in endive-f34)

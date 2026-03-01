@@ -259,7 +259,8 @@ def create_config_variant(base_config: Path, params: dict, seed: int,
     os.close(fd)
     return Path(path)
 
-def run_single_experiment(run: ExperimentRun, duration_ms: Optional[int] = None) -> tuple:
+def run_single_experiment(run: ExperimentRun, duration_ms: Optional[int] = None,
+                          profile: bool = False) -> tuple:
     """Run a single experiment. Returns (run_id, success, message)."""
     try:
         base_config = CONFIG_DIR / run.config_path
@@ -271,11 +272,14 @@ def run_single_experiment(run: ExperimentRun, duration_ms: Optional[int] = None)
 
         try:
             # Run simulation
+            cmd = ["python", "-m", "endive.main", str(config_path), "--yes"]
+            if profile:
+                cmd.append("--profile")
             result = subprocess.run(
-                ["python", "-m", "endive.main", str(config_path), "--yes"],
+                cmd,
                 capture_output=True,
                 text=True,
-                timeout=14400  # 4 hour timeout
+                timeout=28800  # 8 hour timeout
             )
 
             success = result.returncode == 0
@@ -287,7 +291,7 @@ def run_single_experiment(run: ExperimentRun, duration_ms: Optional[int] = None)
             config_path.unlink(missing_ok=True)
 
     except subprocess.TimeoutExpired:
-        return (run.run_id, False, "Timeout after 2 hours")
+        return (run.run_id, False, "Timeout after 8 hours")
     except Exception as e:
         return (run.run_id, False, str(e))
 
@@ -300,6 +304,60 @@ def check_experiment_exists(run: ExperimentRun) -> bool:
         if (seed_dir / "results.parquet").exists():
             return True
     return False
+
+def _collect_profile_csv():
+    """Scan .profile.json files and merge with cfg.toml params into .profile.csv."""
+    import csv
+    import tomllib
+
+    rows = []
+    for profile_path in EXPERIMENTS_DIR.glob("*/*/.profile.json"):
+        try:
+            with open(profile_path) as f:
+                profile = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            continue
+
+        summary = profile.get("summary", {})
+        seed_dir = profile_path.parent
+        exp_dir = seed_dir.parent
+
+        # Read cfg.toml for experiment parameters
+        cfg_path = exp_dir / "cfg.toml"
+        params = {}
+        if cfg_path.exists():
+            try:
+                with open(cfg_path, "rb") as f:
+                    cfg = tomllib.load(f)
+                params["label"] = cfg.get("experiment", {}).get("label", "")
+                params["inter_arrival_scale"] = cfg.get("transaction", {}).get(
+                    "inter_arrival", {}
+                ).get("scale", "")
+                params["num_tables"] = cfg.get("catalog", {}).get("num_tables", "")
+                params["provider"] = cfg.get("storage", {}).get("provider", "")
+            except Exception:
+                pass
+
+        row = {
+            "experiment": exp_dir.name,
+            "seed": seed_dir.name,
+            **params,
+            **summary,
+        }
+        rows.append(row)
+
+    if not rows:
+        print("No .profile.json files found")
+        return
+
+    csv_path = EXPERIMENTS_DIR / ".profile.csv"
+    fieldnames = list(rows[0].keys())
+    with open(csv_path, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+    print(f"Profile data collected: {csv_path} ({len(rows)} runs)")
+
 
 # ============================================================================
 # Experiment Generation
@@ -548,6 +606,7 @@ def run_experiments(args):
 
     # Duration override for quick mode
     duration_ms = QUICK_DURATION if args.quick else None
+    profile = args.profile
 
     # Progress tracking
     completed = 0
@@ -560,7 +619,7 @@ def run_experiments(args):
 
     with ProcessPoolExecutor(max_workers=args.parallel) as executor:
         futures = {
-            executor.submit(run_single_experiment, run, duration_ms): run
+            executor.submit(run_single_experiment, run, duration_ms, profile): run
             for run in all_runs
         }
 
@@ -617,6 +676,10 @@ def run_experiments(args):
             print(f"  ... and {len(state.failed) - 10} more")
         print("\nRe-run failed experiments with: python scripts/run_all_experiments.py --resume")
 
+    # Collect profile data if profiling was enabled
+    if profile:
+        _collect_profile_csv()
+
 # ============================================================================
 # Entry Point
 # ============================================================================
@@ -646,6 +709,8 @@ def main():
                         help="Resume from previous state, skipping completed")
     parser.add_argument("--force", "-f", action="store_true",
                         help="Force re-run of existing experiments")
+    parser.add_argument("--profile", action="store_true",
+                        help="Enable DES engine profiling (writes .profile.json per run)")
 
     args = parser.parse_args()
 

@@ -15,6 +15,7 @@ bare floats representing latencies in milliseconds.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import time
@@ -94,6 +95,7 @@ _ARROW_SCHEMA = pa.schema([
     ("per_attempt_io_ms", pa.float32()),
     ("conflict_io_ms", pa.float32()),
     ("catalog_commit_ms", pa.float32()),
+    ("event_count", pa.int32()),
 ])
 
 
@@ -121,6 +123,7 @@ def _result_to_row(r: TransactionResult) -> dict:
         "per_attempt_io_ms": round(r.per_attempt_io_ms, 2),
         "conflict_io_ms": round(r.conflict_io_ms, 2),
         "catalog_commit_ms": round(r.catalog_commit_ms, 2),
+        "event_count": r.event_count,
     }
 
 
@@ -271,6 +274,26 @@ class Statistics:
 
 
 # ---------------------------------------------------------------------------
+# DES engine profiling
+# ---------------------------------------------------------------------------
+
+class _CountingEnvironment(simpy.Environment):
+    """SimPy environment that counts discrete events processed."""
+
+    def __init__(self, initial_time: float = 0):
+        super().__init__(initial_time)
+        self.event_count: int = 0
+
+    def step(self) -> None:
+        self.event_count += 1
+        super().step()
+
+    @property
+    def queue_depth(self) -> int:
+        return len(self._queue)
+
+
+# ---------------------------------------------------------------------------
 # Simulation
 # ---------------------------------------------------------------------------
 
@@ -296,12 +319,22 @@ class Simulation:
         config: SimulationConfig,
         output_path: str | None = None,
         progress_path: str | None = None,
+        profile: bool = False,
     ):
         self._config = config
         self._stats = Statistics(output_path=output_path)
         self._progress_path = progress_path
+        self._profile = profile
         self._start_wall: float = 0.0
         self._rng: Optional[np.random.RandomState] = None
+
+        # Active process tracking (for profiling)
+        self._active_processes: int = 0
+        self._peak_processes: int = 0
+
+        # Profile samples (collected by _progress_reporter)
+        self._profile_samples: list[dict] = []
+        self._env: Optional[_CountingEnvironment] = None
 
     def run(self) -> Statistics:
         """Run simulation and return collected statistics."""
@@ -313,13 +346,19 @@ class Simulation:
             self._rng = np.random.RandomState(self._config.seed + 1)
 
         self._start_wall = time.time()
-        env = simpy.Environment()
+        env = _CountingEnvironment()
+        self._env = env
         env.process(self._run_workload(env))
         if self._progress_path:
             env.process(self._progress_reporter(env))
         env.run(until=self._config.duration_ms)
 
         self._stats.close()
+
+        # Write profile output before cleaning up progress
+        if self._profile and self._progress_path:
+            self._write_profile_json(env)
+
         # Clean up progress file
         if self._progress_path:
             try:
@@ -328,19 +367,74 @@ class Simulation:
                 pass
         return self._stats
 
+    def _write_profile_json(self, env: _CountingEnvironment) -> None:
+        """Write .profile.json with DES engine profiling data."""
+        output_dir = os.path.dirname(self._progress_path)
+        profile_path = os.path.join(output_dir, ".profile.json")
+
+        wall_total = time.time() - self._start_wall
+        des_total = env.event_count
+
+        # Compute summary from samples
+        if self._profile_samples:
+            rates = [s["des_rate"] for s in self._profile_samples if s["des_rate"] > 0]
+            depths = [s["queue_depth"] for s in self._profile_samples]
+            speeds = [s["sim_speed"] for s in self._profile_samples if s["sim_speed"] > 0]
+            slow_intervals = sum(1 for s in self._profile_samples if s["sim_speed"] < 1.0)
+        else:
+            rates = []
+            depths = []
+            speeds = []
+            slow_intervals = 0
+
+        summary = {
+            "des_events_total": des_total,
+            "wall_clock_s": round(wall_total, 2),
+            "des_rate_mean": round(sum(rates) / len(rates), 1) if rates else 0,
+            "des_rate_min": round(min(rates), 1) if rates else 0,
+            "des_rate_max": round(max(rates), 1) if rates else 0,
+            "queue_depth_max": max(depths) if depths else 0,
+            "queue_depth_mean": round(sum(depths) / len(depths), 1) if depths else 0,
+            "peak_processes": self._peak_processes,
+            "sim_speed_min": round(min(speeds), 2) if speeds else 0,
+            "slow_intervals": slow_intervals,
+        }
+
+        profile = {"summary": summary, "samples": self._profile_samples}
+
+        try:
+            with open(profile_path, "w") as f:
+                json.dump(profile, f, indent=2)
+        except OSError:
+            pass
+
     def _progress_reporter(
-        self, env: simpy.Environment, interval_ms: float = 60_000,
+        self, env: _CountingEnvironment, interval_ms: float = 60_000,
     ) -> Generator:
         """Periodically write progress to a JSON file."""
+        last_wall = self._start_wall
+        last_events = 0
+        last_sim_time = 0.0
+
         while True:
             yield env.timeout(interval_ms)
+            now_wall = time.time()
+            wall_delta = now_wall - last_wall
+            event_delta = env.event_count - last_events
+            sim_delta = env.now - last_sim_time
+            des_rate = event_delta / wall_delta if wall_delta > 0 else 0
+            # sim_speed: how many sim-seconds pass per wall-second
+            sim_speed = (sim_delta / 1000.0) / wall_delta if wall_delta > 0 else 0
+
             progress = {
                 "sim_time_ms": env.now,
                 "duration_ms": self._config.duration_ms,
                 "pct": round(env.now / self._config.duration_ms * 100, 1),
                 "committed": self._stats.committed,
                 "aborted": self._stats.aborted,
-                "wall_clock_s": round(time.time() - self._start_wall, 2),
+                "wall_clock_s": round(now_wall - self._start_wall, 2),
+                "des_rate": round(des_rate, 1),
+                "queue_depth": env.queue_depth,
             }
             tmp = self._progress_path + ".tmp"
             try:
@@ -350,6 +444,23 @@ class Simulation:
             except OSError:
                 pass
 
+            # Collect profile sample if profiling enabled
+            if self._profile:
+                self._profile_samples.append({
+                    "sim_time_ms": env.now,
+                    "wall_clock_s": round(now_wall - self._start_wall, 2),
+                    "wall_delta_s": round(wall_delta, 3),
+                    "des_events": event_delta,
+                    "des_rate": round(des_rate, 1),
+                    "queue_depth": env.queue_depth,
+                    "active_processes": self._active_processes,
+                    "sim_speed": round(sim_speed, 2),
+                })
+
+            last_wall = now_wall
+            last_events = env.event_count
+            last_sim_time = env.now
+
     def _run_workload(self, env: simpy.Environment) -> Generator:
         """Generate transactions and launch them as SimPy processes."""
         for delay, txn in self._config.workload.generate():
@@ -358,10 +469,13 @@ class Simulation:
 
     def _execute_transaction(
         self,
-        env: simpy.Environment,
+        env: _CountingEnvironment,
         txn: Transaction,
     ) -> Generator:
         """Execute a single transaction and record its result."""
+        self._active_processes += 1
+        self._peak_processes = max(self._peak_processes, self._active_processes)
+
         gen = txn.execute(
             self._config.catalog,
             self._config.storage_provider,
@@ -370,8 +484,11 @@ class Simulation:
             self._config.ml_append_mode,
         )
 
-        result = yield from self._drive_generator(env, gen)
-        self._stats.record_transaction(result)
+        try:
+            result = yield from self._drive_generator(env, gen)
+            self._stats.record_transaction(result)
+        finally:
+            self._active_processes -= 1
 
     @staticmethod
     def _drive_generator(
@@ -384,16 +501,27 @@ class Simulation:
         This method converts each float into a SimPy timeout event,
         driving the generator to completion.
 
-        Returns the generator's return value (TransactionResult).
+        Returns the generator's return value (TransactionResult) with
+        event_count attached when using a _CountingEnvironment.
         """
+        has_counting = hasattr(env, 'event_count')
+        event_start = env.event_count if has_counting else 0
         try:
             latency = next(gen)
         except StopIteration as e:
-            return e.value
+            result = e.value
+            if has_counting and isinstance(result, TransactionResult):
+                event_count = env.event_count - event_start
+                result = dataclasses.replace(result, event_count=event_count)
+            return result
 
         while True:
             yield env.timeout(latency)
             try:
                 latency = gen.send(None)
             except StopIteration as e:
-                return e.value
+                result = e.value
+                if has_counting and isinstance(result, TransactionResult):
+                    event_count = env.event_count - event_start
+                    result = dataclasses.replace(result, event_count=event_count)
+                return result

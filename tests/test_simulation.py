@@ -7,6 +7,7 @@ Tests:
 - SimPy bridge: _drive_generator converts floats to timeouts
 """
 
+import json
 import os
 import tempfile
 
@@ -17,7 +18,12 @@ import simpy
 
 from endive.catalog import CASCatalog, InstantCatalog
 from endive.conflict_detector import ProbabilisticConflictDetector
-from endive.simulation import Simulation, SimulationConfig, Statistics
+from endive.simulation import (
+    Simulation,
+    SimulationConfig,
+    Statistics,
+    _CountingEnvironment,
+)
 from endive.storage import (
     InstantStorageProvider,
     LognormalLatency,
@@ -657,3 +663,135 @@ class TestSimulationIntegration:
             assert list(df1["txn_id"]) == list(df2["txn_id"])
         finally:
             os.unlink(path)
+
+
+# ---------------------------------------------------------------------------
+# DES Engine Profiling
+# ---------------------------------------------------------------------------
+
+class TestCountingEnvironment:
+    def test_counts_events(self):
+        """_CountingEnvironment increments event_count on each step."""
+        env = _CountingEnvironment()
+        assert env.event_count == 0
+
+        def process():
+            yield env.timeout(10)
+            yield env.timeout(20)
+
+        env.process(process())
+        env.run()
+        assert env.event_count > 0
+
+    def test_queue_depth_property(self):
+        """queue_depth returns the current event queue length."""
+        env = _CountingEnvironment()
+        # Before any processes, queue should be empty
+        assert env.queue_depth == 0
+
+        depths = []
+
+        def observer():
+            # After scheduling other processes, queue has pending events
+            depths.append(env.queue_depth)
+            yield env.timeout(100)
+
+        def worker():
+            yield env.timeout(50)
+
+        env.process(worker())
+        env.process(observer())
+        env.run()
+        # We just verify it doesn't crash and returns an int
+        assert isinstance(depths[0], int)
+
+    def test_counting_in_simulation(self):
+        """Running a full simulation uses _CountingEnvironment."""
+        config = make_simulation_config(duration_ms=2000.0)
+        sim = Simulation(config)
+        stats = sim.run()
+        # After run, the env should have counted events
+        assert sim._env is not None
+        assert sim._env.event_count > 0
+
+
+class TestEventCountInResult:
+    def test_event_count_in_transaction_result(self):
+        """Committed TransactionResults have event_count > 0."""
+        config = make_simulation_config(
+            duration_ms=2000.0,
+            inter_arrival_scale=200.0,
+        )
+        sim = Simulation(config)
+        stats = sim.run()
+        assert stats.committed > 0
+        for r in stats.transactions:
+            if r.status == TransactionStatus.COMMITTED:
+                assert r.event_count > 0, f"txn {r.txn_id} has event_count=0"
+
+    def test_event_count_in_parquet(self):
+        """event_count column appears in exported parquet."""
+        config = make_simulation_config(duration_ms=2000.0)
+        stats = Simulation(config).run()
+
+        with tempfile.NamedTemporaryFile(suffix=".parquet", delete=False) as f:
+            path = f.name
+
+        try:
+            stats.export_parquet(path)
+            df = pd.read_parquet(path)
+            assert "event_count" in df.columns
+            assert (df["event_count"] > 0).any()
+        finally:
+            os.unlink(path)
+
+
+class TestProfileOutput:
+    def test_profile_json_written(self):
+        """Simulation with profile=True writes .profile.json."""
+        config = make_simulation_config(duration_ms=5000.0, seed=42)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = os.path.join(tmpdir, "results.parquet")
+            progress_path = os.path.join(tmpdir, ".progress.json")
+
+            sim = Simulation(
+                config,
+                output_path=output_path,
+                progress_path=progress_path,
+                profile=True,
+            )
+            stats = sim.run()
+
+            profile_path = os.path.join(tmpdir, ".profile.json")
+            assert os.path.exists(profile_path), ".profile.json not written"
+
+            with open(profile_path) as f:
+                profile = json.load(f)
+
+            assert "summary" in profile
+            assert "samples" in profile
+            summary = profile["summary"]
+            assert summary["des_events_total"] > 0
+            assert summary["peak_processes"] >= 1
+            assert "des_rate_mean" in summary
+            assert "queue_depth_max" in summary
+
+    def test_no_profile_without_flag(self):
+        """Simulation without profile=True does NOT write .profile.json."""
+        config = make_simulation_config(duration_ms=2000.0, seed=42)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = os.path.join(tmpdir, "results.parquet")
+            progress_path = os.path.join(tmpdir, ".progress.json")
+
+            sim = Simulation(
+                config,
+                output_path=output_path,
+                progress_path=progress_path,
+                profile=False,
+            )
+            sim.run()
+
+            profile_path = os.path.join(tmpdir, ".profile.json")
+            assert not os.path.exists(profile_path)

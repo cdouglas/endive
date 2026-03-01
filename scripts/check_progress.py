@@ -93,6 +93,14 @@ def print_progress(clear: bool = False):
         print(f"    Total committed: {total_committed}")
         print(f"    Total aborted:   {total_aborted}")
 
+        # DES engine stats (if available in progress files)
+        sims_with_des = [p for p in progress_files if "des_rate" in p]
+        if sims_with_des:
+            avg_des_rate = sum(p["des_rate"] for p in sims_with_des) / len(sims_with_des)
+            max_queue = max(p.get("queue_depth", 0) for p in sims_with_des)
+            print(f"    Avg DES rate:    {avg_des_rate:.0f} events/s")
+            print(f"    Max queue depth: {max_queue}")
+
         # Estimate remaining time from wall-clock rate
         # Average: how many wall seconds per sim-percent
         sims_with_rate = [
