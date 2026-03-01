@@ -48,7 +48,6 @@ RUN mkdir -p /app/experiments /app/plots /app/experiment_logs
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONPATH=/app
 ENV GIT_SHA=${GIT_SHA}
-ENV TZ=America/Los_Angeles
 
 # Record git SHA as label for easy inspection
 LABEL git.sha="${GIT_SHA}"

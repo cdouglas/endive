@@ -31,6 +31,8 @@ services:
       - PYTHONUNBUFFERED=1
       # Limit threads to avoid oversubscription
       - OMP_NUM_THREADS=1
+      # Use California time for git commits
+      - TZ=America/Los_Angeles
     working_dir: /app
     stdin_open: true
     tty: true
