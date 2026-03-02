@@ -707,16 +707,17 @@ def load_and_aggregate_results(exp_info: Dict) -> pd.DataFrame:
     return combined
 
 
-def load_and_aggregate_results_consolidated(exp_info: Dict, consolidated_path: str = 'experiments/consolidated.parquet') -> pd.DataFrame:
+def load_and_aggregate_results_consolidated(exp_info: Dict, reader: '_ConsolidatedReader') -> pd.DataFrame:
     """
-    Load experiment results from consolidated parquet file using predicate pushdown.
+    Load experiment results from consolidated parquet via a shared reader.
 
-    This is a memory-efficient alternative to load_and_aggregate_results() that uses
-    the consolidated parquet file with predicate pushdown to only load relevant data.
+    Uses _ConsolidatedReader for efficient row-group-level access (file opened
+    once, RG index reused across calls).  Warmup/cooldown filtering is applied
+    in pandas after the read.
 
     Args:
         exp_info: Experiment information dict with 'label', 'hash', 'seeds', and 'config'
-        consolidated_path: Path to consolidated parquet file
+        reader: A _ConsolidatedReader instance for the consolidated parquet file
 
     Returns:
         DataFrame with aggregated statistics across all seeds (warmup/cooldown excluded)
@@ -729,40 +730,22 @@ def load_and_aggregate_results_consolidated(exp_info: Dict, consolidated_path: s
     sim_duration_ms = exp_info['config'].get('simulation', {}).get('duration_ms', 3600000)
     cooldown_start_ms = sim_duration_ms - cooldown_ms
 
-    # Extract exp_name and exp_hash from exp_info
-    exp_name = exp_info['label']
-    exp_hash = exp_info['hash']
+    df = reader.read_experiment(exp_info['label'], exp_info['hash'])
+    if df is None or len(df) == 0:
+        return None
 
-    # Use predicate pushdown to load only this experiment's data
-    # Parquet will skip entire row groups that don't match these filters
-    filters = [
-        ('exp_name', '==', exp_name),
-        ('exp_hash', '==', exp_hash),
-        # Pushdown t_submit filter for warmup/cooldown
-        ('t_submit', '>=', warmup_ms),
-        ('t_submit', '<', cooldown_start_ms)
-    ]
-
-    try:
-        df = pd.read_parquet(consolidated_path, filters=filters)
-    except FileNotFoundError:
-        print(f"Warning: Consolidated file not found at {consolidated_path}, falling back to individual files")
-        return load_and_aggregate_results(exp_info)
+    # Apply warmup/cooldown filter in pandas
+    df = df[(df['t_submit'] >= warmup_ms) & (df['t_submit'] < cooldown_start_ms)]
 
     if len(df) == 0:
         return None
 
-    # Drop the consolidated-specific columns (we don't need them for analysis)
-    df = df.drop(columns=['exp_name', 'exp_hash', 'config', 'code_hash'], errors='ignore')
-
     # Report filtering statistics
-    # Note: With predicate pushdown, we don't know the pre-filter count, so we approximate
     total_txns_after_filter = len(df)
     active_window_ms = cooldown_start_ms - warmup_ms
 
     # Estimate total txns (assuming uniform distribution over time)
     duration_ratio = sim_duration_ms / active_window_ms if active_window_ms > 0 else 1
-    estimated_total = int(total_txns_after_filter * duration_ratio)
     pct_excluded = 100.0 * (1 - 1 / duration_ratio) if duration_ratio > 1 else 0
 
     print(f" (warmup: {warmup_ms/1000:.0f}s, cooldown: {cooldown_ms/1000:.0f}s, " +
@@ -950,6 +933,20 @@ def build_experiment_index(base_dir: str, pattern: str) -> pd.DataFrame:
 
     rows = []
 
+    # Build consolidated reader once (reused across all experiments)
+    use_consolidated = CONFIG.get('analysis', {}).get('use_consolidated', True)
+    reader = None
+    if use_consolidated:
+        consolidated_filename = CONFIG.get('paths', {}).get('consolidated_file', 'experiments/consolidated.parquet')
+        if os.path.isabs(consolidated_filename):
+            consolidated_path = consolidated_filename
+        elif consolidated_filename.startswith(base_dir):
+            consolidated_path = consolidated_filename
+        else:
+            consolidated_path = os.path.join(base_dir, 'consolidated.parquet')
+        if os.path.exists(consolidated_path):
+            reader = _ConsolidatedReader(consolidated_path)
+
     for exp_dir, exp_info in experiments.items():
         # Extract parameters
         params = extract_key_parameters(exp_info['config'])
@@ -957,30 +954,15 @@ def build_experiment_index(base_dir: str, pattern: str) -> pd.DataFrame:
         # Load and aggregate results
         print(f"Processing {exp_info['label']}-{exp_info['hash']}...", end='')
 
-        # Use consolidated file if enabled, otherwise use individual files
-        use_consolidated = CONFIG.get('analysis', {}).get('use_consolidated', True)
-        if use_consolidated:
-            # Make consolidated path relative to base_dir
-            consolidated_filename = CONFIG.get('paths', {}).get('consolidated_file', 'experiments/consolidated.parquet')
-            # If consolidated_file is just a filename, look for it in base_dir
-            # If it's an absolute path or contains base_dir, use as-is
-            if os.path.isabs(consolidated_filename):
-                consolidated_path = consolidated_filename
-            elif consolidated_filename.startswith(base_dir):
-                consolidated_path = consolidated_filename
-            else:
-                # Extract just the filename and look for it in base_dir
-                consolidated_path = os.path.join(base_dir, 'consolidated.parquet')
-
-            # Check if consolidated file exists before trying to use it
-            if os.path.exists(consolidated_path):
-                df = load_and_aggregate_results_consolidated(exp_info, consolidated_path)
-            elif exp_info['dir'] is not None:
-                # Consolidated file doesn't exist, use individual files
-                df = load_and_aggregate_results(exp_info)
-            else:
-                print(" consolidated-only experiment but consolidated file missing")
-                continue
+        # Use consolidated reader if available, otherwise use individual files
+        if reader is not None:
+            df = load_and_aggregate_results_consolidated(exp_info, reader)
+        elif use_consolidated and exp_info['dir'] is not None:
+            # Consolidated file doesn't exist, use individual files
+            df = load_and_aggregate_results(exp_info)
+        elif use_consolidated:
+            print(" consolidated-only experiment but consolidated file missing")
+            continue
         elif exp_info['dir'] is not None:
             df = load_and_aggregate_results(exp_info)
         else:
@@ -1485,24 +1467,54 @@ def plot_overhead_vs_throughput(
     plt.close()
 
 
-def _load_from_consolidated(consolidated_path: str, exp_info: Dict) -> Optional[pd.DataFrame]:
+class _ConsolidatedReader:
+    """Efficient reader for consolidated parquet.
+
+    Opens the file once, builds an ``(exp_name, exp_hash) → [rg_indices]``
+    index from row-group metadata, and reads only matching row groups with
+    column projection (excluding heavyweight metadata columns).
+    """
+
+    def __init__(self, path: str):
+        import pyarrow.parquet as pq
+        self.pf = pq.ParquetFile(path)
+        self._index = self._build_index()
+        # Exclude metadata columns that callers always drop
+        exclude = {'config', 'code_hash', 'exp_name', 'exp_hash'}
+        self._columns = [f.name for f in self.pf.schema_arrow if f.name not in exclude]
+
+    def _build_index(self) -> Dict[Tuple[str, str], List[int]]:
+        schema = self.pf.schema_arrow
+        name_idx = schema.get_field_index('exp_name')
+        hash_idx = schema.get_field_index('exp_hash')
+        index: Dict[Tuple[str, str], List[int]] = {}
+        for i in range(self.pf.metadata.num_row_groups):
+            rg = self.pf.metadata.row_group(i)
+            name_col = rg.column(name_idx)
+            hash_col = rg.column(hash_idx)
+            if not name_col.is_stats_set or not hash_col.is_stats_set:
+                continue
+            key = (name_col.statistics.min, hash_col.statistics.min)
+            index.setdefault(key, []).append(i)
+        return index
+
+    def read_experiment(self, exp_name: str, exp_hash: str) -> Optional[pd.DataFrame]:
+        """Read all rows for one experiment, returning a DataFrame or None."""
+        rg_indices = self._index.get((exp_name, exp_hash))
+        if not rg_indices:
+            return None
+        import pyarrow as pa
+        tables = [self.pf.read_row_group(i, columns=self._columns) for i in rg_indices]
+        return pa.concat_tables(tables).to_pandas()
+
+
+def _load_from_consolidated(reader: '_ConsolidatedReader', exp_info: Dict) -> Optional[pd.DataFrame]:
     """Load raw transaction data for one experiment from consolidated parquet.
 
     Returns a DataFrame with the transaction columns (exp metadata columns
     dropped), or None if no rows match.
     """
-    filters = [
-        ('exp_name', '==', exp_info['label']),
-        ('exp_hash', '==', exp_info['hash']),
-    ]
-    try:
-        df = pd.read_parquet(consolidated_path, filters=filters)
-    except Exception:
-        return None
-    if len(df) == 0:
-        return None
-    df = df.drop(columns=['exp_name', 'exp_hash', 'config', 'code_hash'], errors='ignore')
-    return df
+    return reader.read_experiment(exp_info['label'], exp_info['hash'])
 
 
 def plot_commit_rate_over_time(
@@ -1527,6 +1539,7 @@ def plot_commit_rate_over_time(
     """
     experiments = scan_all_experiments(base_dir, pattern)
     consolidated_path = os.path.join(base_dir, 'consolidated.parquet')
+    reader = _ConsolidatedReader(consolidated_path) if os.path.exists(consolidated_path) else None
 
     if not experiments:
         print(f"No experiments found for commit rate plot")
@@ -1552,9 +1565,10 @@ def plot_commit_rate_over_time(
 
         if exp_info['dir'] is None:
             # Consolidated-only: load from consolidated parquet
-            df = _load_from_consolidated(consolidated_path, exp_info)
-            if df is not None and len(df) > 0:
-                all_results.append(df)
+            if reader is not None:
+                df = _load_from_consolidated(reader, exp_info)
+                if df is not None and len(df) > 0:
+                    all_results.append(df)
         else:
             for seed_dir in exp_info['seeds']:
                 parquet_path = os.path.join(seed_dir, "results.parquet")
@@ -2008,6 +2022,7 @@ def generate_commit_rate_over_time_table(
     """Generate markdown table for commit rate over time data."""
     experiments = scan_all_experiments(base_dir, pattern)
     consolidated_path = os.path.join(base_dir, 'consolidated.parquet')
+    reader = _ConsolidatedReader(consolidated_path) if os.path.exists(consolidated_path) else None
 
     if not experiments:
         print(f"  Skipping {output_path}: No experiments found")
@@ -2021,9 +2036,10 @@ def generate_commit_rate_over_time_table(
             all_results = []
 
             if exp_info['dir'] is None:
-                df = _load_from_consolidated(consolidated_path, exp_info)
-                if df is not None and len(df) > 0:
-                    all_results.append(df)
+                if reader is not None:
+                    df = _load_from_consolidated(reader, exp_info)
+                    if df is not None and len(df) > 0:
+                        all_results.append(df)
             else:
                 for seed_dir in exp_info['seeds']:
                     parquet_path = os.path.join(seed_dir, "results.parquet")
@@ -2373,14 +2389,18 @@ def _load_heatmap_results(params_df: pd.DataFrame,
             consolidated_path = CONFIG.get('paths', {}).get(
                 'consolidated_file', 'experiments/consolidated.parquet')
 
+    reader = None
+    if consolidated_path and os.path.exists(consolidated_path):
+        reader = _ConsolidatedReader(consolidated_path)
+
     for _, row in params_df.iterrows():
         seed_results = []
 
         if row["exp_dir"] is None:
             # Consolidated-only experiment
-            if consolidated_path and os.path.exists(consolidated_path):
+            if reader is not None:
                 exp_info = {'label': row["_exp_label"], 'hash': row["_exp_hash"]}
-                df = _load_from_consolidated(consolidated_path, exp_info)
+                df = _load_from_consolidated(reader, exp_info)
                 if df is not None and len(df) > 0:
                     # Split by seed and compute per-seed metrics
                     for seed_val, seed_df in df.groupby('seed'):
@@ -2667,6 +2687,7 @@ def _analyze_op_type_experiments(experiments_dir: str, pattern: str,
     records = []
     experiments = scan_all_experiments(experiments_dir, pattern)
     consolidated_path = os.path.join(experiments_dir, 'consolidated.parquet')
+    reader = _ConsolidatedReader(consolidated_path) if os.path.exists(consolidated_path) else None
 
     for dir_key, exp_info in experiments.items():
         cfg = exp_info['config']
@@ -2682,7 +2703,9 @@ def _analyze_op_type_experiments(experiments_dir: str, pattern: str,
 
         if exp_info['dir'] is None:
             # Consolidated-only: load from consolidated parquet
-            df = _load_from_consolidated(consolidated_path, exp_info)
+            if reader is None:
+                continue
+            df = _load_from_consolidated(reader, exp_info)
             if df is None or len(df) == 0:
                 continue
 
