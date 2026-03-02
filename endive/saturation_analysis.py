@@ -2584,7 +2584,7 @@ def generate_heatmap_plots(base_dir: str, pattern: str, output_dir: str,
         )
         m_fmt = ".0f" if metric in ("throughput", "mean_latency", "p99_latency", "p95_latency", "p50_latency") else fmt
 
-        if not xheatmap_only:
+        if not xheatmap_only or metric == "success_rate":
             _create_single_heatmap(
                 results_df, x_param, y_param, metric,
                 title=f"{metric_label} by {y_param.replace('_', ' ').title()} and {x_param.replace('_', ' ').title()}{title_suffix}",
@@ -2628,7 +2628,7 @@ def generate_heatmap_plots(base_dir: str, pattern: str, output_dir: str,
                 )
                 m_fmt = ".0f" if metric in ("throughput", "mean_latency", "p99_latency", "p95_latency", "p50_latency") else fmt
 
-                if not xheatmap_only:
+                if not xheatmap_only or metric == "success_rate":
                     _create_single_heatmap(
                         type_results, x_param, y_param, metric,
                         title=f"{op_label} {metric_label}{title_suffix}",
