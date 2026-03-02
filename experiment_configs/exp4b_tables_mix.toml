@@ -76,8 +76,8 @@ type = "commit_rate_over_time"
 type = "heatmap"
 x_param = "inter_arrival_scale"
 y_param = "num_tables"
-metrics = ["success_rate", "throughput", "mean_latency", "p99_latency"]
 per_type_metrics = ["success_rate", "mean_latency"]
+xheatmap_only = true
 filters = ["catalog_service_latency_ms==1.0"]
 title_suffix = " (CAS=1ms)"
 output_suffix = "cas_1ms"
@@ -86,8 +86,8 @@ output_suffix = "cas_1ms"
 type = "heatmap"
 x_param = "inter_arrival_scale"
 y_param = "num_tables"
-metrics = ["success_rate", "throughput", "mean_latency", "p99_latency"]
 per_type_metrics = ["success_rate", "mean_latency"]
+xheatmap_only = true
 filters = ["catalog_service_latency_ms==10.0"]
 title_suffix = " (CAS=10ms)"
 output_suffix = "cas_10ms"
@@ -96,8 +96,8 @@ output_suffix = "cas_10ms"
 type = "heatmap"
 x_param = "inter_arrival_scale"
 y_param = "num_tables"
-metrics = ["success_rate", "throughput", "mean_latency", "p99_latency"]
 per_type_metrics = ["success_rate", "mean_latency"]
+xheatmap_only = true
 filters = ["catalog_service_latency_ms==50.0"]
 title_suffix = " (CAS=50ms)"
 output_suffix = "cas_50ms"
@@ -106,8 +106,8 @@ output_suffix = "cas_50ms"
 type = "heatmap"
 x_param = "inter_arrival_scale"
 y_param = "num_tables"
-metrics = ["success_rate", "throughput", "mean_latency", "p99_latency"]
 per_type_metrics = ["success_rate", "mean_latency"]
+xheatmap_only = true
 filters = ["catalog_service_latency_ms==120.0"]
 title_suffix = " (CAS=120ms)"
 output_suffix = "cas_120ms"

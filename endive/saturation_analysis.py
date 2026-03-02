@@ -2531,6 +2531,7 @@ def generate_heatmap_plots(base_dir: str, pattern: str, output_dir: str,
     title_suffix = config.get("title_suffix", "")
     implausible_threshold = config.get("implausible_threshold", 95.0)
     unreliable_threshold = config.get("unreliable_threshold", 80.0)
+    xheatmap_only = config.get("xheatmap_only", False)
 
     # Determine extra params needed for filtering
     extra_params = []
@@ -2583,13 +2584,14 @@ def generate_heatmap_plots(base_dir: str, pattern: str, output_dir: str,
         )
         m_fmt = ".0f" if metric in ("throughput", "mean_latency", "p99_latency", "p95_latency", "p50_latency") else fmt
 
-        _create_single_heatmap(
-            results_df, x_param, y_param, metric,
-            title=f"{metric_label} by {y_param.replace('_', ' ').title()} and {x_param.replace('_', ' ').title()}{title_suffix}",
-            output_path=os.path.join(output_dir, f"heatmap_{metric}.png"),
-            cmap=m_cmap, vmin=m_vmin, vmax=m_vmax, fmt=m_fmt,
-            figsize=figsize, dpi=dpi,
-        )
+        if not xheatmap_only:
+            _create_single_heatmap(
+                results_df, x_param, y_param, metric,
+                title=f"{metric_label} by {y_param.replace('_', ' ').title()} and {x_param.replace('_', ' ').title()}{title_suffix}",
+                output_path=os.path.join(output_dir, f"heatmap_{metric}.png"),
+                cmap=m_cmap, vmin=m_vmin, vmax=m_vmax, fmt=m_fmt,
+                figsize=figsize, dpi=dpi,
+            )
 
         if metric != "success_rate":
             _create_single_heatmap(
@@ -2626,13 +2628,14 @@ def generate_heatmap_plots(base_dir: str, pattern: str, output_dir: str,
                 )
                 m_fmt = ".0f" if metric in ("throughput", "mean_latency", "p99_latency", "p95_latency", "p50_latency") else fmt
 
-                _create_single_heatmap(
-                    type_results, x_param, y_param, metric,
-                    title=f"{op_label} {metric_label}{title_suffix}",
-                    output_path=os.path.join(output_dir, f"heatmap_{prefix}_{metric}.png"),
-                    cmap=m_cmap, vmin=m_vmin, vmax=m_vmax, fmt=m_fmt,
-                    figsize=figsize, dpi=dpi,
-                )
+                if not xheatmap_only:
+                    _create_single_heatmap(
+                        type_results, x_param, y_param, metric,
+                        title=f"{op_label} {metric_label}{title_suffix}",
+                        output_path=os.path.join(output_dir, f"heatmap_{prefix}_{metric}.png"),
+                        cmap=m_cmap, vmin=m_vmin, vmax=m_vmax, fmt=m_fmt,
+                        figsize=figsize, dpi=dpi,
+                    )
 
                 if metric != "success_rate":
                     _create_single_heatmap(

@@ -186,7 +186,8 @@ output_suffix = "providers_fa50_1t"
 type = "heatmap"
 x_param = "inter_arrival_scale"
 y_param = "num_tables"
-metrics = ["success_rate", "throughput", "mean_latency", "p99_latency"]
+metrics = ["success_rate"]
+xheatmap_only = true
 filters = ["storage_provider==s3x", "fast_append_ratio==1.0"]
 title_suffix = " (S3 Express, FA=100%)"
 output_suffix = "s3x_fa100"
@@ -195,7 +196,8 @@ output_suffix = "s3x_fa100"
 type = "heatmap"
 x_param = "inter_arrival_scale"
 y_param = "num_tables"
-metrics = ["success_rate", "throughput", "mean_latency", "p99_latency"]
+metrics = ["success_rate"]
+xheatmap_only = true
 filters = ["storage_provider==s3", "fast_append_ratio==1.0"]
 title_suffix = " (S3, FA=100%)"
 output_suffix = "s3_fa100"
@@ -204,7 +206,8 @@ output_suffix = "s3_fa100"
 type = "heatmap"
 x_param = "inter_arrival_scale"
 y_param = "num_tables"
-metrics = ["success_rate", "throughput", "mean_latency", "p99_latency"]
+metrics = ["success_rate"]
+xheatmap_only = true
 filters = ["storage_provider==azurex", "fast_append_ratio==1.0"]
 title_suffix = " (Azure Premium, FA=100%)"
 output_suffix = "azurex_fa100"
@@ -213,7 +216,8 @@ output_suffix = "azurex_fa100"
 type = "heatmap"
 x_param = "inter_arrival_scale"
 y_param = "num_tables"
-metrics = ["success_rate", "throughput", "mean_latency", "p99_latency"]
+metrics = ["success_rate"]
+xheatmap_only = true
 filters = ["storage_provider==azure", "fast_append_ratio==1.0"]
 title_suffix = " (Azure, FA=100%)"
 output_suffix = "azure_fa100"
@@ -222,7 +226,8 @@ output_suffix = "azure_fa100"
 type = "heatmap"
 x_param = "inter_arrival_scale"
 y_param = "num_tables"
-metrics = ["success_rate", "throughput", "mean_latency", "p99_latency"]
+metrics = ["success_rate"]
+xheatmap_only = true
 filters = ["storage_provider==gcp", "fast_append_ratio==1.0"]
 title_suffix = " (GCP, FA=100%)"
 output_suffix = "gcp_fa100"
@@ -233,8 +238,8 @@ output_suffix = "gcp_fa100"
 type = "heatmap"
 x_param = "inter_arrival_scale"
 y_param = "num_tables"
-metrics = ["success_rate", "throughput", "mean_latency", "p99_latency"]
 per_type_metrics = ["success_rate", "mean_latency"]
+xheatmap_only = true
 filters = ["storage_provider==s3x", "fast_append_ratio==0.9"]
 title_suffix = " (S3 Express, FA=90%)"
 output_suffix = "s3x_fa90"
@@ -243,8 +248,8 @@ output_suffix = "s3x_fa90"
 type = "heatmap"
 x_param = "inter_arrival_scale"
 y_param = "num_tables"
-metrics = ["success_rate", "throughput", "mean_latency", "p99_latency"]
 per_type_metrics = ["success_rate", "mean_latency"]
+xheatmap_only = true
 filters = ["storage_provider==s3", "fast_append_ratio==0.9"]
 title_suffix = " (S3, FA=90%)"
 output_suffix = "s3_fa90"
@@ -253,8 +258,8 @@ output_suffix = "s3_fa90"
 type = "heatmap"
 x_param = "inter_arrival_scale"
 y_param = "num_tables"
-metrics = ["success_rate", "throughput", "mean_latency", "p99_latency"]
 per_type_metrics = ["success_rate", "mean_latency"]
+xheatmap_only = true
 filters = ["storage_provider==azurex", "fast_append_ratio==0.9"]
 title_suffix = " (Azure Premium, FA=90%)"
 output_suffix = "azurex_fa90"
@@ -263,8 +268,8 @@ output_suffix = "azurex_fa90"
 type = "heatmap"
 x_param = "inter_arrival_scale"
 y_param = "num_tables"
-metrics = ["success_rate", "throughput", "mean_latency", "p99_latency"]
 per_type_metrics = ["success_rate", "mean_latency"]
+xheatmap_only = true
 filters = ["storage_provider==azure", "fast_append_ratio==0.9"]
 title_suffix = " (Azure, FA=90%)"
 output_suffix = "azure_fa90"
@@ -273,8 +278,8 @@ output_suffix = "azure_fa90"
 type = "heatmap"
 x_param = "inter_arrival_scale"
 y_param = "num_tables"
-metrics = ["success_rate", "throughput", "mean_latency", "p99_latency"]
 per_type_metrics = ["success_rate", "mean_latency"]
+xheatmap_only = true
 filters = ["storage_provider==gcp", "fast_append_ratio==0.9"]
 title_suffix = " (GCP, FA=90%)"
 output_suffix = "gcp_fa90"
@@ -285,8 +290,8 @@ output_suffix = "gcp_fa90"
 type = "heatmap"
 x_param = "inter_arrival_scale"
 y_param = "num_tables"
-metrics = ["success_rate", "throughput", "mean_latency", "p99_latency"]
 per_type_metrics = ["success_rate", "mean_latency"]
+xheatmap_only = true
 filters = ["storage_provider==s3x", "fast_append_ratio==0.5"]
 title_suffix = " (S3 Express, FA=50%)"
 output_suffix = "s3x_fa50"
@@ -295,8 +300,8 @@ output_suffix = "s3x_fa50"
 type = "heatmap"
 x_param = "inter_arrival_scale"
 y_param = "num_tables"
-metrics = ["success_rate", "throughput", "mean_latency", "p99_latency"]
 per_type_metrics = ["success_rate", "mean_latency"]
+xheatmap_only = true
 filters = ["storage_provider==s3", "fast_append_ratio==0.5"]
 title_suffix = " (S3, FA=50%)"
 output_suffix = "s3_fa50"
@@ -305,8 +310,8 @@ output_suffix = "s3_fa50"
 type = "heatmap"
 x_param = "inter_arrival_scale"
 y_param = "num_tables"
-metrics = ["success_rate", "throughput", "mean_latency", "p99_latency"]
 per_type_metrics = ["success_rate", "mean_latency"]
+xheatmap_only = true
 filters = ["storage_provider==azurex", "fast_append_ratio==0.5"]
 title_suffix = " (Azure Premium, FA=50%)"
 output_suffix = "azurex_fa50"
@@ -315,8 +320,8 @@ output_suffix = "azurex_fa50"
 type = "heatmap"
 x_param = "inter_arrival_scale"
 y_param = "num_tables"
-metrics = ["success_rate", "throughput", "mean_latency", "p99_latency"]
 per_type_metrics = ["success_rate", "mean_latency"]
+xheatmap_only = true
 filters = ["storage_provider==azure", "fast_append_ratio==0.5"]
 title_suffix = " (Azure, FA=50%)"
 output_suffix = "azure_fa50"
@@ -325,8 +330,8 @@ output_suffix = "azure_fa50"
 type = "heatmap"
 x_param = "inter_arrival_scale"
 y_param = "num_tables"
-metrics = ["success_rate", "throughput", "mean_latency", "p99_latency"]
 per_type_metrics = ["success_rate", "mean_latency"]
+xheatmap_only = true
 filters = ["storage_provider==gcp", "fast_append_ratio==0.5"]
 title_suffix = " (GCP, FA=50%)"
 output_suffix = "gcp_fa50"

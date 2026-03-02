@@ -74,8 +74,8 @@ type = "commit_rate_over_time"
 type = "heatmap"
 x_param = "inter_arrival_scale"
 y_param = "catalog_service_latency_ms"
-metrics = ["success_rate", "throughput", "mean_latency", "p99_latency"]
-per_type_metrics = ["success_rate", "mean_latency"]
+per_type_metrics = ["success_rate", "mean_latency", "p99_latency"]
+xheatmap_only = true
 
 [[plots.graphs]]
 type = "operation_types"
