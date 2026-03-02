@@ -22,6 +22,7 @@ from pathlib import Path
 import numpy as np
 from endive.config import (
     ConfigurationError,
+    compute_code_hash,
     compute_experiment_hash,
     load_simulation_config,
     validate_config,
@@ -143,12 +144,13 @@ def prepare_experiment_output(config: dict, config_file: str, actual_seed: int) 
         shutil.copy2(config_file, exp_config_path)
         logger.info(f"Wrote experiment config to {exp_config_path}")
 
-    # Write version info (git SHA) for reproducibility
+    # Write version info (git SHA + code hash) for reproducibility
     version_path = exp_dir / "version.txt"
     git_sha = get_git_sha()
     if not version_path.exists():
         with open(version_path, 'w') as f:
             f.write(f"git_sha={git_sha}\n")
+            f.write(f"code_hash={compute_code_hash()}\n")
         logger.info(f"Wrote version info to {version_path} (git_sha={git_sha[:7]})")
 
     logger.info(f"Experiment: {label}-{exp_hash}")

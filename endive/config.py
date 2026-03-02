@@ -11,6 +11,7 @@ endive.storage._load_provider_profile().
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 import logging
@@ -292,6 +293,51 @@ def _build_conflict_detector(
 
 
 
+_SIMULATION_MODULES = [
+    "catalog.py",
+    "config.py",
+    "conflict_detector.py",
+    "main.py",
+    "simulation.py",
+    "storage.py",
+    "transaction.py",
+    "workload.py",
+]
+
+
+@functools.lru_cache(maxsize=1)
+def _compute_code_hash_digest() -> bytes:
+    """Raw 32-byte SHA256 digest of simulator code + provider TOMLs.
+
+    Cached per process — stable as long as source files don't change.
+    """
+    h = hashlib.sha256()
+    endive_dir = Path(__file__).parent
+
+    for module_name in _SIMULATION_MODULES:
+        py_file = endive_dir / module_name
+        if py_file.exists():
+            with open(py_file, 'rb') as f:
+                h.update(f.read())
+
+    providers_dir = endive_dir / "providers"
+    if providers_dir.is_dir():
+        for toml_file in sorted(providers_dir.glob("*.toml")):
+            with open(toml_file, 'rb') as f:
+                h.update(f.read())
+
+    return h.digest()
+
+
+def compute_code_hash() -> str:
+    """16-char hex code hash for display/storage.
+
+    All experiments in a parameter sweep share the same code hash.
+    Changes when any simulator module or provider TOML is modified.
+    """
+    return _compute_code_hash_digest().hex()[:16]
+
+
 def compute_experiment_hash(config: dict) -> str:
     """Compute deterministic hash of config + simulator code.
 
@@ -329,39 +375,10 @@ def compute_experiment_hash(config: dict) -> str:
     # Serialize config deterministically
     config_str = json.dumps(config_for_hash, sort_keys=True)
 
-    # 2. Hash simulator code files (only files that affect simulation results)
-    code_hash = hashlib.sha256()
-    endive_dir = Path(__file__).parent
-
-    # Only include modules that affect simulation output.
-    # Excludes: saturation_analysis.py (plotting), test_utils.py, utils.py, __init__.py
-    _SIMULATION_MODULES = [
-        "catalog.py",
-        "config.py",
-        "conflict_detector.py",
-        "main.py",
-        "simulation.py",
-        "storage.py",
-        "transaction.py",
-        "workload.py",
-    ]
-    for module_name in _SIMULATION_MODULES:
-        py_file = endive_dir / module_name
-        if py_file.exists():
-            with open(py_file, 'rb') as f:
-                code_hash.update(f.read())
-
-    # Include provider TOML files (latency config)
-    providers_dir = endive_dir / "providers"
-    if providers_dir.is_dir():
-        for toml_file in sorted(providers_dir.glob("*.toml")):
-            with open(toml_file, 'rb') as f:
-                code_hash.update(f.read())
-
     # 3. Combine config and code hashes
     combined = hashlib.sha256()
     combined.update(config_str.encode('utf-8'))
-    combined.update(code_hash.digest())
+    combined.update(_compute_code_hash_digest())
 
     # Return first 8 characters of hex digest
     return combined.hexdigest()[:8]

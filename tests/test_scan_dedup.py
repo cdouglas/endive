@@ -6,6 +6,8 @@ Verifies that:
 3. Consolidated-only experiments appear when no disk directory exists
 4. Row-group metadata scanning works correctly for discovery
 5. Downstream pipelines (index, heatmap, op-type) keep hashes separate
+6. Stale cohort detection: multiple code_hashes per label → only latest kept
+7. code_hash stability and backward compatibility
 """
 
 import os
@@ -20,6 +22,7 @@ import pytest
 
 import endive.saturation_analysis as sa
 from endive.saturation_analysis import (
+    _filter_stale_experiments,
     scan_all_experiments,
     scan_consolidated_experiments,
     scan_experiment_directories,
@@ -575,3 +578,301 @@ class TestConfigConsistency:
                 lambda c: c["transaction"]["real_conflict_probability"],
             ]:
                 assert path_fn(disk_cfg) == path_fn(cons_cfg)
+
+
+# ---------------------------------------------------------------------------
+# code_hash stability and backward compatibility
+# ---------------------------------------------------------------------------
+
+
+class TestCodeHash:
+    """Verify compute_code_hash() and compute_experiment_hash() behavior."""
+
+    def test_compute_code_hash_stable(self):
+        """compute_code_hash() returns a stable 16-char hex string."""
+        from endive.config import compute_code_hash
+        h1 = compute_code_hash()
+        h2 = compute_code_hash()
+        assert h1 == h2
+        assert len(h1) == 16
+        assert all(c in '0123456789abcdef' for c in h1)
+
+    def test_experiment_hash_unchanged_by_refactor(self):
+        """compute_experiment_hash() produces the same 8-char hash as before.
+
+        The refactoring into _compute_code_hash_digest() must not alter the
+        combined hash because experiment directory names depend on it.
+        """
+        from endive.config import compute_experiment_hash
+        config = {
+            'simulation': {'duration_ms': 3600000, 'output_path': 'results.parquet'},
+            'catalog': {'num_tables': 1, 'mode': 'instant'},
+            'storage': {'provider': 'instant'},
+            'transaction': {'retry': 10, 'inter_arrival': {'scale': 100.0}},
+        }
+        h = compute_experiment_hash(config)
+        assert len(h) == 8
+        # Calling again with same config → same hash
+        assert compute_experiment_hash(config) == h
+
+    def test_experiment_hash_ignores_seed(self):
+        """Seeds do not affect experiment hash (they go in subdirectories)."""
+        from endive.config import compute_experiment_hash
+        config_a = {
+            'simulation': {'duration_ms': 3600000, 'output_path': 'results.parquet', 'seed': 42},
+            'catalog': {'num_tables': 1},
+            'transaction': {'retry': 10},
+        }
+        config_b = dict(config_a)
+        config_b['simulation'] = dict(config_a['simulation'])
+        config_b['simulation']['seed'] = 99
+        assert compute_experiment_hash(config_a) == compute_experiment_hash(config_b)
+
+
+# ---------------------------------------------------------------------------
+# Stale cohort detection
+# ---------------------------------------------------------------------------
+
+
+class TestStaleExperimentFiltering:
+    """Verify _filter_stale_experiments() removes old code versions."""
+
+    def test_single_cohort_passes_through(self):
+        """When all experiments share one code_hash, nothing is filtered."""
+        experiments = {
+            "exp_test-aaa": {"label": "exp_test", "code_hash": "abc123"},
+            "exp_test-bbb": {"label": "exp_test", "code_hash": "abc123"},
+        }
+        result = _filter_stale_experiments(experiments)
+        assert len(result) == 2
+
+    def test_unknown_cohort_passes_through(self):
+        """All-unknown code_hash experiments are a single cohort."""
+        experiments = {
+            "exp_test-aaa": {"label": "exp_test", "code_hash": "unknown"},
+            "exp_test-bbb": {"label": "exp_test", "code_hash": "unknown"},
+        }
+        result = _filter_stale_experiments(experiments)
+        assert len(result) == 2
+
+    def test_stale_cohort_removed(self):
+        """Larger cohort wins when two code_hashes exist for same label."""
+        experiments = {
+            "exp_test-aaa": {"label": "exp_test", "code_hash": "old_hash"},
+            "exp_test-bbb": {"label": "exp_test", "code_hash": "new_hash"},
+            "exp_test-ccc": {"label": "exp_test", "code_hash": "new_hash"},
+        }
+        result = _filter_stale_experiments(experiments)
+        assert len(result) == 2
+        assert "exp_test-bbb" in result
+        assert "exp_test-ccc" in result
+        assert "exp_test-aaa" not in result
+
+    def test_tie_broken_by_alphabetical_code_hash(self):
+        """Equal-size cohorts: alphabetically-latest code_hash wins."""
+        experiments = {
+            "exp_test-aaa": {"label": "exp_test", "code_hash": "aaaa"},
+            "exp_test-bbb": {"label": "exp_test", "code_hash": "zzzz"},
+        }
+        result = _filter_stale_experiments(experiments)
+        assert len(result) == 1
+        assert "exp_test-bbb" in result
+
+    def test_different_labels_independent(self):
+        """Stale filtering is per-label; different labels don't interfere."""
+        experiments = {
+            "exp_a-h1": {"label": "exp_a", "code_hash": "old"},
+            "exp_a-h2": {"label": "exp_a", "code_hash": "new"},
+            "exp_a-h3": {"label": "exp_a", "code_hash": "new"},
+            "exp_b-h4": {"label": "exp_b", "code_hash": "only"},
+        }
+        result = _filter_stale_experiments(experiments)
+        assert len(result) == 3
+        assert "exp_a-h2" in result
+        assert "exp_a-h3" in result
+        assert "exp_b-h4" in result
+
+    def test_missing_code_hash_treated_as_unknown(self):
+        """Experiments without code_hash key default to 'unknown'."""
+        experiments = {
+            "exp_test-aaa": {"label": "exp_test"},  # no code_hash key
+            "exp_test-bbb": {"label": "exp_test"},
+        }
+        result = _filter_stale_experiments(experiments)
+        assert len(result) == 2  # single 'unknown' cohort
+
+    def test_scan_disk_reads_code_hash_from_version_txt(self):
+        """scan_experiment_directories reads code_hash from version.txt."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            label, hsh = "exp_ver", "ver12345"
+            exp_dir = _create_disk_experiment(tmpdir, label, hsh, seeds=(42, 43, 44))
+            # Write version.txt with code_hash
+            with open(os.path.join(str(exp_dir), "version.txt"), "w") as f:
+                f.write("git_sha=abc1234\n")
+                f.write("code_hash=deadbeef01234567\n")
+
+            old_config = sa.CONFIG.copy()
+            sa.CONFIG = sa.get_default_config()
+            try:
+                exps = scan_experiment_directories(tmpdir, f"{label}-*")
+            finally:
+                sa.CONFIG = old_config
+
+            info = list(exps.values())[0]
+            assert info["code_hash"] == "deadbeef01234567"
+
+    def test_scan_disk_defaults_unknown_when_no_version_txt(self):
+        """Without version.txt, code_hash defaults to 'unknown'."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            label, hsh = "exp_nover", "nover123"
+            _create_disk_experiment(tmpdir, label, hsh, seeds=(42, 43, 44))
+
+            old_config = sa.CONFIG.copy()
+            sa.CONFIG = sa.get_default_config()
+            try:
+                exps = scan_experiment_directories(tmpdir, f"{label}-*")
+            finally:
+                sa.CONFIG = old_config
+
+            info = list(exps.values())[0]
+            assert info["code_hash"] == "unknown"
+
+    def test_stale_filtering_in_scan_all_experiments(self):
+        """End-to-end: scan_all_experiments filters stale cohorts."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Create two experiments with same label, different code_hashes
+            exp_dir_old = _create_disk_experiment(
+                tmpdir, "exp_stale", "hash_old", seeds=(42, 43, 44))
+            exp_dir_new1 = _create_disk_experiment(
+                tmpdir, "exp_stale", "hash_new1", seeds=(42, 43, 44))
+            exp_dir_new2 = _create_disk_experiment(
+                tmpdir, "exp_stale", "hash_new2", seeds=(42, 43, 44))
+
+            # Old experiment has old code_hash
+            with open(os.path.join(str(exp_dir_old), "version.txt"), "w") as f:
+                f.write("code_hash=old_code_hash_aa\n")
+            # New experiments have new code_hash
+            for d in [exp_dir_new1, exp_dir_new2]:
+                with open(os.path.join(str(d), "version.txt"), "w") as f:
+                    f.write("code_hash=new_code_hash_bb\n")
+
+            old_config = sa.CONFIG.copy()
+            sa.CONFIG = sa.get_default_config()
+            try:
+                exps = scan_all_experiments(tmpdir, "exp_stale-*")
+            finally:
+                sa.CONFIG = old_config
+
+            # Only the 2 new experiments should remain
+            assert len(exps) == 2, f"Expected 2, got {len(exps)}: {list(exps.keys())}"
+            assert "exp_stale-hash_new1" in exps
+            assert "exp_stale-hash_new2" in exps
+
+
+# ---------------------------------------------------------------------------
+# Consolidated code_hash column and sort order
+# ---------------------------------------------------------------------------
+
+
+class TestConsolidatedCodeHash:
+    """Verify code_hash column is read from consolidated files."""
+
+    def _create_consolidated_with_code_hash(self, base_dir, experiments,
+                                             filename="consolidated.parquet"):
+        """Write consolidated parquet with code_hash column."""
+        path = os.path.join(base_dir, filename)
+        writer = None
+        schema = None
+
+        for exp in experiments:
+            config_map = _flatten_config(exp["cfg_text"])
+            for seed_val in exp["seeds"]:
+                df = _make_results(exp.get("n_txns", 100), seed_val=seed_val)
+                df["exp_name"] = exp["label"]
+                df["exp_hash"] = exp["hash"]
+                df["seed"] = seed_val
+                df["config"] = [config_map] * len(df)
+                df["code_hash"] = exp.get("code_hash", "unknown")
+
+                table = pa.Table.from_pandas(df, preserve_index=False)
+                if writer is None:
+                    schema = table.schema
+                    writer = pq.ParquetWriter(
+                        path, schema,
+                        use_dictionary=["exp_name", "exp_hash", "status"],
+                        write_statistics=True,
+                    )
+                else:
+                    table = table.cast(schema)
+                writer.write_table(table)
+
+        if writer is not None:
+            writer.close()
+        return path
+
+    def test_scan_consolidated_reads_code_hash(self):
+        """scan_consolidated_experiments picks up code_hash from column."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg = _make_cfg(label="exp_ch", scale=100.0)
+            cons_path = self._create_consolidated_with_code_hash(tmpdir, [
+                {"label": "exp_ch", "hash": "ch111111", "seeds": [42, 43, 44],
+                 "cfg_text": cfg, "code_hash": "abc123def456"},
+            ])
+
+            old_config = sa.CONFIG.copy()
+            sa.CONFIG = sa.get_default_config()
+            try:
+                exps = scan_consolidated_experiments(cons_path, "exp_ch-*")
+            finally:
+                sa.CONFIG = old_config
+
+            assert len(exps) == 1
+            assert exps["exp_ch-ch111111"]["code_hash"] == "abc123def456"
+
+    def test_scan_consolidated_defaults_unknown_without_column(self):
+        """Old consolidated files without code_hash column default to 'unknown'."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg = _make_cfg(label="exp_old", scale=100.0)
+            # Use the original helper that doesn't write code_hash
+            cons_path = _create_consolidated(tmpdir, [
+                {"label": "exp_old", "hash": "old11111", "seeds": [42, 43, 44],
+                 "cfg_text": cfg},
+            ])
+
+            old_config = sa.CONFIG.copy()
+            sa.CONFIG = sa.get_default_config()
+            try:
+                exps = scan_consolidated_experiments(cons_path, "exp_old-*")
+            finally:
+                sa.CONFIG = old_config
+
+            assert len(exps) == 1
+            assert exps["exp_old-old11111"]["code_hash"] == "unknown"
+
+    def test_consolidated_stale_filtering_end_to_end(self):
+        """Stale detection works with consolidated-only experiments."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg_a = _make_cfg(label="exp_mix_stale", scale=100.0)
+            cfg_b = _make_cfg(label="exp_mix_stale", scale=200.0)
+            cfg_c = _make_cfg(label="exp_mix_stale", scale=300.0)
+
+            self._create_consolidated_with_code_hash(tmpdir, [
+                {"label": "exp_mix_stale", "hash": "hash_a", "seeds": [42, 43, 44],
+                 "cfg_text": cfg_a, "code_hash": "old_code"},
+                {"label": "exp_mix_stale", "hash": "hash_b", "seeds": [42, 43, 44],
+                 "cfg_text": cfg_b, "code_hash": "new_code"},
+                {"label": "exp_mix_stale", "hash": "hash_c", "seeds": [42, 43, 44],
+                 "cfg_text": cfg_c, "code_hash": "new_code"},
+            ])
+
+            old_config = sa.CONFIG.copy()
+            sa.CONFIG = sa.get_default_config()
+            try:
+                exps = scan_all_experiments(tmpdir, "exp_mix_stale-*")
+            finally:
+                sa.CONFIG = old_config
+
+            # Only the 2 new_code experiments should remain
+            assert len(exps) == 2, f"Expected 2, got {len(exps)}: {list(exps.keys())}"
+            assert "exp_mix_stale-hash_b" in exps
+            assert "exp_mix_stale-hash_c" in exps

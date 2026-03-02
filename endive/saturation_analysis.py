@@ -217,12 +217,26 @@ def scan_experiment_directories(base_dir: str, pattern: str) -> Dict[str, Dict]:
             label = dir_name
             exp_hash = "unknown"
 
+        # Read code_hash from version.txt (if present)
+        code_hash = 'unknown'
+        version_path = os.path.join(exp_dir, 'version.txt')
+        if os.path.exists(version_path):
+            try:
+                with open(version_path) as vf:
+                    for line in vf:
+                        if line.startswith('code_hash='):
+                            code_hash = line.split('=', 1)[1].strip()
+                            break
+            except Exception:
+                pass
+
         experiments[exp_dir] = {
             'config': config,
             'seeds': seed_dirs,
             'label': label,
             'hash': exp_hash,
-            'dir': exp_dir
+            'dir': exp_dir,
+            'code_hash': code_hash,
         }
 
     return experiments
@@ -263,7 +277,15 @@ def scan_consolidated_experiments(consolidated_path: str, pattern: str) -> Dict[
         print(f"Warning: Consolidated file missing expected column: {e}")
         return {}
 
-    # Collect (exp_name, exp_hash) -> {seeds, first_rg} from row-group statistics
+    # code_hash column may not exist in older consolidated files
+    try:
+        code_hash_idx = schema.get_field_index('code_hash')
+        if code_hash_idx < 0:
+            code_hash_idx = None
+    except (KeyError, ValueError):
+        code_hash_idx = None
+
+    # Collect (exp_name, exp_hash) -> {seeds, first_rg, code_hash} from row-group statistics
     groups: Dict[Tuple[str, str], Dict] = {}
     has_stats = True
 
@@ -281,19 +303,31 @@ def scan_consolidated_experiments(consolidated_path: str, pattern: str) -> Dict[
         exp_hash = hash_col.statistics.min
         seed = seed_col.statistics.min
 
+        # Read code_hash from row-group statistics if available
+        rg_code_hash = 'unknown'
+        if code_hash_idx is not None:
+            ch_col = rg.column(code_hash_idx)
+            if ch_col.is_stats_set:
+                rg_code_hash = ch_col.statistics.min
+
         # Each row group should have homogeneous exp_name/exp_hash/seed
         # (consolidate.py writes one row group per experiment-seed)
         key = (exp_name, exp_hash)
         if key not in groups:
-            groups[key] = {'seeds': set(), 'first_rg': i}
+            groups[key] = {'seeds': set(), 'first_rg': i, 'code_hash': rg_code_hash}
         groups[key]['seeds'].add(seed)
 
     # Fallback: if statistics are absent, read only lightweight columns
     if not has_stats:
+        # Determine which columns to read for fallback
+        fallback_cols = ['exp_name', 'exp_hash', 'seed']
+        if code_hash_idx is not None:
+            fallback_cols.append('code_hash')
+
         try:
             table = pq.read_table(
                 consolidated_path,
-                columns=['exp_name', 'exp_hash', 'seed'],
+                columns=fallback_cols,
             )
         except Exception as e:
             print(f"Warning: Could not read consolidated file {consolidated_path}: {e}")
@@ -305,12 +339,15 @@ def scan_consolidated_experiments(consolidated_path: str, pattern: str) -> Dict[
         exp_names = table.column('exp_name').to_pylist()
         exp_hashes = table.column('exp_hash').to_pylist()
         seeds = table.column('seed').to_pylist()
+        code_hashes = (table.column('code_hash').to_pylist()
+                       if code_hash_idx is not None else ['unknown'] * len(exp_names))
 
         groups = {}
         for idx in range(len(exp_names)):
             key = (exp_names[idx], exp_hashes[idx])
             if key not in groups:
-                groups[key] = {'seeds': set(), 'first_rg': None}
+                groups[key] = {'seeds': set(), 'first_rg': None,
+                               'code_hash': code_hashes[idx] or 'unknown'}
             groups[key]['seeds'].add(seeds[idx])
 
         # Map experiments to their first row group for config reads
@@ -351,9 +388,44 @@ def scan_consolidated_experiments(consolidated_path: str, pattern: str) -> Dict[
             'label': exp_name,
             'hash': exp_hash,
             'dir': None,  # no directory on disk
+            'code_hash': info.get('code_hash', 'unknown'),
         }
 
     return experiments
+
+
+def _filter_stale_experiments(experiments: Dict[str, Dict]) -> Dict[str, Dict]:
+    """Remove stale experiment cohorts when multiple code versions exist per label.
+
+    Groups experiments by label. If a label has multiple code_hash values,
+    keeps only the cohort with the most experiments (ties broken by
+    lexicographically-latest code_hash).
+    """
+    by_label: Dict[str, List] = defaultdict(list)
+    for key, info in experiments.items():
+        by_label[info['label']].append((key, info))
+
+    filtered = {}
+    for label, entries in by_label.items():
+        code_hashes: Dict[str, List] = defaultdict(list)
+        for key, info in entries:
+            ch = info.get('code_hash', 'unknown')
+            code_hashes[ch].append((key, info))
+
+        if len(code_hashes) <= 1:
+            for key, info in entries:
+                filtered[key] = info
+            continue
+
+        # Multiple cohorts — keep the largest (most experiments), break ties alphabetically
+        best_ch = max(code_hashes, key=lambda ch: (len(code_hashes[ch]), ch))
+        stale_count = sum(len(v) for k, v in code_hashes.items() if k != best_ch)
+        print(f"Warning: {label} has {len(code_hashes)} code versions "
+              f"({stale_count} stale experiments removed, keeping code_hash={best_ch})")
+        for key, info in code_hashes[best_ch]:
+            filtered[key] = info
+
+    return filtered
 
 
 def scan_all_experiments(base_dir: str, pattern: str) -> Dict[str, Dict]:
@@ -361,6 +433,7 @@ def scan_all_experiments(base_dir: str, pattern: str) -> Dict[str, Dict]:
 
     Returns dict keyed by ``"exp_name-exp_hash"``.  Disk experiments take
     precedence over consolidated when both exist for the same key.
+    Stale experiment cohorts (old code versions) are filtered out.
     """
     experiments = {}
 
@@ -375,6 +448,9 @@ def scan_all_experiments(base_dir: str, pattern: str) -> Dict[str, Dict]:
         for key, exp_info in scan_consolidated_experiments(consolidated_path, pattern).items():
             if key not in experiments:  # Both use "exp_name-exp_hash" keys now
                 experiments[key] = exp_info
+
+    # Phase 3: Filter stale cohorts (different code versions for same label)
+    experiments = _filter_stale_experiments(experiments)
 
     return experiments
 
@@ -677,7 +753,7 @@ def load_and_aggregate_results_consolidated(exp_info: Dict, consolidated_path: s
         return None
 
     # Drop the consolidated-specific columns (we don't need them for analysis)
-    df = df.drop(columns=['exp_name', 'exp_hash', 'config'])
+    df = df.drop(columns=['exp_name', 'exp_hash', 'config', 'code_hash'], errors='ignore')
 
     # Report filtering statistics
     # Note: With predicate pushdown, we don't know the pre-filter count, so we approximate
@@ -1425,7 +1501,7 @@ def _load_from_consolidated(consolidated_path: str, exp_info: Dict) -> Optional[
         return None
     if len(df) == 0:
         return None
-    df = df.drop(columns=['exp_name', 'exp_hash', 'config'], errors='ignore')
+    df = df.drop(columns=['exp_name', 'exp_hash', 'config', 'code_hash'], errors='ignore')
     return df
 
 

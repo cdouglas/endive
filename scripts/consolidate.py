@@ -100,6 +100,7 @@ def discover_schema(experiments):
         pa.field('exp_hash', pa.string()),
         pa.field('seed', pa.int64()),
         pa.field('config', pa.map_(pa.string(), pa.string())),
+        pa.field('code_hash', pa.string()),
     ])
     return pa.schema(fields)
 
@@ -128,32 +129,12 @@ def scan_experiments(base_dir: str):
 
 
 def _experiment_sort_key(exp_name, exp_hash, exp_dir, seed_dirs):
-    """Sort key: (exp_name, provider, num_tables, scale, fa_ratio, p_real, service_latency).
+    """Sort key: (exp_name, exp_hash).
 
-    Sorts experiments by swept parameters so that parameter sweep points
-    are contiguous in the consolidated file, improving predicate pushdown.
+    Groups each experiment's row groups contiguously so predicate pushdown
+    on (exp_name, exp_hash) can skip non-matching ranges efficiently.
     """
-    cfg_path = exp_dir / 'cfg.toml'
-    if not cfg_path.exists():
-        return (exp_name, '', 0, 0.0, 0.0, 0.0, 0.0)
-    try:
-        with open(cfg_path, 'rb') as f:
-            config = tomli.load(f)
-    except Exception:
-        return (exp_name, '', 0, 0.0, 0.0, 0.0, 0.0)
-    cat = config.get('catalog', {})
-    txn = config.get('transaction', {})
-    storage = config.get('storage', {})
-    svc = cat.get('service', {})
-    return (
-        exp_name,
-        storage.get('provider', ''),
-        cat.get('num_tables', 0),
-        txn.get('inter_arrival', {}).get('scale', 0.0),
-        txn.get('operation_types', {}).get('fast_append', 0.0),
-        txn.get('real_conflict_probability', 0.0),
-        svc.get('latency_ms', 0.0) if isinstance(svc, dict) else 0.0,
-    )
+    return (exp_name, exp_hash)
 
 
 def _consolidate_experiments(experiments, output_path, schema, compression, compression_level, destructive):
@@ -180,6 +161,18 @@ def _consolidate_experiments(experiments, output_path, schema, compression, comp
             else:
                 config_map = [('warning', 'No config file')]
 
+            # Read code_hash from version.txt (if present)
+            code_hash = 'unknown'
+            version_path = exp_dir / 'version.txt'
+            if version_path.exists():
+                try:
+                    for line in version_path.read_text().splitlines():
+                        if line.startswith('code_hash='):
+                            code_hash = line.split('=', 1)[1].strip()
+                            break
+                except Exception:
+                    pass
+
             # Track whether all seeds for this experiment succeeded
             exp_seeds_ok = True
 
@@ -198,6 +191,7 @@ def _consolidate_experiments(experiments, output_path, schema, compression, comp
                     df['exp_hash'] = exp_hash
                     df['seed'] = int(seed_dir.name)
                     df['config'] = [config_map] * len(df)
+                    df['code_hash'] = code_hash
 
                     # Sort by t_submit only
                     df = df.sort_values('t_submit')
@@ -511,7 +505,7 @@ def _verify_one_sample(consolidated_path, base_dir, file_path, partitioned):
         return ('fail', f"{exp_name}-{exp_hash}/{seed}: Not found in consolidated")
 
     # Drop metadata columns and reset index
-    consolidated_df = consolidated_df.drop(columns=['exp_name', 'exp_hash', 'seed', 'config'])
+    consolidated_df = consolidated_df.drop(columns=['exp_name', 'exp_hash', 'seed', 'config', 'code_hash'], errors='ignore')
     consolidated_df = consolidated_df.reset_index(drop=True)
 
     if verify_dataframes_match(original_df, consolidated_df, exp_name, exp_hash, seed):
@@ -675,7 +669,7 @@ def verify_consolidation_full(
         exp_hash = cons_df['exp_hash'].iloc[0]
         seed = int(cons_df['seed'].iloc[0])
 
-        cons_df = cons_df.drop(columns=['exp_name', 'exp_hash', 'seed', 'config'])
+        cons_df = cons_df.drop(columns=['exp_name', 'exp_hash', 'seed', 'config', 'code_hash'], errors='ignore')
         cons_df = cons_df.reset_index(drop=True)
 
         work_q.put((i, cons_df, exp_name, exp_hash, seed))
