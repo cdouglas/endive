@@ -944,8 +944,7 @@ def build_experiment_index(base_dir: str, pattern: str) -> pd.DataFrame:
             consolidated_path = consolidated_filename
         else:
             consolidated_path = os.path.join(base_dir, 'consolidated.parquet')
-        if os.path.exists(consolidated_path):
-            reader = _ConsolidatedReader(consolidated_path)
+        reader = _ConsolidatedReader.open(consolidated_path)
 
     for exp_dir, exp_info in experiments.items():
         # Extract parameters
@@ -1475,13 +1474,25 @@ class _ConsolidatedReader:
     column projection (excluding heavyweight metadata columns).
     """
 
-    def __init__(self, path: str):
-        import pyarrow.parquet as pq
-        self.pf = pq.ParquetFile(path)
+    def __init__(self, pf):
+        self.pf = pf
         self._index = self._build_index()
         # Exclude metadata columns that callers always drop
         exclude = {'config', 'code_hash', 'exp_name', 'exp_hash'}
         self._columns = [f.name for f in self.pf.schema_arrow if f.name not in exclude]
+
+    @staticmethod
+    def open(path: str) -> Optional['_ConsolidatedReader']:
+        """Open a consolidated parquet file, returning None on failure."""
+        if not os.path.exists(path):
+            return None
+        import pyarrow.parquet as pq
+        try:
+            pf = pq.ParquetFile(path)
+        except Exception as e:
+            print(f"Warning: Could not open consolidated file {path}: {e}")
+            return None
+        return _ConsolidatedReader(pf)
 
     def _build_index(self) -> Dict[Tuple[str, str], List[int]]:
         schema = self.pf.schema_arrow
@@ -1539,7 +1550,7 @@ def plot_commit_rate_over_time(
     """
     experiments = scan_all_experiments(base_dir, pattern)
     consolidated_path = os.path.join(base_dir, 'consolidated.parquet')
-    reader = _ConsolidatedReader(consolidated_path) if os.path.exists(consolidated_path) else None
+    reader = _ConsolidatedReader.open(consolidated_path)
 
     if not experiments:
         print(f"No experiments found for commit rate plot")
@@ -2022,7 +2033,7 @@ def generate_commit_rate_over_time_table(
     """Generate markdown table for commit rate over time data."""
     experiments = scan_all_experiments(base_dir, pattern)
     consolidated_path = os.path.join(base_dir, 'consolidated.parquet')
-    reader = _ConsolidatedReader(consolidated_path) if os.path.exists(consolidated_path) else None
+    reader = _ConsolidatedReader.open(consolidated_path)
 
     if not experiments:
         print(f"  Skipping {output_path}: No experiments found")
@@ -2389,9 +2400,7 @@ def _load_heatmap_results(params_df: pd.DataFrame,
             consolidated_path = CONFIG.get('paths', {}).get(
                 'consolidated_file', 'experiments/consolidated.parquet')
 
-    reader = None
-    if consolidated_path and os.path.exists(consolidated_path):
-        reader = _ConsolidatedReader(consolidated_path)
+    reader = _ConsolidatedReader.open(consolidated_path) if consolidated_path else None
 
     for _, row in params_df.iterrows():
         seed_results = []
@@ -2687,7 +2696,7 @@ def _analyze_op_type_experiments(experiments_dir: str, pattern: str,
     records = []
     experiments = scan_all_experiments(experiments_dir, pattern)
     consolidated_path = os.path.join(experiments_dir, 'consolidated.parquet')
-    reader = _ConsolidatedReader(consolidated_path) if os.path.exists(consolidated_path) else None
+    reader = _ConsolidatedReader.open(consolidated_path)
 
     for dir_key, exp_info in experiments.items():
         cfg = exp_info['config']
