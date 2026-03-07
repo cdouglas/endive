@@ -17,10 +17,12 @@ from endive.transaction import (
     ConflictDetector,
     FastAppendTransaction,
     MergeAppendTransaction,
+    NO_OVERLAP,
     Transaction,
     TransactionResult,
     TransactionStatus,
     ValidatedOverwriteTransaction,
+    WriteOverlap,
 )
 from endive.catalog import CatalogSnapshot
 
@@ -525,3 +527,192 @@ class TestHasWriteOverlap:
         old = _make_snapshot(0, [0], {0: (0,)})
         new = _make_snapshot(3, [3], {0: (3,)})  # 3 commits to same table/partition
         assert txn.has_write_overlap(old, new) is True
+
+
+# ---------------------------------------------------------------------------
+# WriteOverlap dataclass
+# ---------------------------------------------------------------------------
+
+class TestWriteOverlap:
+    def test_no_overlap_sentinel(self):
+        assert NO_OVERLAP.has_overlap is False
+        assert NO_OVERLAP.n_tables == 0
+        assert NO_OVERLAP.n_partitions == 0
+
+    def test_single_table_single_partition(self):
+        overlap = WriteOverlap(overlapping={0: frozenset({0})})
+        assert overlap.has_overlap is True
+        assert overlap.n_tables == 1
+        assert overlap.n_partitions == 1
+
+    def test_multi_table(self):
+        overlap = WriteOverlap(overlapping={0: frozenset({0}), 2: frozenset({1, 3})})
+        assert overlap.has_overlap is True
+        assert overlap.n_tables == 2
+        assert overlap.n_partitions == 3
+
+    def test_frozen(self):
+        with pytest.raises(AttributeError):
+            NO_OVERLAP.overlapping = {0: frozenset({0})}
+
+    def test_equality(self):
+        a = WriteOverlap(overlapping={0: frozenset({0})})
+        b = WriteOverlap(overlapping={0: frozenset({0})})
+        assert a == b
+
+    def test_empty_overlapping_is_no_overlap(self):
+        empty = WriteOverlap(overlapping={})
+        assert empty.has_overlap is False
+        assert empty == NO_OVERLAP
+
+
+# ---------------------------------------------------------------------------
+# compute_write_overlap()
+# ---------------------------------------------------------------------------
+
+class TestComputeWriteOverlap:
+    def test_cross_table_returns_no_overlap(self):
+        """T writes table 1, intervening commit to table 0 → NO_OVERLAP."""
+        txn = make_txn(
+            FastAppendTransaction,
+            tables_written=frozenset({1}),
+            partitions_written={1: frozenset({0})},
+        )
+        old = _make_snapshot(0, [0, 0], {0: (0,), 1: (0,)})
+        new = _make_snapshot(1, [1, 0], {0: (1,), 1: (0,)})
+        result = txn.compute_write_overlap(old, new)
+        assert result is NO_OVERLAP
+
+    def test_same_table_overlapping_returns_correct_dict(self):
+        """Both write table 0 p0 → overlap = {0: {0}}."""
+        txn = make_txn(
+            FastAppendTransaction,
+            tables_written=frozenset({0}),
+            partitions_written={0: frozenset({0})},
+        )
+        old = _make_snapshot(0, [0], {0: (0,)})
+        new = _make_snapshot(1, [1], {0: (1,)})
+        result = txn.compute_write_overlap(old, new)
+        assert result.has_overlap is True
+        assert result.overlapping == {0: frozenset({0})}
+        assert result.n_partitions == 1
+
+    def test_multi_table_partial_overlap(self):
+        """T writes {A.0, B.0, B.2}. Intervening modifies {A.1, B.0}.
+        Overlap = {B: {0}}, n_partitions=1."""
+        txn = make_txn(
+            FastAppendTransaction,
+            tables_written=frozenset({0, 1}),
+            partitions_written={0: frozenset({0}), 1: frozenset({0, 2})},
+        )
+        # Table 0 (A): 2 partitions, p1 modified (txn writes p0 → no overlap)
+        # Table 1 (B): 3 partitions, p0 modified (txn writes p0,p2 → overlap on p0)
+        old = _make_snapshot(0, [0, 0], {0: (0, 0), 1: (0, 0, 0)})
+        new = _make_snapshot(2, [1, 1], {0: (0, 1), 1: (1, 0, 0)})
+        result = txn.compute_write_overlap(old, new)
+        assert result.has_overlap is True
+        assert result.overlapping == {1: frozenset({0})}
+        assert result.n_tables == 1
+        assert result.n_partitions == 1
+
+    def test_disjoint_partitions_returns_no_overlap(self):
+        """Same table but disjoint partitions → NO_OVERLAP."""
+        txn = make_txn(
+            FastAppendTransaction,
+            tables_written=frozenset({0}),
+            partitions_written={0: frozenset({1})},
+        )
+        old = _make_snapshot(0, [0], {0: (0, 0)})
+        new = _make_snapshot(1, [1], {0: (1, 0)})
+        result = txn.compute_write_overlap(old, new)
+        assert result is NO_OVERLAP
+
+    def test_backward_compat_with_has_write_overlap(self):
+        """compute_write_overlap().has_overlap == has_write_overlap()."""
+        txn = make_txn(
+            FastAppendTransaction,
+            tables_written=frozenset({0, 1}),
+            partitions_written={0: frozenset({0}), 1: frozenset({0})},
+        )
+        old = _make_snapshot(0, [0, 0], {0: (0,), 1: (0,)})
+        new = _make_snapshot(1, [1, 0], {0: (1,), 1: (0,)})
+        assert txn.compute_write_overlap(old, new).has_overlap == txn.has_write_overlap(old, new)
+
+    def test_multi_partition_overlap_counts(self):
+        """T writes {A.0, A.1, A.2}. All modified → n_partitions=3."""
+        txn = make_txn(
+            FastAppendTransaction,
+            tables_written=frozenset({0}),
+            partitions_written={0: frozenset({0, 1, 2})},
+        )
+        old = _make_snapshot(0, [0], {0: (0, 0, 0)})
+        new = _make_snapshot(1, [1], {0: (1, 1, 1)})
+        result = txn.compute_write_overlap(old, new)
+        assert result.n_partitions == 3
+        assert result.overlapping == {0: frozenset({0, 1, 2})}
+
+
+# ---------------------------------------------------------------------------
+# Scaled per-attempt cost
+# ---------------------------------------------------------------------------
+
+class TestScaledPerAttemptCost:
+    def test_default_n_partitions_unchanged(self):
+        """Default n_partitions=1 → same as before."""
+        txn = make_txn(FastAppendTransaction)
+        cost = txn.get_per_attempt_cost(ml_append_mode=False)
+        assert cost.manifest_list_reads == 1
+        assert cost.manifest_file_writes == 1
+        assert cost.manifest_list_writes == 1
+
+    def test_n_partitions_scales_all_fields(self):
+        txn = make_txn(FastAppendTransaction)
+        cost = txn.get_per_attempt_cost(ml_append_mode=False, n_partitions=3)
+        assert cost.manifest_list_reads == 3
+        assert cost.manifest_file_writes == 3
+        assert cost.manifest_list_writes == 3
+
+    def test_ml_append_mode_with_n_partitions(self):
+        txn = make_txn(FastAppendTransaction)
+        cost = txn.get_per_attempt_cost(ml_append_mode=True, n_partitions=5)
+        assert cost.manifest_list_reads == 5
+        assert cost.manifest_file_writes == 5
+        assert cost.manifest_list_writes == 0  # ML+ suppresses ML writes
+
+
+# ---------------------------------------------------------------------------
+# Scaled conflict cost
+# ---------------------------------------------------------------------------
+
+class TestScaledConflictCost:
+    def test_fast_append_ignores_n_partitions(self):
+        """FastAppend always returns empty ConflictCost regardless of n_partitions."""
+        txn = make_txn(FastAppendTransaction)
+        cost = txn.get_conflict_cost(n_snapshots_behind=3, ml_append_mode=False, n_partitions=10)
+        assert cost == ConflictCost()
+
+    def test_merge_append_scales_by_n_partitions(self):
+        """MergeAppend: n_manifests = int(n_behind * manifests_per) * n_partitions."""
+        txn = make_txn(MergeAppendTransaction, manifests_per_concurrent_commit=2.0)
+        cost = txn.get_conflict_cost(n_snapshots_behind=2, ml_append_mode=False, n_partitions=3)
+        # int(2 * 2.0) * 3 = 12
+        assert cost.manifest_file_reads == 12
+        assert cost.manifest_file_writes == 12
+
+    def test_validated_overwrite_scales_by_n_partitions(self):
+        """ValidatedOverwrite: historical_ml_reads = n_behind * n_partitions."""
+        txn = make_txn(ValidatedOverwriteTransaction)
+        cost = txn.get_conflict_cost(n_snapshots_behind=3, ml_append_mode=False, n_partitions=5)
+        assert cost.historical_ml_reads == 15
+
+    def test_default_n_partitions_unchanged_merge_append(self):
+        txn = make_txn(MergeAppendTransaction, manifests_per_concurrent_commit=2.0)
+        cost = txn.get_conflict_cost(n_snapshots_behind=2, ml_append_mode=False)
+        # int(2 * 2.0) * 1 = 4
+        assert cost.manifest_file_reads == 4
+        assert cost.manifest_file_writes == 4
+
+    def test_default_n_partitions_unchanged_validated_overwrite(self):
+        txn = make_txn(ValidatedOverwriteTransaction)
+        cost = txn.get_conflict_cost(n_snapshots_behind=3, ml_append_mode=False)
+        assert cost.historical_ml_reads == 3

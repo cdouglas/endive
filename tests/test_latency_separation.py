@@ -53,6 +53,7 @@ def _make_fa(txn_id=1, runtime=100.0):
         submit_time_ms=0.0,
         runtime_ms=runtime,
         tables_written=frozenset({0}),
+        partitions_written={0: frozenset({0})},
     )
 
 

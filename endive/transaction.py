@@ -43,6 +43,31 @@ class TransactionStatus(Enum):
 
 
 @dataclass(frozen=True)
+class WriteOverlap:
+    """Details of write overlap between transaction and intervening commits.
+
+    Replaces the boolean has_write_overlap() with structured information
+    about which tables/partitions overlap, enabling I/O cost scaling.
+    """
+    overlapping: Dict[int, FrozenSet[int]]  # table_id → overlapping partition IDs
+
+    @property
+    def has_overlap(self) -> bool:
+        return bool(self.overlapping)
+
+    @property
+    def n_tables(self) -> int:
+        return len(self.overlapping)
+
+    @property
+    def n_partitions(self) -> int:
+        return sum(len(pids) for pids in self.overlapping.values())
+
+
+NO_OVERLAP = WriteOverlap(overlapping={})
+
+
+@dataclass(frozen=True)
 class ConflictCost:
     """I/O operations required to resolve a conflict.
 
@@ -168,18 +193,22 @@ class Transaction(ABC):
         """Whether this operation type can encounter real conflicts."""
         ...
 
-    def get_per_attempt_cost(self, ml_append_mode: bool) -> ConflictCost:
+    def get_per_attempt_cost(self, ml_append_mode: bool, n_partitions: int = 1) -> ConflictCost:
         """I/O cost paid on every commit attempt (before CAS).
 
-        Every attempt must:
+        Every attempt must, per partition:
         - Read the current manifest list (1 ML read)
         - Write a new manifest file (1 MF write)
         - Write a new manifest list (1 ML write) unless in ML+ mode
+
+        Args:
+            ml_append_mode: If True, skip manifest list writes.
+            n_partitions: Number of partitions needing manifest work.
         """
         return ConflictCost(
-            manifest_list_reads=1,
-            manifest_file_writes=1,
-            manifest_list_writes=0 if ml_append_mode else 1,
+            manifest_list_reads=n_partitions,
+            manifest_file_writes=n_partitions,
+            manifest_list_writes=0 if ml_append_mode else n_partitions,
         )
 
     @abstractmethod
@@ -187,12 +216,18 @@ class Transaction(ABC):
         self,
         n_snapshots_behind: int,
         ml_append_mode: bool,
+        n_partitions: int = 1,
     ) -> ConflictCost:
         """Calculate additional I/O cost for conflict resolution on retry.
 
         This returns only the retry-specific cost (e.g., re-merge, I/O convoy).
         Per-attempt cost (ML read, MF write, ML write) is handled separately
         by get_per_attempt_cost().
+
+        Args:
+            n_snapshots_behind: Number of catalog versions behind.
+            ml_append_mode: If True, ML+ mode is active.
+            n_partitions: Number of overlapping partitions (scales I/O cost).
         """
         ...
 
@@ -228,6 +263,34 @@ class Transaction(ABC):
     # Write overlap detection
     # ------------------------------------------------------------------
 
+    def compute_write_overlap(
+        self,
+        old_snapshot: CatalogSnapshot,
+        new_snapshot: CatalogSnapshot,
+    ) -> WriteOverlap:
+        """Compute structured write overlap between this transaction and
+        intervening commits between old_snapshot and new_snapshot.
+
+        Returns a WriteOverlap with the set of overlapping partitions per
+        table, enabling I/O cost scaling by overlap size.
+        """
+        overlapping: Dict[int, FrozenSet[int]] = {}
+        for table_id in self.tables_written:
+            old_table = old_snapshot.get_table(table_id)
+            new_table = new_snapshot.get_table(table_id)
+            if old_table.version == new_table.version:
+                continue
+            # Table was modified — check partition-level overlap
+            overlap_pids = frozenset(
+                pid for pid in self.partitions_written.get(table_id, ())
+                if old_table.partition_versions[pid] != new_table.partition_versions[pid]
+            )
+            if overlap_pids:
+                overlapping[table_id] = overlap_pids
+        if not overlapping:
+            return NO_OVERLAP
+        return WriteOverlap(overlapping=overlapping)
+
     def has_write_overlap(
         self,
         old_snapshot: CatalogSnapshot,
@@ -236,19 +299,9 @@ class Transaction(ABC):
         """Check if any table+partition this transaction wrote was also
         modified between old_snapshot and new_snapshot.
 
-        Returns False for cross-table CAS failures and disjoint-partition
-        conflicts, enabling the commit loop to skip per-attempt I/O on retry.
+        Backward-compatible wrapper around compute_write_overlap().
         """
-        for table_id in self.tables_written:
-            old_table = old_snapshot.get_table(table_id)
-            new_table = new_snapshot.get_table(table_id)
-            if old_table.version == new_table.version:
-                continue
-            # Table was modified — check partition-level overlap
-            for pid in self.partitions_written.get(table_id, ()):
-                if old_table.partition_versions[pid] != new_table.partition_versions[pid]:
-                    return True
-        return False
+        return self.compute_write_overlap(old_snapshot, new_snapshot).has_overlap
 
     # ------------------------------------------------------------------
     # Execute (main entry point)
@@ -355,23 +408,25 @@ class Transaction(ABC):
         """Execute commit loop with retries.
 
         On each attempt:
-        1. Pay per-attempt I/O (skipped if prior CAS failure was cross-table)
+        1. Pay per-attempt I/O scaled by partition count
         2. Compute writes from current snapshot
         3. Call catalog.commit() (uniform interface)
         4. On success: return COMMITTED result
-        5. On failure: read catalog, check write overlap, pay conflict I/O
+        5. On failure: read catalog, compute overlap, pay scaled conflict I/O
         """
         last_snapshot = self._start_snapshot
-        skip_per_attempt_io = False
+        # First attempt: all written partitions need manifest work
+        n_written = sum(len(pids) for pids in self.partitions_written.values())
+        per_attempt_n = n_written
 
         for attempt in range(max_retries + 1):
             writes = self._compute_writes(last_snapshot)
 
-            # Per-attempt I/O: ML read + MF write + ML write
-            # Skipped when the prior CAS failure was cross-table/disjoint
-            if not skip_per_attempt_io:
+            # Per-attempt I/O scaled by partitions needing manifest work
+            # 0 when the prior CAS failure was cross-table/disjoint (no overlap)
+            if per_attempt_n > 0:
                 before = self._elapsed
-                per_attempt = self.get_per_attempt_cost(ml_append_mode)
+                per_attempt = self.get_per_attempt_cost(ml_append_mode, n_partitions=per_attempt_n)
                 yield from self._pay_conflict_cost(per_attempt, storage)
                 self._per_attempt_io_ms += self._elapsed - before
 
@@ -398,14 +453,17 @@ class Transaction(ABC):
             )
             self._catalog_read_ms += self._elapsed - before
 
-            # Check whether the intervening commits overlap our writes
-            overlap = self.has_write_overlap(last_snapshot, current_snapshot)
+            # Compute structured overlap with intervening commits
+            overlap = self.compute_write_overlap(last_snapshot, current_snapshot)
 
-            if overlap:
-                # Same-table/partition conflict: pay validation I/O
+            if overlap.has_overlap:
+                # Same-table/partition conflict: pay scaled validation I/O
                 before = self._elapsed
                 n_behind = current_snapshot.seq - last_snapshot.seq
-                cost = self.get_conflict_cost(n_behind, ml_append_mode)
+                cost = self.get_conflict_cost(
+                    n_behind, ml_append_mode,
+                    n_partitions=overlap.n_partitions,
+                )
                 yield from self._pay_conflict_cost(cost, storage)
                 self._conflict_io_ms += self._elapsed - before
 
@@ -428,7 +486,7 @@ class Transaction(ABC):
             # Update state for retry
             last_snapshot = current_snapshot
             self._retries += 1
-            skip_per_attempt_io = not overlap
+            per_attempt_n = overlap.n_partitions  # 0 = skip on next attempt
 
         # All attempts exhausted
         self._status = TransactionStatus.ABORTED
@@ -518,6 +576,7 @@ class FastAppendTransaction(Transaction):
         self,
         n_snapshots_behind: int,
         ml_append_mode: bool,
+        n_partitions: int = 1,
     ) -> ConflictCost:
         # No additional retry cost — per-attempt cost covers everything
         return ConflictCost()
@@ -563,9 +622,10 @@ class MergeAppendTransaction(Transaction):
         self,
         n_snapshots_behind: int,
         ml_append_mode: bool,
+        n_partitions: int = 1,
     ) -> ConflictCost:
         # Only re-merge cost — per-attempt cost (ML read/MF write/ML write) is separate
-        n_manifests = int(n_snapshots_behind * self._manifests_per_commit)
+        n_manifests = int(n_snapshots_behind * self._manifests_per_commit) * n_partitions
         return ConflictCost(
             manifest_file_reads=n_manifests,
             manifest_file_writes=n_manifests,
@@ -602,8 +662,9 @@ class ValidatedOverwriteTransaction(Transaction):
         self,
         n_snapshots_behind: int,
         ml_append_mode: bool,
+        n_partitions: int = 1,
     ) -> ConflictCost:
         # Only I/O convoy cost — per-attempt cost (ML read/MF write/ML write) is separate
         return ConflictCost(
-            historical_ml_reads=n_snapshots_behind,
+            historical_ml_reads=n_snapshots_behind * n_partitions,
         )

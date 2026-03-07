@@ -992,3 +992,150 @@ class TestCrossTableRetry:
         # Both attempts pay per-attempt I/O (overlap was True)
         assert result.manifest_list_reads == 2
         assert result.manifest_file_writes == 2
+
+
+# ---------------------------------------------------------------------------
+# Overlap scaling integration tests
+# ---------------------------------------------------------------------------
+
+class TestOverlapScaling:
+    """Tests that I/O costs scale by number of overlapping partitions."""
+
+    def test_multi_partition_first_attempt_scales(self):
+        """txn writes 3 partitions → first attempt costs 3 ML reads, 3 MF writes, 3 ML writes."""
+        catalog = make_instant_catalog(num_tables=1, partitions=(3,))
+        storage = InstantStorageProvider(rng=np.random.RandomState(42))
+        detector = NeverRealConflictDetector()
+
+        txn = FastAppendTransaction(
+            txn_id=1, submit_time_ms=0.0, runtime_ms=100.0,
+            tables_written=frozenset({0}),
+            partitions_written={0: frozenset({0, 1, 2})},
+        )
+        result = drive_generator(txn.execute(catalog, storage, detector))
+        assert result.status == TransactionStatus.COMMITTED
+        assert result.total_retries == 0
+        # 3 partitions × per-attempt cost
+        assert result.manifest_list_reads == 3
+        assert result.manifest_file_writes == 3
+        assert result.manifest_list_writes == 3
+
+    def test_partial_overlap_scales_retry_per_attempt(self):
+        """T writes {A.0, B.0, B.2}. Overlap on B.0 only.
+        First attempt: 3 partitions. Retry per-attempt: 1 partition."""
+        catalog = make_instant_catalog(num_tables=2, partitions=(2, 3))
+        storage = InstantStorageProvider(rng=np.random.RandomState(42))
+        detector = NeverRealConflictDetector()
+
+        # T2 writes A.0, B.0, B.2
+        t2 = FastAppendTransaction(
+            txn_id=2, submit_time_ms=0.0, runtime_ms=100.0,
+            tables_written=frozenset({0, 1}),
+            partitions_written={0: frozenset({0}), 1: frozenset({0, 2})},
+        )
+        gen = t2.execute(catalog, storage, detector)
+        next(gen)  # Catalog read
+        gen.send(None)  # Runtime
+
+        # T1 commits modifying A.1 and B.0 (overlap only on B.0)
+        t1 = FastAppendTransaction(
+            txn_id=1, submit_time_ms=0.0, runtime_ms=100.0,
+            tables_written=frozenset({0, 1}),
+            partitions_written={0: frozenset({1}), 1: frozenset({0})},
+        )
+        drive_generator(t1.execute(catalog, storage, detector))
+
+        result = drive_generator(gen)
+        assert result.status == TransactionStatus.COMMITTED
+        assert result.total_retries == 1
+        # First attempt: 3 partitions (A.0, B.0, B.2)
+        # Retry: 1 partition (B.0 overlap)
+        # Total ML reads: 3 + 1 = 4
+        assert result.manifest_list_reads == 4
+        assert result.manifest_file_writes == 4
+        assert result.manifest_list_writes == 4
+
+    def test_multi_partition_merge_append_scales_conflict_cost(self):
+        """MergeAppend with 3-partition overlap → conflict cost × 3."""
+        catalog = make_instant_catalog(num_tables=1, partitions=(3,))
+        storage = InstantStorageProvider(rng=np.random.RandomState(42))
+        detector = NeverRealConflictDetector()
+
+        t2 = MergeAppendTransaction(
+            txn_id=2, submit_time_ms=0.0, runtime_ms=100.0,
+            tables_written=frozenset({0}),
+            partitions_written={0: frozenset({0, 1, 2})},
+            manifests_per_concurrent_commit=2.0,
+        )
+        gen = t2.execute(catalog, storage, detector)
+        next(gen)  # Catalog read
+        gen.send(None)  # Runtime
+
+        # T1 commits modifying all 3 partitions
+        t1 = FastAppendTransaction(
+            txn_id=1, submit_time_ms=0.0, runtime_ms=100.0,
+            tables_written=frozenset({0}),
+            partitions_written={0: frozenset({0, 1, 2})},
+        )
+        drive_generator(t1.execute(catalog, storage, detector))
+
+        result = drive_generator(gen)
+        assert result.status == TransactionStatus.COMMITTED
+        assert result.total_retries == 1
+        # Conflict cost: int(1 * 2.0) * 3 = 6 MF reads/writes
+        assert result.manifest_file_reads == 6
+        # Per-attempt MF writes: 3 (first) + 3 (retry) = 6, plus conflict: 6 → 12
+        assert result.manifest_file_writes == 12
+
+    def test_multi_partition_validated_overwrite_scales_convoy(self):
+        """ValidatedOverwrite with 2-partition overlap → historical ML reads × 2."""
+        catalog = make_instant_catalog(num_tables=1, partitions=(3,))
+        storage = InstantStorageProvider(rng=np.random.RandomState(42))
+        detector = NeverRealConflictDetector()
+
+        t2 = ValidatedOverwriteTransaction(
+            txn_id=2, submit_time_ms=0.0, runtime_ms=100.0,
+            tables_written=frozenset({0}),
+            partitions_written={0: frozenset({0, 1, 2})},
+        )
+        gen = t2.execute(catalog, storage, detector)
+        next(gen)  # Catalog read
+        gen.send(None)  # Runtime
+
+        # T1 commits modifying p0 and p1 (not p2)
+        t1 = FastAppendTransaction(
+            txn_id=1, submit_time_ms=0.0, runtime_ms=100.0,
+            tables_written=frozenset({0}),
+            partitions_written={0: frozenset({0, 1})},
+        )
+        drive_generator(t1.execute(catalog, storage, detector))
+
+        result = drive_generator(gen)
+        assert result.status == TransactionStatus.COMMITTED
+        assert result.total_retries == 1
+        # n_behind=1, n_partitions=2 (p0,p1 overlap) → 2 historical ML reads
+        # Per-attempt ML reads: 3 (first) + 2 (retry, scaled to overlap) = 5
+        # Historical ML reads: 2
+        assert result.manifest_list_reads == 5 + 2
+
+    def test_single_partition_backward_compat(self):
+        """Single-table single-partition → identical I/O to pre-scaling behavior."""
+        catalog = make_instant_catalog()
+        storage = InstantStorageProvider(rng=np.random.RandomState(42))
+        detector = NeverRealConflictDetector()
+
+        t2 = make_fast_append(txn_id=2)
+        gen = t2.execute(catalog, storage, detector)
+        next(gen)
+        gen.send(None)
+
+        t1 = make_fast_append(txn_id=1)
+        drive_generator(t1.execute(catalog, storage, detector))
+
+        result = drive_generator(gen)
+        assert result.status == TransactionStatus.COMMITTED
+        assert result.total_retries == 1
+        # 2 attempts × 1 partition each = 2 of each
+        assert result.manifest_list_reads == 2
+        assert result.manifest_file_writes == 2
+        assert result.manifest_list_writes == 2
