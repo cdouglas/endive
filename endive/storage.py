@@ -274,7 +274,7 @@ class S3StorageProvider(StorageProvider):
     def __init__(
         self,
         rng: np.random.RandomState,
-        read_latency: LatencyDistribution,
+        read_latency: SizeBasedLatency,
         write_latency: SizeBasedLatency,
         cas_latency: LatencyDistribution,
         min_latency: float = 43.0,
@@ -286,7 +286,7 @@ class S3StorageProvider(StorageProvider):
         self._min_latency = min_latency
 
     def read(self, key: str, expected_size_bytes: int) -> Generator[float, None, StorageResult]:
-        latency = self._read_latency.sample(self._rng)
+        latency = self._read_latency.with_size(expected_size_bytes).sample(self._rng)
         yield latency
         return StorageResult(success=True, latency_ms=latency,
                              data_size_bytes=expected_size_bytes)
@@ -340,7 +340,7 @@ class S3ExpressStorageProvider(StorageProvider):
     def __init__(
         self,
         rng: np.random.RandomState,
-        read_latency: LatencyDistribution,
+        read_latency: SizeBasedLatency,
         write_latency: SizeBasedLatency,
         cas_latency: LatencyDistribution,
         append_latency: LatencyDistribution,
@@ -354,7 +354,7 @@ class S3ExpressStorageProvider(StorageProvider):
         self._min_latency = min_latency
 
     def read(self, key: str, expected_size_bytes: int) -> Generator[float, None, StorageResult]:
-        latency = self._read_latency.sample(self._rng)
+        latency = self._read_latency.with_size(expected_size_bytes).sample(self._rng)
         yield latency
         return StorageResult(success=True, latency_ms=latency,
                              data_size_bytes=expected_size_bytes)
@@ -414,7 +414,7 @@ class AzureBlobStorageProvider(StorageProvider):
     def __init__(
         self,
         rng: np.random.RandomState,
-        read_latency: LatencyDistribution,
+        read_latency: SizeBasedLatency,
         write_latency: SizeBasedLatency,
         cas_latency: LatencyDistribution,
         append_latency: LatencyDistribution,
@@ -430,7 +430,7 @@ class AzureBlobStorageProvider(StorageProvider):
         self._name = provider_name
 
     def read(self, key: str, expected_size_bytes: int) -> Generator[float, None, StorageResult]:
-        latency = self._read_latency.sample(self._rng)
+        latency = self._read_latency.with_size(expected_size_bytes).sample(self._rng)
         yield latency
         return StorageResult(success=True, latency_ms=latency,
                              data_size_bytes=expected_size_bytes)
@@ -490,7 +490,7 @@ class GCPStorageProvider(StorageProvider):
     def __init__(
         self,
         rng: np.random.RandomState,
-        read_latency: LatencyDistribution,
+        read_latency: SizeBasedLatency,
         write_latency: SizeBasedLatency,
         cas_latency: LatencyDistribution,
         min_latency: float = 118.0,
@@ -502,7 +502,7 @@ class GCPStorageProvider(StorageProvider):
         self._min_latency = min_latency
 
     def read(self, key: str, expected_size_bytes: int) -> Generator[float, None, StorageResult]:
-        latency = self._read_latency.sample(self._rng)
+        latency = self._read_latency.with_size(expected_size_bytes).sample(self._rng)
         yield latency
         return StorageResult(success=True, latency_ms=latency,
                              data_size_bytes=expected_size_bytes)
@@ -620,13 +620,14 @@ def _build_lognormal(profile: dict, section_name: str,
     )
 
 
-def _build_size_latency(profile: dict, min_latency: float = 1.0) -> SizeBasedLatency:
-    """Build a SizeBasedLatency from a provider TOML [write] section."""
-    w = profile["write"]
+def _build_size_latency(profile: dict, section_name: str = "write",
+                        min_latency: float = 1.0) -> SizeBasedLatency:
+    """Build a SizeBasedLatency from a provider TOML section."""
+    s = profile[section_name]
     return SizeBasedLatency(
-        base_latency_ms=w["base_latency_ms"],
-        latency_per_mib_ms=w["latency_per_mib_ms"],
-        sigma=w["sigma"],
+        base_latency_ms=s["base_latency_ms"],
+        latency_per_mib_ms=s["latency_per_mib_ms"],
+        sigma=s["sigma"],
         min_latency_ms=min_latency,
     )
 
@@ -654,8 +655,8 @@ def create_provider(provider_name: str,
         return InstantStorageProvider(rng=rng, latency_ms=min_lat)
 
     # Build common distributions
-    read_latency = _build_lognormal(profile, "read", min_lat)
-    write_latency = _build_size_latency(profile, min_lat)
+    read_latency = _build_size_latency(profile, "read", min_lat)
+    write_latency = _build_size_latency(profile, "write", min_lat)
 
     if resolved_name == "s3":
         return S3StorageProvider(

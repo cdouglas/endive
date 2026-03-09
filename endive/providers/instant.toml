@@ -7,7 +7,8 @@ class = "InstantStorageProvider"
 min_latency_ms = 1
 
 [read]
-median_ms = 1
+base_latency_ms = 1
+latency_per_mib_ms = 0
 sigma = 0.1
 
 [write]
