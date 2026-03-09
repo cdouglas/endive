@@ -635,6 +635,14 @@ def extract_key_parameters(config: Dict) -> Dict:
             params['fast_append_ratio'] = op_types.get('fast_append', None)
             params['validated_overwrite_ratio'] = op_types.get('validated_overwrite', None)
 
+    # Extract table selection parameters
+    if 'transaction' in config and 'table_selection' in config['transaction']:
+        ts = config['transaction']['table_selection']
+        if isinstance(ts, dict):
+            params['table_selection_distribution'] = ts.get('distribution', 'uniform')
+            if ts.get('distribution') == 'zipf':
+                params['table_selection_zipf_alpha'] = ts.get('zipf_alpha', 1.5)
+
     # Extract partition parameters
     if 'partition' in config:
         params['partition_enabled'] = config['partition'].get('enabled', False)

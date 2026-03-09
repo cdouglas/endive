@@ -70,6 +70,10 @@ EXPERIMENT_GROUPS = {
         "exp4a_tables_fa.toml",    # Multi-table contention × 100% FA
         "exp4b_tables_mix.toml",   # Multi-table contention × 90/10 mix
     ],
+    "zipf": [
+        "exp4a_zipf_tables_fa.toml",    # Zipf table selection × multi-table × 100% FA
+        "exp4b_zipf_tables_mix.toml",   # Zipf table selection × multi-table × 90/10 mix
+    ],
     "providers": [
         "exp4c_tables_providers.toml",  # Real provider profiles × tables × workload
     ],
@@ -447,6 +451,29 @@ def generate_all_runs(groups: list, num_seeds: int, quick: bool = False) -> list
                                     "catalog.service.latency_ms": cat_latency,
                                 }
                             ))
+
+            elif "exp4a_zipf" in config_name or "exp4b_zipf" in config_name:
+                # Zipf table selection: same sweep as exp4a/4b (num_tables x catalog_latency x load)
+                # Table selection distribution is baked into the base TOML
+                tables_list = [1, 5, 50] if quick else NUM_TABLES_SWEEP
+                latencies = [1.0, 50.0, 120.0] if quick else NUM_TABLES_LATENCY_SWEEP
+                for num_t in tables_list:
+                    for cat_latency in latencies:
+                        for load in loads:
+                            for seed_num in range(1, num_seeds + 1):
+                                seed = generate_seed(nonce, base_name,
+                                    {"num_tables": num_t, "cat_latency": cat_latency, "load": load},
+                                    seed_num)
+                                runs.append(ExperimentRun(
+                                    config_path=config_name,
+                                    label=base_name,
+                                    seed=seed,
+                                    params={
+                                        "catalog.num_tables": num_t,
+                                        "catalog.service.latency_ms": cat_latency,
+                                        "inter_arrival.scale": float(load),
+                                    }
+                                ))
 
             elif "exp4a_tables_fa" in config_name or "exp4b_tables_mix" in config_name:
                 # Multi-table catalog contention: num_tables x catalog_latency x load

@@ -32,7 +32,7 @@ from endive.storage import (
     LognormalLatency,
     create_provider,
 )
-from endive.workload import Workload, WorkloadConfig
+from endive.workload import Workload, WorkloadConfig, ZipfTableSelector
 
 logger = logging.getLogger(__name__)
 
@@ -259,6 +259,15 @@ def _build_workload(
     cm = txn_cfg.get("conflicting_manifests", {})
     manifests_per_commit = cm.get("mean", 1.5)
 
+    # Table selection
+    table_selection_cfg = txn_cfg.get("table_selection", {})
+    table_selector = None
+    ts_dist = table_selection_cfg.get("distribution", "uniform")
+    if ts_dist == "zipf":
+        table_selector = ZipfTableSelector(
+            alpha=table_selection_cfg.get("zipf_alpha", 1.5),
+        )
+
     wl_config = WorkloadConfig(
         inter_arrival=inter_arrival,
         runtime=runtime,
@@ -268,6 +277,7 @@ def _build_workload(
         merge_append_weight=ma_weight,
         validated_overwrite_weight=vo_weight,
         manifests_per_concurrent_commit=manifests_per_commit,
+        table_selector=table_selector,
     )
 
     # Workload seed is derived from simulation seed
@@ -533,5 +543,17 @@ def validate_config(config: dict) -> tuple[list[str], list[str]]:
 
         if parts_mean >= n_partitions:
             warnings.append(f"partition.partitions_per_txn_mean ({parts_mean}) >= num_partitions ({n_partitions}); transactions will touch all partitions, defeating partition isolation")
+
+    # Table selection configuration
+    table_selection = txn.get('table_selection', {})
+    if table_selection:
+        ts_dist = table_selection.get('distribution', 'uniform')
+        if ts_dist not in ['zipf', 'uniform']:
+            errors.append(f"transaction.table_selection.distribution must be 'zipf' or 'uniform', got '{ts_dist}'")
+
+        if ts_dist == 'zipf':
+            alpha = table_selection.get('zipf_alpha', 1.5)
+            if alpha <= 0:
+                errors.append(f"transaction.table_selection.zipf_alpha must be > 0, got {alpha}")
 
     return errors, warnings

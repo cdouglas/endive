@@ -1,0 +1,137 @@
+# Experiment 4a-zipf: Multi-Table Catalog Contention with Zipf Selection (100% FastAppend)
+#
+# Goal: Show how Zipf-distributed table selection changes contention vs uniform.
+#
+# With uniform selection across N tables, each table sees ~1/N of traffic.
+# Zipf concentrates writes on a few hot tables, creating higher effective
+# per-table contention even at the same total arrival rate and table count.
+# Compare against exp4a (uniform) to measure the difference.
+#
+# Sweep: num_tables x catalog_latency x arrival_rate (3D)
+#   num_tables:      [1, 2, 5, 10, 20, 50]
+#   catalog_latency: [1, 10, 50, 120] ms (instant -> GCP range)
+#   arrival_rate:    LOAD_SWEEP
+#
+# Operation types: 100% FastAppend (isolates catalog contention)
+#
+# Expected patterns:
+#   - Higher contention than exp4a at same table count (hot tables see more traffic)
+#   - num_tables=1 should match exp4a (Zipf over 1 table = uniform)
+#   - Benefit of adding tables reduced (hot tables still bottleneck)
+#   - Effect stronger at low catalog latency (faster retry cycles on hot tables)
+#
+# Validation:
+#   - All operation_type values should be "fast_append"
+#   - No validation_exception aborts
+#   - num_tables=1 cross-validates against exp4a
+
+[simulation]
+duration_ms = 3600000  # 1 hour
+output_path = "results.parquet"
+
+[experiment]
+label = "exp4a_zipf_tables_fa"
+
+[catalog]
+num_tables = 1           # Swept: [1, 2, 5, 10, 20, 50]
+num_groups = 1           # Single-file catalog: all tables share one seq
+table_metadata_inlined = true
+backend = "service"
+
+[catalog.service]
+provider = "instant"
+latency_ms = 1.0         # Swept: [1, 10, 50, 120]
+
+[transaction]
+retry = 10
+runtime.min = 30000
+runtime.mean = 180000
+runtime.sigma = 1.5
+
+inter_arrival.distribution = "exponential"
+inter_arrival.scale = 100.0  # Swept: LOAD_SWEEP
+
+# 100% FastAppend
+operation_types.fast_append = 1.0
+operation_types.validated_overwrite = 0.0
+real_conflict_probability = 0.0
+
+conflicting_manifests.distribution = "exponential"
+conflicting_manifests.mean = 3.0
+conflicting_manifests.min = 1
+conflicting_manifests.max = 10
+manifest_list_mode = "rewrite"
+
+[transaction.table_selection]
+distribution = "zipf"
+zipf_alpha = 1.5
+
+[storage]
+provider = "s3"  # Fixed S3 storage (catalog latency swept separately)
+max_parallel = 4
+
+[plots]
+output_dir = "plots/exp4a_zipf_tables_fa"
+
+[[plots.graphs]]
+type = "commit_rate_over_time"
+
+[[plots.graphs]]
+type = "heatmap"
+x_param = "inter_arrival_scale"
+y_param = "num_tables"
+metrics = ["success_rate", "throughput", "mean_latency", "p99_latency"]
+filters = ["catalog_service_latency_ms==1.0"]
+title_suffix = " (Zipf, CAS=1ms)"
+output_suffix = "cas_1ms"
+
+[[plots.graphs]]
+type = "heatmap"
+x_param = "inter_arrival_scale"
+y_param = "num_tables"
+metrics = ["success_rate", "throughput", "mean_latency", "p99_latency"]
+filters = ["catalog_service_latency_ms==10.0"]
+title_suffix = " (Zipf, CAS=10ms)"
+output_suffix = "cas_10ms"
+
+[[plots.graphs]]
+type = "heatmap"
+x_param = "inter_arrival_scale"
+y_param = "num_tables"
+metrics = ["success_rate", "throughput", "mean_latency", "p99_latency"]
+filters = ["catalog_service_latency_ms==50.0"]
+title_suffix = " (Zipf, CAS=50ms)"
+output_suffix = "cas_50ms"
+
+[[plots.graphs]]
+type = "heatmap"
+x_param = "inter_arrival_scale"
+y_param = "num_tables"
+metrics = ["success_rate", "throughput", "mean_latency", "p99_latency"]
+filters = ["catalog_service_latency_ms==120.0"]
+title_suffix = " (Zipf, CAS=120ms)"
+output_suffix = "cas_120ms"
+
+[[plots.graphs]]
+type = "latency_vs_throughput"
+group_by = "num_tables"
+filters = ["catalog_service_latency_ms==1.0"]
+output_suffix = "cas_1ms"
+
+[[plots.graphs]]
+type = "latency_vs_throughput"
+group_by = "num_tables"
+filters = ["catalog_service_latency_ms==10.0"]
+output_suffix = "cas_10ms"
+
+[[plots.graphs]]
+type = "latency_vs_throughput"
+group_by = "num_tables"
+filters = ["catalog_service_latency_ms==50.0"]
+output_suffix = "cas_50ms"
+
+[[plots.graphs]]
+type = "latency_vs_throughput"
+group_by = "num_tables"
+filters = ["catalog_service_latency_ms==120.0"]
+output_suffix = "cas_120ms"

@@ -27,7 +27,7 @@ from endive.conflict_detector import (
 )
 from endive.simulation import SimulationConfig
 from endive.storage import InstantStorageProvider, S3ExpressStorageProvider
-from endive.workload import Workload
+from endive.workload import Workload, ZipfTableSelector, UniformTableSelector
 
 
 # ---------------------------------------------------------------------------
@@ -629,3 +629,225 @@ class TestExperimentHash:
         config_a = {**base}
         config_b = {**base, "transaction": {"inter_arrival": {"scale": 200.0}}}
         assert compute_experiment_hash(config_a) != compute_experiment_hash(config_b)
+
+    def test_table_selection_changes_hash(self):
+        """Adding table_selection changes experiment hash."""
+        base = {
+            "simulation": {"duration_ms": 3600000},
+            "catalog": {"num_tables": 10},
+            "transaction": {"inter_arrival": {"scale": 100.0}},
+            "storage": {"provider": "s3"},
+        }
+        config_zipf = {
+            **base,
+            "transaction": {
+                **base["transaction"],
+                "table_selection": {"distribution": "zipf", "zipf_alpha": 1.5},
+            },
+        }
+        assert compute_experiment_hash(base) != compute_experiment_hash(config_zipf)
+
+
+# ---------------------------------------------------------------------------
+# Table selection config
+# ---------------------------------------------------------------------------
+
+class TestTableSelectionConfig:
+    """Tests for [transaction.table_selection] config parsing."""
+
+    def test_default_uniform(self):
+        """No table_selection section → uniform selector."""
+        path = write_toml(MINIMAL_CONFIG)
+        try:
+            config = load_simulation_config(path)
+            # Workload defaults to UniformTableSelector when no table_selector
+            assert isinstance(config.workload._table_selector, UniformTableSelector)
+        finally:
+            os.unlink(path)
+
+    def test_zipf_distribution(self):
+        """distribution=zipf creates ZipfTableSelector with correct alpha."""
+        config_str = """\
+[simulation]
+duration_ms = 5000
+seed = 42
+
+[catalog]
+num_tables = 10
+
+[transaction]
+retry = 3
+inter_arrival.distribution = "exponential"
+inter_arrival.scale = 100.0
+runtime.mean = 50000
+runtime.sigma = 1.0
+
+[transaction.table_selection]
+distribution = "zipf"
+zipf_alpha = 2.0
+
+[storage]
+provider = "instant"
+"""
+        path = write_toml(config_str)
+        try:
+            config = load_simulation_config(path)
+            selector = config.workload._table_selector
+            assert isinstance(selector, ZipfTableSelector)
+            assert selector._alpha == 2.0
+        finally:
+            os.unlink(path)
+
+    def test_zipf_default_alpha(self):
+        """Zipf without zipf_alpha uses default 1.5."""
+        config_str = """\
+[simulation]
+duration_ms = 5000
+seed = 42
+
+[catalog]
+num_tables = 5
+
+[transaction]
+retry = 3
+inter_arrival.distribution = "exponential"
+inter_arrival.scale = 100.0
+runtime.mean = 50000
+runtime.sigma = 1.0
+
+[transaction.table_selection]
+distribution = "zipf"
+
+[storage]
+provider = "instant"
+"""
+        path = write_toml(config_str)
+        try:
+            config = load_simulation_config(path)
+            selector = config.workload._table_selector
+            assert isinstance(selector, ZipfTableSelector)
+            assert selector._alpha == 1.5
+        finally:
+            os.unlink(path)
+
+    def test_explicit_uniform(self):
+        """distribution=uniform creates UniformTableSelector."""
+        config_str = """\
+[simulation]
+duration_ms = 5000
+seed = 42
+
+[catalog]
+num_tables = 5
+
+[transaction]
+retry = 3
+inter_arrival.distribution = "exponential"
+inter_arrival.scale = 100.0
+runtime.mean = 50000
+runtime.sigma = 1.0
+
+[transaction.table_selection]
+distribution = "uniform"
+
+[storage]
+provider = "instant"
+"""
+        path = write_toml(config_str)
+        try:
+            config = load_simulation_config(path)
+            assert isinstance(config.workload._table_selector, UniformTableSelector)
+        finally:
+            os.unlink(path)
+
+    def test_invalid_distribution(self):
+        """Invalid distribution raises ConfigurationError."""
+        config_str = """\
+[simulation]
+duration_ms = 5000
+seed = 42
+
+[catalog]
+num_tables = 5
+
+[transaction]
+retry = 3
+inter_arrival.distribution = "exponential"
+inter_arrival.scale = 100.0
+runtime.mean = 50000
+runtime.sigma = 1.0
+
+[transaction.table_selection]
+distribution = "gaussian"
+
+[storage]
+provider = "instant"
+"""
+        path = write_toml(config_str)
+        try:
+            with pytest.raises(ConfigurationError, match="table_selection.distribution"):
+                load_simulation_config(path)
+        finally:
+            os.unlink(path)
+
+    def test_zipf_alpha_zero(self):
+        """zipf_alpha <= 0 raises ConfigurationError."""
+        config_str = """\
+[simulation]
+duration_ms = 5000
+seed = 42
+
+[catalog]
+num_tables = 5
+
+[transaction]
+retry = 3
+inter_arrival.distribution = "exponential"
+inter_arrival.scale = 100.0
+runtime.mean = 50000
+runtime.sigma = 1.0
+
+[transaction.table_selection]
+distribution = "zipf"
+zipf_alpha = 0.0
+
+[storage]
+provider = "instant"
+"""
+        path = write_toml(config_str)
+        try:
+            with pytest.raises(ConfigurationError, match="zipf_alpha"):
+                load_simulation_config(path)
+        finally:
+            os.unlink(path)
+
+    def test_zipf_alpha_negative(self):
+        """Negative zipf_alpha raises ConfigurationError."""
+        config_str = """\
+[simulation]
+duration_ms = 5000
+seed = 42
+
+[catalog]
+num_tables = 5
+
+[transaction]
+retry = 3
+inter_arrival.distribution = "exponential"
+inter_arrival.scale = 100.0
+runtime.mean = 50000
+runtime.sigma = 1.0
+
+[transaction.table_selection]
+distribution = "zipf"
+zipf_alpha = -1.0
+
+[storage]
+provider = "instant"
+"""
+        path = write_toml(config_str)
+        try:
+            with pytest.raises(ConfigurationError, match="zipf_alpha"):
+                load_simulation_config(path)
+        finally:
+            os.unlink(path)
