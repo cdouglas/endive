@@ -96,6 +96,11 @@ _ARROW_SCHEMA = pa.schema([
     ("conflict_io_ms", pa.float32()),
     ("catalog_commit_ms", pa.float32()),
     ("event_count", pa.int32()),
+    ("write_table_ids", pa.list_(pa.int32())),
+    ("write_partition_ids", pa.list_(pa.int32())),
+    ("catalog_conflicts", pa.int32()),
+    ("tblptn_conflicts", pa.int32()),
+    ("max_snapshots_behind", pa.int32()),
 ])
 
 
@@ -124,6 +129,11 @@ def _result_to_row(r: TransactionResult) -> dict:
         "conflict_io_ms": round(r.conflict_io_ms, 2),
         "catalog_commit_ms": round(r.catalog_commit_ms, 2),
         "event_count": r.event_count,
+        "write_table_ids": list(r.write_table_ids),
+        "write_partition_ids": list(r.write_partition_ids),
+        "catalog_conflicts": r.catalog_conflicts,
+        "tblptn_conflicts": r.tblptn_conflicts,
+        "max_snapshots_behind": r.max_snapshots_behind,
     }
 
 

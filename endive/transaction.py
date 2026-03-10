@@ -111,6 +111,15 @@ class TransactionResult:
     # DES engine profiling
     event_count: int = 0               # Number of SimPy events processed by this txn
 
+    # Table/partition targeting (parallel pair lists)
+    write_table_ids: tuple = ()        # Flattened table IDs
+    write_partition_ids: tuple = ()    # Flattened partition IDs (parallel with table IDs)
+
+    # Retry characterization
+    catalog_conflicts: int = 0         # CAS failures with no write overlap
+    tblptn_conflicts: int = 0          # CAS failures with write overlap
+    max_snapshots_behind: int = 0      # Max (new_seq - old_seq) across retries
+
 
 # ---------------------------------------------------------------------------
 # Conflict detection interface (implementations in endive-f34)
@@ -183,6 +192,11 @@ class Transaction(ABC):
         self._per_attempt_io_ms = 0.0
         self._conflict_io_ms = 0.0
         self._catalog_commit_ms = 0.0
+
+        # Retry characterization accumulators
+        self._catalog_conflicts = 0
+        self._tblptn_conflicts = 0
+        self._max_snapshots_behind = 0
 
     @property
     def status(self) -> TransactionStatus:
@@ -368,6 +382,13 @@ class Transaction(ABC):
         abort_reason: Optional[str] = None,
     ) -> TransactionResult:
         """Create TransactionResult from current state."""
+        # Flatten partitions_written dict into parallel pair lists
+        _tids, _pids = [], []
+        for tid in sorted(self.partitions_written):
+            for pid in sorted(self.partitions_written[tid]):
+                _tids.append(tid)
+                _pids.append(pid)
+
         return TransactionResult(
             status=status,
             txn_id=self.id,
@@ -395,6 +416,11 @@ class Transaction(ABC):
             per_attempt_io_ms=self._per_attempt_io_ms,
             conflict_io_ms=self._conflict_io_ms,
             catalog_commit_ms=self._catalog_commit_ms,
+            write_table_ids=tuple(_tids),
+            write_partition_ids=tuple(_pids),
+            catalog_conflicts=self._catalog_conflicts,
+            tblptn_conflicts=self._tblptn_conflicts,
+            max_snapshots_behind=self._max_snapshots_behind,
         )
 
     def _commit_loop(
@@ -455,11 +481,12 @@ class Transaction(ABC):
 
             # Compute structured overlap with intervening commits
             overlap = self.compute_write_overlap(last_snapshot, current_snapshot)
+            n_behind = current_snapshot.seq - last_snapshot.seq
+            self._max_snapshots_behind = max(self._max_snapshots_behind, n_behind)
 
             if overlap.has_overlap:
                 # Same-table/partition conflict: pay scaled validation I/O
                 before = self._elapsed
-                n_behind = current_snapshot.seq - last_snapshot.seq
                 cost = self.get_conflict_cost(
                     n_behind, ml_append_mode,
                     n_partitions=overlap.n_partitions,
@@ -473,6 +500,7 @@ class Transaction(ABC):
                         self, current_snapshot, self._start_snapshot
                     )
                     if is_real and self.should_abort_on_real_conflict():
+                        self._tblptn_conflicts += 1
                         self._status = TransactionStatus.ABORTED
                         return self._make_result(
                             TransactionStatus.ABORTED,
@@ -483,7 +511,11 @@ class Transaction(ABC):
             if attempt >= max_retries:
                 break
 
-            # Update state for retry
+            # Update state for retry — conflict type tracked per retry
+            if overlap.has_overlap:
+                self._tblptn_conflicts += 1
+            else:
+                self._catalog_conflicts += 1
             last_snapshot = current_snapshot
             self._retries += 1
             per_attempt_n = overlap.n_partitions  # 0 = skip on next attempt

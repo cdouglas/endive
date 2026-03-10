@@ -1139,3 +1139,223 @@ class TestOverlapScaling:
         assert result.manifest_list_reads == 2
         assert result.manifest_file_writes == 2
         assert result.manifest_list_writes == 2
+
+
+# ---------------------------------------------------------------------------
+# Per-transaction table/partition/retry fields
+# ---------------------------------------------------------------------------
+
+class TestWriteTablePartitionFields:
+    """Tests for write_table_ids, write_partition_ids parallel pair lists."""
+
+    def test_single_table_single_partition(self):
+        """Single-table single-partition produces single-element lists."""
+        catalog = make_instant_catalog()
+        storage = InstantStorageProvider(rng=np.random.RandomState(42))
+        detector = NeverRealConflictDetector()
+        txn = make_fast_append(tables_written=frozenset({0}),
+                               partitions_written={0: frozenset({0})})
+
+        result = drive_generator(txn.execute(catalog, storage, detector))
+        assert result.write_table_ids == (0,)
+        assert result.write_partition_ids == (0,)
+
+    def test_single_table_multi_partition(self):
+        """Single-table multi-partition: table ID repeated, partitions sorted."""
+        catalog = make_instant_catalog(num_tables=1, partitions=(4,))
+        storage = InstantStorageProvider(rng=np.random.RandomState(42))
+        detector = NeverRealConflictDetector()
+        txn = FastAppendTransaction(
+            txn_id=1, submit_time_ms=0.0, runtime_ms=100.0,
+            tables_written=frozenset({0}),
+            partitions_written={0: frozenset({2, 0, 3})},
+        )
+        result = drive_generator(txn.execute(catalog, storage, detector))
+        assert result.write_table_ids == (0, 0, 0)
+        assert result.write_partition_ids == (0, 2, 3)
+
+    def test_multi_table_parallel_lists(self):
+        """Multi-table: tables sorted, partitions sorted within each table."""
+        catalog = make_instant_catalog(num_tables=3, partitions=(2, 3, 1))
+        storage = InstantStorageProvider(rng=np.random.RandomState(42))
+        detector = NeverRealConflictDetector()
+        txn = FastAppendTransaction(
+            txn_id=1, submit_time_ms=0.0, runtime_ms=100.0,
+            tables_written=frozenset({0, 2}),
+            partitions_written={0: frozenset({1, 0}), 2: frozenset({0})},
+        )
+        result = drive_generator(txn.execute(catalog, storage, detector))
+        # Table 0: partitions 0, 1; Table 2: partition 0
+        assert result.write_table_ids == (0, 0, 2)
+        assert result.write_partition_ids == (0, 1, 0)
+
+    def test_reconstruct_partitions_written(self):
+        """Parallel lists can reconstruct original partitions_written dict."""
+        catalog = make_instant_catalog(num_tables=3, partitions=(3, 3, 3))
+        storage = InstantStorageProvider(rng=np.random.RandomState(42))
+        detector = NeverRealConflictDetector()
+        original = {1: frozenset({0, 2}), 2: frozenset({1})}
+        txn = FastAppendTransaction(
+            txn_id=1, submit_time_ms=0.0, runtime_ms=100.0,
+            tables_written=frozenset({1, 2}),
+            partitions_written=original,
+        )
+        result = drive_generator(txn.execute(catalog, storage, detector))
+        # Reconstruct
+        reconstructed = {}
+        for tid, pid in zip(result.write_table_ids, result.write_partition_ids):
+            reconstructed.setdefault(tid, set()).add(pid)
+        reconstructed = {k: frozenset(v) for k, v in reconstructed.items()}
+        assert reconstructed == original
+
+
+class TestConflictTypeTracking:
+    """Tests for catalog_conflicts, tblptn_conflicts, max_snapshots_behind."""
+
+    def test_no_retry_zero_conflicts(self):
+        """Clean commit: all conflict counters are zero."""
+        catalog = make_instant_catalog()
+        storage = InstantStorageProvider(rng=np.random.RandomState(42))
+        detector = NeverRealConflictDetector()
+        txn = make_fast_append()
+
+        result = drive_generator(txn.execute(catalog, storage, detector))
+        assert result.catalog_conflicts == 0
+        assert result.tblptn_conflicts == 0
+        assert result.max_snapshots_behind == 0
+
+    def test_cross_table_is_catalog_conflict(self):
+        """Cross-table CAS failure: catalog_conflicts increments, tblptn stays 0."""
+        catalog = make_instant_catalog(num_tables=2, partitions=(1, 1))
+        storage = InstantStorageProvider(rng=np.random.RandomState(42))
+        detector = NeverRealConflictDetector()
+
+        # T2 writes table 1
+        t2 = FastAppendTransaction(
+            txn_id=2, submit_time_ms=0.0, runtime_ms=100.0,
+            tables_written=frozenset({1}),
+            partitions_written={1: frozenset({0})},
+        )
+        gen = t2.execute(catalog, storage, detector)
+        next(gen)  # Catalog read
+        gen.send(None)  # Runtime
+
+        # T1 commits to table 0 (cross-table)
+        t1 = make_fast_append(txn_id=1, tables_written=frozenset({0}),
+                              partitions_written={0: frozenset({0})})
+        drive_generator(t1.execute(catalog, storage, detector))
+
+        result = drive_generator(gen)
+        assert result.total_retries == 1
+        assert result.catalog_conflicts == 1
+        assert result.tblptn_conflicts == 0
+        assert result.max_snapshots_behind == 1
+
+    def test_same_table_is_tblptn_conflict(self):
+        """Same-table CAS failure: tblptn_conflicts increments, catalog stays 0."""
+        catalog = make_instant_catalog()
+        storage = InstantStorageProvider(rng=np.random.RandomState(42))
+        detector = NeverRealConflictDetector()
+
+        t2 = make_fast_append(txn_id=2)
+        gen = t2.execute(catalog, storage, detector)
+        next(gen)
+        gen.send(None)
+
+        t1 = make_fast_append(txn_id=1)
+        drive_generator(t1.execute(catalog, storage, detector))
+
+        result = drive_generator(gen)
+        assert result.total_retries == 1
+        assert result.tblptn_conflicts == 1
+        assert result.catalog_conflicts == 0
+        assert result.max_snapshots_behind == 1
+
+    def test_conflict_sum_equals_retries(self):
+        """catalog_conflicts + tblptn_conflicts == total_retries."""
+        catalog = make_instant_catalog()
+        storage = InstantStorageProvider(rng=np.random.RandomState(42))
+        detector = NeverRealConflictDetector()
+
+        t2 = make_fast_append(txn_id=2)
+        gen = t2.execute(catalog, storage, detector)
+        next(gen)
+        gen.send(None)
+
+        t1 = make_fast_append(txn_id=1)
+        drive_generator(t1.execute(catalog, storage, detector))
+
+        result = drive_generator(gen)
+        assert result.catalog_conflicts + result.tblptn_conflicts == result.total_retries
+
+    def test_max_snapshots_behind_multiple_versions(self):
+        """Two concurrent commits → max_snapshots_behind == 2."""
+        catalog = make_instant_catalog()
+        storage = InstantStorageProvider(rng=np.random.RandomState(42))
+        detector = NeverRealConflictDetector()
+
+        t2 = make_fast_append(txn_id=3)
+        gen = t2.execute(catalog, storage, detector)
+        next(gen)
+        gen.send(None)
+
+        # Commit two transactions while T2 is in flight
+        for i in range(2):
+            ti = make_fast_append(txn_id=i + 1)
+            drive_generator(ti.execute(catalog, storage, detector))
+        assert catalog.seq == 2
+
+        result = drive_generator(gen)
+        assert result.total_retries == 1
+        assert result.max_snapshots_behind == 2
+
+    def test_disjoint_partitions_is_catalog_conflict(self):
+        """Same table but disjoint partitions: counts as catalog_conflict."""
+        catalog = make_instant_catalog(num_tables=1, partitions=(4,))
+        storage = InstantStorageProvider(rng=np.random.RandomState(42))
+        detector = NeverRealConflictDetector()
+
+        t2 = FastAppendTransaction(
+            txn_id=2, submit_time_ms=0.0, runtime_ms=100.0,
+            tables_written=frozenset({0}),
+            partitions_written={0: frozenset({1})},
+        )
+        gen = t2.execute(catalog, storage, detector)
+        next(gen)
+        gen.send(None)
+
+        t1 = FastAppendTransaction(
+            txn_id=1, submit_time_ms=0.0, runtime_ms=100.0,
+            tables_written=frozenset({0}),
+            partitions_written={0: frozenset({0})},
+        )
+        drive_generator(t1.execute(catalog, storage, detector))
+
+        result = drive_generator(gen)
+        assert result.total_retries == 1
+        assert result.catalog_conflicts == 1
+        assert result.tblptn_conflicts == 0
+
+    def test_abort_preserves_conflict_counts(self):
+        """Aborted transaction still has correct conflict type counts."""
+        catalog = make_instant_catalog()
+        storage = InstantStorageProvider(rng=np.random.RandomState(42))
+        detector = AlwaysRealConflictDetector()
+
+        txn = ValidatedOverwriteTransaction(
+            txn_id=2, submit_time_ms=0.0, runtime_ms=100.0,
+            tables_written=frozenset({0}),
+            partitions_written={0: frozenset({0})},
+        )
+        gen = txn.execute(catalog, storage, detector)
+        next(gen)
+        gen.send(None)
+
+        t1 = make_fast_append(txn_id=1)
+        drive_generator(t1.execute(catalog, storage, detector))
+
+        result = drive_generator(gen)
+        assert result.status == TransactionStatus.ABORTED
+        assert result.tblptn_conflicts == 1
+        assert result.catalog_conflicts == 0
+        assert result.max_snapshots_behind == 1

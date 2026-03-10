@@ -746,6 +746,82 @@ class TestEventCountInResult:
             os.unlink(path)
 
 
+class TestNewSchemaColumns:
+    """Tests for write_table_ids, write_partition_ids, conflict type columns."""
+
+    def test_new_columns_in_parquet(self):
+        """New columns appear in exported parquet."""
+        config = make_simulation_config(duration_ms=2000.0)
+        stats = Simulation(config).run()
+
+        with tempfile.NamedTemporaryFile(suffix=".parquet", delete=False) as f:
+            path = f.name
+
+        try:
+            stats.export_parquet(path)
+            df = pd.read_parquet(path)
+            for col in ["write_table_ids", "write_partition_ids",
+                        "catalog_conflicts", "tblptn_conflicts",
+                        "max_snapshots_behind"]:
+                assert col in df.columns, f"Missing column: {col}"
+        finally:
+            os.unlink(path)
+
+    def test_list_columns_contain_lists(self):
+        """write_table_ids and write_partition_ids contain lists."""
+        config = make_simulation_config(duration_ms=2000.0)
+        stats = Simulation(config).run()
+        assert stats.committed > 0
+
+        df = stats.to_dataframe()
+        for col in ["write_table_ids", "write_partition_ids"]:
+            for val in df[col]:
+                assert isinstance(val, (list, np.ndarray)), \
+                    f"{col} value is {type(val)}, expected list"
+
+    def test_conflict_sum_invariant_in_simulation(self):
+        """catalog_conflicts + tblptn_conflicts == n_retries for every transaction."""
+        rng = np.random.RandomState(42)
+        storage = InstantStorageProvider(rng=rng, latency_ms=5.0)
+        catalog = CASCatalog(
+            storage=storage, num_tables=1, partitions_per_table=(1,),
+        )
+        wl_config = make_workload_config(
+            num_tables=1, inter_arrival_scale=20.0, runtime_mean=50.0,
+        )
+        config = SimulationConfig(
+            duration_ms=5000.0, seed=42,
+            storage_provider=storage, catalog=catalog,
+            workload=Workload(wl_config, seed=142),
+            conflict_detector=make_conflict_detector(0.0),
+            max_retries=10,
+        )
+        stats = Simulation(config).run()
+        assert stats.total_retries > 0  # Ensure we actually tested retries
+        for r in stats.transactions:
+            assert r.catalog_conflicts + r.tblptn_conflicts == r.total_retries, \
+                f"txn {r.txn_id}: {r.catalog_conflicts}+{r.tblptn_conflicts} != {r.total_retries}"
+
+    def test_new_columns_in_streaming_parquet(self):
+        """New columns work with streaming (output_path) mode."""
+        config = make_simulation_config(duration_ms=2000.0)
+
+        with tempfile.NamedTemporaryFile(suffix=".parquet", delete=False) as f:
+            path = f.name
+
+        try:
+            sim = Simulation(config, output_path=path)
+            stats = sim.run()
+            df = pd.read_parquet(path)
+            assert len(df) > 0
+            for col in ["write_table_ids", "write_partition_ids",
+                        "catalog_conflicts", "tblptn_conflicts",
+                        "max_snapshots_behind"]:
+                assert col in df.columns, f"Missing column: {col}"
+        finally:
+            os.unlink(path)
+
+
 class TestProfileOutput:
     def test_profile_json_written(self):
         """Simulation with profile=True writes .profile.json."""
