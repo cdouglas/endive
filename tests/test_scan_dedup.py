@@ -434,6 +434,31 @@ class TestConsolidatedMultiHash:
             scales = sorted(index_df["inter_arrival_scale"].tolist())
             assert scales == [50.0, 150.0]
 
+    def test_consolidated_fallback_to_individual_files(self):
+        """Experiment in disk dirs but not in consolidated: falls back to individual files."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Experiment A: in consolidated only
+            cfg_a = _make_cfg(label="exp_test", scale=50.0)
+            _create_consolidated(tmpdir, [
+                {"label": "exp_test", "hash": "aaaa1111", "seeds": [42, 43, 44],
+                 "cfg_text": cfg_a},
+            ])
+
+            # Experiment B: on disk only (not in consolidated)
+            _create_disk_experiment(tmpdir, "exp_test", "bbbb2222", scale=200.0)
+
+            old_config = sa.CONFIG.copy()
+            sa.CONFIG = sa.get_default_config()
+            try:
+                index_df = sa.build_experiment_index(tmpdir, "exp_test-*")
+            finally:
+                sa.CONFIG = old_config
+
+            # Both experiments should appear
+            assert len(index_df) == 2
+            scales = sorted(index_df["inter_arrival_scale"].tolist())
+            assert scales == [50.0, 200.0]
+
     def test_consolidated_only_op_type_analysis(self):
         """_analyze_op_type_experiments works from consolidated-only data."""
         with tempfile.TemporaryDirectory() as tmpdir:

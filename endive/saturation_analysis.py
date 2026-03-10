@@ -964,6 +964,9 @@ def build_experiment_index(base_dir: str, pattern: str) -> pd.DataFrame:
         # Use consolidated reader if available, otherwise use individual files
         if reader is not None:
             df = load_and_aggregate_results_consolidated(exp_info, reader)
+            # Fall back to individual files if not in consolidated
+            if df is None and exp_info['dir'] is not None:
+                df = load_and_aggregate_results(exp_info)
         elif use_consolidated and exp_info['dir'] is not None:
             # Consolidated file doesn't exist, use individual files
             df = load_and_aggregate_results(exp_info)
