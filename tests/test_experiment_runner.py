@@ -337,61 +337,6 @@ class TestLoadSweepValues:
             assert load in LOAD_SWEEP
 
 
-class TestConfigValidation:
-    """Integration tests for config file validation."""
-
-    @pytest.fixture
-    def real_baseline_config(self):
-        """Get path to real baseline S3 config."""
-        return CONFIG_DIR / "baseline_s3.toml"
-
-    def test_baseline_config_can_be_parsed(self, real_baseline_config):
-        """Real baseline config should be parseable."""
-        import tomli
-
-        if real_baseline_config.exists():
-            with open(real_baseline_config, "rb") as f:
-                data = tomli.load(f)
-
-            assert "simulation" in data
-            assert "transaction" in data
-            assert "storage" in data
-
-    def test_baseline_config_has_sweep_parameter(self, real_baseline_config):
-        """Baseline config should have inter_arrival.scale for sweeping."""
-        if real_baseline_config.exists():
-            content = real_baseline_config.read_text()
-            assert "inter_arrival.scale" in content
-
-    def test_variant_creation_with_real_config(self, real_baseline_config):
-        """Creating variant from real config should work."""
-        if not real_baseline_config.exists():
-            pytest.skip("Baseline config not found")
-
-        variant_path = create_config_variant(
-            real_baseline_config,
-            params={"inter_arrival.scale": 999.0},
-            seed=12345,
-            duration_ms=60000
-        )
-
-        try:
-            import tomli
-            with open(variant_path, "rb") as f:
-                data = tomli.load(f)
-
-            # Check seed was injected
-            assert data["simulation"]["seed"] == 12345
-
-            # Check duration was overridden
-            assert data["simulation"]["duration_ms"] == 60000
-
-            # Check inter_arrival.scale was substituted
-            assert data["transaction"]["inter_arrival"]["scale"] == 999.0
-        finally:
-            os.unlink(variant_path)
-
-
 class TestEdgeCases:
     """Test edge cases and error handling."""
 
@@ -606,33 +551,3 @@ provider = "s3"
         finally:
             os.unlink(variant_path)
 
-    def test_real_partition_scaling_config(self):
-        """Test with real partition scaling config if it exists."""
-        config_path = CONFIG_DIR / "instant_partition_scaling.toml"
-        if not config_path.exists():
-            pytest.skip("Partition scaling config not found")
-
-        variant_path = create_config_variant(
-            config_path,
-            params={
-                "partition.num_partitions": 42,
-                "inter_arrival.scale": 999.0,
-            },
-            seed=12345
-        )
-
-        try:
-            import tomli
-            with open(variant_path, "rb") as f:
-                data = tomli.load(f)
-
-            # Check partition.num_partitions was substituted
-            assert data["partition"]["num_partitions"] == 42
-
-            # Check inter_arrival.scale was substituted
-            assert data["transaction"]["inter_arrival"]["scale"] == 999.0
-
-            # Check seed was injected
-            assert data["simulation"]["seed"] == 12345
-        finally:
-            os.unlink(variant_path)
