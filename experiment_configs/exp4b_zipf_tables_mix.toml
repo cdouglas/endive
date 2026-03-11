@@ -144,3 +144,10 @@ output_suffix = "cas_120ms"
 [[plots.graphs]]
 type = "operation_types"
 group_by = "catalog_service_latency_ms"
+
+[[plots.graphs]]
+type = "per_table_breakdown"
+filters = ["catalog_service_latency_ms==1.0"]
+load_levels = [50, 100, 200]
+num_tables_values = [10, 50]
+output_suffix = "cas_1ms"

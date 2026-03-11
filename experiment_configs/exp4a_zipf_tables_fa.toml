@@ -135,3 +135,10 @@ type = "latency_vs_throughput"
 group_by = "num_tables"
 filters = ["catalog_service_latency_ms==120.0"]
 output_suffix = "cas_120ms"
+
+[[plots.graphs]]
+type = "per_table_breakdown"
+filters = ["catalog_service_latency_ms==1.0"]
+load_levels = [20, 50, 100]
+num_tables_values = [10, 50]
+output_suffix = "cas_1ms"

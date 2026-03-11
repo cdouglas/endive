@@ -38,6 +38,7 @@ GRAPH_REGISTRY = {
     "sustainable_throughput":      ("plot_sustainable_throughput", "index"),
     "heatmap":                     ("generate_heatmap_plots", "raw"),
     "operation_types":             ("generate_operation_type_plots", "raw"),
+    "per_table_breakdown":         ("generate_per_table_plots", "raw"),
 }
 
 # Output filenames per graph type
@@ -283,6 +284,8 @@ def process_config(config_path: Path, plotting_defaults: dict,
                 elif graph_type == "operation_types":
                     kwargs["load_levels"] = merged.get("load_levels")
                     kwargs["group_by"] = merged.get("group_by")
+                    kwargs["config"] = merged
+                elif graph_type == "per_table_breakdown":
                     kwargs["config"] = merged
 
                 func(input_dir, pattern, graph_output_dir, **kwargs)

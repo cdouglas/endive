@@ -2920,6 +2920,478 @@ def generate_operation_type_plots(base_dir: str, pattern: str, output_dir: str,
     print(f"  Saved: {output_path}")
 
 
+# ---------------------------------------------------------------------------
+# Per-table breakdown analysis (for Zipf experiments)
+# ---------------------------------------------------------------------------
+
+def _extract_table_ranks(df: pd.DataFrame) -> pd.Series:
+    """Extract target table ID from write_table_ids and map to rank by frequency.
+
+    Rank 0 = most frequent (hottest under Zipf).
+    Returns a Series of integer ranks aligned with df's index.
+    """
+    # Extract first table ID from list column
+    table_ids = df["write_table_ids"].apply(
+        lambda x: x[0] if x is not None and len(x) > 0 else None
+    )
+    # Rank by frequency (most frequent = rank 0)
+    counts = table_ids.value_counts()
+    rank_map = {tid: rank for rank, tid in enumerate(counts.index)}
+    return table_ids.map(rank_map)
+
+
+def _apply_warmup_cooldown(df: pd.DataFrame) -> pd.DataFrame:
+    """Filter to steady-state using 10% warmup/cooldown."""
+    duration = df["t_commit"].max() - df["t_submit"].min()
+    if duration <= 0:
+        return df
+    warmup = duration * 0.1
+    t_min = df["t_submit"].min() + warmup
+    t_max = df["t_commit"].max() - duration * 0.1
+    return df[(df["t_submit"] >= t_min) & (df["t_commit"] <= t_max)]
+
+
+def _analyze_per_table_experiments(
+    experiments_dir: str, pattern: str,
+    filters: list = None, load_levels: list = None,
+    num_tables_values: list = None,
+) -> pd.DataFrame:
+    """Extract per-table-rank metrics from experiment parquets.
+
+    Returns a DataFrame with columns:
+        num_tables, inter_arrival_scale, catalog_service_latency_ms,
+        table_rank, operation_type, seed, write_share, success_rate,
+        mean_retries, catalog_conflicts, tblptn_conflicts,
+        mean_latency, p95_latency
+    """
+    records = []
+    experiments = scan_all_experiments(experiments_dir, pattern)
+    consolidated_path = os.path.join(experiments_dir, 'consolidated.parquet')
+    reader = _ConsolidatedReader.open(consolidated_path)
+
+    for dir_key, exp_info in experiments.items():
+        cfg = exp_info['config']
+
+        num_tables = _extract_param_value(cfg, "num_tables")
+        scale = _extract_param_value(cfg, "inter_arrival_scale")
+        cas_latency = _extract_param_value(cfg, "catalog_service_latency_ms")
+
+        # Apply config-level filters
+        if num_tables_values and num_tables not in num_tables_values:
+            continue
+        if load_levels and scale not in load_levels:
+            continue
+        if filters:
+            skip = False
+            for filt in filters:
+                val = None
+                for op in ("==", "!=", "<=", ">=", "<", ">"):
+                    if op in filt:
+                        param, threshold = filt.split(op, 1)
+                        param = param.strip()
+                        threshold = float(threshold.strip())
+                        val = _extract_param_value(cfg, param)
+                        if val is None:
+                            skip = True
+                            break
+                        if op == "==" and val != threshold:
+                            skip = True
+                        elif op == "!=" and val == threshold:
+                            skip = True
+                        elif op == "<" and val >= threshold:
+                            skip = True
+                        elif op == "<=" and val > threshold:
+                            skip = True
+                        elif op == ">" and val <= threshold:
+                            skip = True
+                        elif op == ">=" and val < threshold:
+                            skip = True
+                        break
+                if skip:
+                    break
+            if skip:
+                continue
+
+        # Load data from disk or consolidated
+        seed_dfs = []
+        if exp_info['dir'] is None:
+            if reader is None:
+                continue
+            df = _load_from_consolidated(reader, exp_info)
+            if df is None or len(df) == 0:
+                continue
+            if "write_table_ids" not in df.columns:
+                print(f"  Warning: {dir_key} missing write_table_ids, skipping")
+                continue
+            for seed_val in df['seed'].unique() if 'seed' in df.columns else [0]:
+                seed_df = df[df['seed'] == seed_val] if 'seed' in df.columns else df
+                seed_dfs.append((str(seed_val), seed_df))
+        else:
+            exp_dir = Path(exp_info['dir'])
+            for seed_dir in exp_dir.iterdir():
+                if not seed_dir.is_dir() or not seed_dir.name.isdigit():
+                    continue
+                results_path = seed_dir / "results.parquet"
+                if not results_path.exists():
+                    continue
+                df = pd.read_parquet(results_path)
+                if "write_table_ids" not in df.columns:
+                    print(f"  Warning: {results_path} missing write_table_ids, skipping")
+                    continue
+                seed_dfs.append((seed_dir.name, df))
+
+        for seed_name, seed_df in seed_dfs:
+            # Apply warmup/cooldown
+            seed_df = _apply_warmup_cooldown(seed_df)
+            if len(seed_df) == 0:
+                continue
+
+            # Extract table ranks
+            seed_df = seed_df.copy()
+            seed_df["table_rank"] = _extract_table_ranks(seed_df)
+            seed_df = seed_df.dropna(subset=["table_rank"])
+            seed_df["table_rank"] = seed_df["table_rank"].astype(int)
+            total_txns = len(seed_df)
+
+            # Determine if mixed workload
+            has_op_types = ("operation_type" in seed_df.columns and
+                            seed_df["operation_type"].nunique() > 1)
+
+            if has_op_types:
+                group_cols = ["table_rank", "operation_type"]
+            else:
+                group_cols = "table_rank"
+
+            for group_vals, group_df in seed_df.groupby(group_cols):
+                if has_op_types:
+                    trank, op_type = group_vals
+                else:
+                    trank = group_vals
+                    op_type = "fast_append"
+
+                committed = group_df[group_df["status"].str.lower() == "committed"]
+                total = len(group_df)
+
+                record = {
+                    "num_tables": num_tables,
+                    "inter_arrival_scale": scale,
+                    "catalog_service_latency_ms": cas_latency,
+                    "table_rank": trank,
+                    "operation_type": op_type,
+                    "seed": seed_name,
+                    "write_share": total / total_txns * 100 if total_txns > 0 else 0,
+                    "success_rate": len(committed) / total * 100 if total > 0 else 0,
+                    "mean_retries": group_df["n_retries"].mean() if "n_retries" in group_df.columns else np.nan,
+                    "catalog_conflicts": group_df["catalog_conflicts"].mean() if "catalog_conflicts" in group_df.columns else np.nan,
+                    "tblptn_conflicts": group_df["tblptn_conflicts"].mean() if "tblptn_conflicts" in group_df.columns else np.nan,
+                    "mean_latency": committed["commit_latency"].mean() if len(committed) > 0 else np.nan,
+                    "p95_latency": committed["commit_latency"].quantile(0.95) if len(committed) > 0 else np.nan,
+                }
+                records.append(record)
+
+    return pd.DataFrame(records)
+
+
+def _plot_per_table_success_rate(agg: pd.DataFrame, output_dir: str,
+                                 num_tables: int, scale: float,
+                                 cas_latency: float, is_mixed: bool,
+                                 figsize: tuple, dpi: int):
+    """Plot 1: Per-table success rate bar chart."""
+    subset = agg[
+        (agg["num_tables"] == num_tables) &
+        (agg["inter_arrival_scale"] == scale) &
+        (agg["catalog_service_latency_ms"] == cas_latency)
+    ].sort_values("table_rank")
+
+    if len(subset) == 0:
+        return
+
+    fig, ax = plt.subplots(figsize=figsize)
+
+    if is_mixed:
+        op_types = sorted(subset["operation_type"].unique())
+        n_ops = len(op_types)
+        bar_width = 0.8 / n_ops
+        _cb_palette = ['#332288', '#CC6677', '#44AA99', '#DDCC77']
+        for i, op_type in enumerate(op_types):
+            op_sub = subset[subset["operation_type"] == op_type].sort_values("table_rank")
+            if len(op_sub) == 0:
+                continue
+            x = np.arange(len(op_sub))
+            offset = (i - (n_ops - 1) / 2) * bar_width
+            bars = ax.bar(x + offset, op_sub["success_rate"], bar_width * 0.9,
+                          label=op_type.replace("_", " ").title(),
+                          color=_cb_palette[i % len(_cb_palette)], alpha=0.85)
+            # Annotate with write share
+            for j, (_, row) in enumerate(op_sub.iterrows()):
+                ax.text(x[j] + offset, row["success_rate"] + 1,
+                        f'{row["write_share"]:.1f}%', ha='center', va='bottom',
+                        fontsize=7, rotation=45)
+        ax.set_xticks(np.arange(len(subset["table_rank"].unique())))
+    else:
+        ranks = subset["table_rank"].values
+        sr = subset["success_rate"].values
+        ws = subset["write_share"].values
+        # Color gradient by write share
+        norm = plt.Normalize(vmin=ws.min(), vmax=ws.max())
+        cmap = plt.cm.YlOrRd
+        colors = cmap(norm(ws))
+        bars = ax.bar(np.arange(len(ranks)), sr, color=colors, alpha=0.85)
+        # Annotate with write share
+        for j in range(len(ranks)):
+            ax.text(j, sr[j] + 1, f'{ws[j]:.1f}%', ha='center', va='bottom',
+                    fontsize=8, rotation=45)
+        ax.set_xticks(np.arange(len(ranks)))
+        # Colorbar
+        sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
+        sm.set_array([])
+        cbar = plt.colorbar(sm, ax=ax, shrink=0.6, pad=0.02)
+        cbar.set_label("Write Share (%)", fontsize=10)
+
+    ax.set_xticklabels(sorted(subset["table_rank"].unique()))
+    ax.set_xlabel("Table Rank (0 = hottest)", fontsize=12, fontweight="bold")
+    ax.set_ylabel("Success Rate (%)", fontsize=12, fontweight="bold")
+    ax.set_ylim(0, 110)
+    ax.set_title(
+        f"Per-Table Success Rate\n"
+        f"(N={num_tables}, load={scale}ms, CAS={cas_latency}ms)",
+        fontsize=13, fontweight="bold")
+    ax.grid(True, alpha=0.3, axis='y')
+    if is_mixed:
+        ax.legend(fontsize=10, loc="upper left")
+    plt.tight_layout()
+
+    fname = f"per_table_success_rate_t{num_tables}_s{int(scale)}.png"
+    path = os.path.join(output_dir, fname)
+    plt.savefig(path, dpi=dpi)
+    plt.close()
+    print(f"  Saved: {path}")
+
+
+def _plot_write_concentration(agg: pd.DataFrame, output_dir: str,
+                              scale: float, cas_latency: float,
+                              num_tables_values: list,
+                              figsize: tuple, dpi: int):
+    """Plot 2: Lorenz-style write concentration curve."""
+    fig, ax = plt.subplots(figsize=figsize)
+
+    _cb_palette = ['#332288', '#88CCEE', '#44AA99', '#117733', '#999933',
+                   '#CC6677', '#882255', '#AA4499']
+
+    has_data = False
+    for i, nt in enumerate(sorted(num_tables_values)):
+        subset = agg[
+            (agg["num_tables"] == nt) &
+            (agg["inter_arrival_scale"] == scale) &
+            (agg["catalog_service_latency_ms"] == cas_latency)
+        ]
+        if len(subset) == 0:
+            continue
+
+        # Aggregate write_share across operation types per table rank
+        # Sort ascending (least traffic first) for standard Lorenz curve
+        ws_by_rank = subset.groupby("table_rank")["write_share"].sum().sort_values(ascending=True)
+        ws_arr = ws_by_rank.values
+        ws_arr = ws_arr / ws_arr.sum()  # Normalize to fractions
+
+        # Lorenz curve: cumulative fraction of tables vs cumulative fraction of writes
+        n = len(ws_arr)
+        cum_tables = np.arange(1, n + 1) / n
+        cum_writes = np.cumsum(ws_arr)
+
+        # Prepend origin
+        cum_tables = np.insert(cum_tables, 0, 0)
+        cum_writes = np.insert(cum_writes, 0, 0)
+
+        # Gini coefficient: 1 - 2 * area_under_lorenz
+        area = np.trapz(cum_writes, cum_tables)
+        gini = 1 - 2 * area
+
+        ax.plot(cum_tables, cum_writes, marker='o', markersize=4,
+                color=_cb_palette[i % len(_cb_palette)],
+                linewidth=2, label=f"N={nt} (Gini={gini:.2f})")
+        has_data = True
+
+    if not has_data:
+        plt.close()
+        return
+
+    # Diagonal reference line (perfect equality)
+    ax.plot([0, 1], [0, 1], 'k--', alpha=0.5, linewidth=1, label="Uniform")
+
+    ax.set_xlabel("Cumulative Fraction of Tables (ranked by traffic)", fontsize=12, fontweight="bold")
+    ax.set_ylabel("Cumulative Fraction of Writes", fontsize=12, fontweight="bold")
+    ax.set_title(
+        f"Write Concentration (Lorenz Curve)\n"
+        f"(load={scale}ms, CAS={cas_latency}ms)",
+        fontsize=13, fontweight="bold")
+    ax.legend(fontsize=10)
+    ax.grid(True, alpha=0.3)
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, 1.05)
+    plt.tight_layout()
+
+    fname = f"write_concentration_s{int(scale)}.png"
+    path = os.path.join(output_dir, fname)
+    plt.savefig(path, dpi=dpi)
+    plt.close()
+    print(f"  Saved: {path}")
+
+
+def _plot_conflict_type_by_table(agg: pd.DataFrame, output_dir: str,
+                                 num_tables: int, scale: float,
+                                 cas_latency: float, is_mixed: bool,
+                                 figsize: tuple, dpi: int):
+    """Plot 3: Conflict type stacked bar by table rank."""
+    subset = agg[
+        (agg["num_tables"] == num_tables) &
+        (agg["inter_arrival_scale"] == scale) &
+        (agg["catalog_service_latency_ms"] == cas_latency)
+    ].sort_values("table_rank")
+
+    if len(subset) == 0:
+        return
+
+    fig, ax = plt.subplots(figsize=figsize)
+
+    if is_mixed:
+        op_types = sorted(subset["operation_type"].unique())
+        n_ops = len(op_types)
+        bar_width = 0.8 / n_ops
+        _cat_colors = ['#88CCEE', '#4477AA']  # catalog conflict colors per op type
+        _tbl_colors = ['#CC6677', '#882255']   # tblptn conflict colors per op type
+
+        for i, op_type in enumerate(op_types):
+            op_sub = subset[subset["operation_type"] == op_type].sort_values("table_rank")
+            if len(op_sub) == 0:
+                continue
+            x = np.arange(len(op_sub))
+            offset = (i - (n_ops - 1) / 2) * bar_width
+            op_label = op_type.replace("_", " ").title()
+
+            cat_vals = op_sub["catalog_conflicts"].values
+            tbl_vals = op_sub["tblptn_conflicts"].values
+
+            ax.bar(x + offset, cat_vals, bar_width * 0.9,
+                   label=f"{op_label} - Catalog",
+                   color=_cat_colors[i % len(_cat_colors)], alpha=0.85)
+            ax.bar(x + offset, tbl_vals, bar_width * 0.9, bottom=cat_vals,
+                   label=f"{op_label} - Table/Ptn",
+                   color=_tbl_colors[i % len(_tbl_colors)], alpha=0.85)
+        ax.set_xticks(np.arange(len(subset["table_rank"].unique())))
+    else:
+        ranks = subset["table_rank"].values
+        cat_vals = subset["catalog_conflicts"].values
+        tbl_vals = subset["tblptn_conflicts"].values
+        x = np.arange(len(ranks))
+
+        ax.bar(x, cat_vals, color='#88CCEE', alpha=0.85, label="Catalog Conflicts")
+        ax.bar(x, tbl_vals, bottom=cat_vals, color='#CC6677', alpha=0.85,
+               label="Table/Partition Conflicts")
+        ax.set_xticks(x)
+
+    ax.set_xticklabels(sorted(subset["table_rank"].unique()))
+    ax.set_xlabel("Table Rank (0 = hottest)", fontsize=12, fontweight="bold")
+    ax.set_ylabel("Mean Conflicts per Transaction", fontsize=12, fontweight="bold")
+    ax.set_title(
+        f"Conflict Type by Table Rank\n"
+        f"(N={num_tables}, load={scale}ms, CAS={cas_latency}ms)",
+        fontsize=13, fontweight="bold")
+    ax.legend(fontsize=10)
+    ax.grid(True, alpha=0.3, axis='y')
+    plt.tight_layout()
+
+    fname = f"conflict_type_by_table_t{num_tables}_s{int(scale)}.png"
+    path = os.path.join(output_dir, fname)
+    plt.savefig(path, dpi=dpi)
+    plt.close()
+    print(f"  Saved: {path}")
+
+
+def generate_per_table_plots(base_dir: str, pattern: str, output_dir: str,
+                              config: dict = None):
+    """Generate per-table-rank breakdown plots for Zipf experiments.
+
+    Produces:
+        - per_table_success_rate_t{N}_s{scale}.png (bar chart per operating point)
+        - write_concentration_s{scale}.png (Lorenz curves)
+        - conflict_type_by_table_t{N}_s{scale}.png (stacked bar)
+        - per_table_data.csv (raw data)
+
+    Args:
+        base_dir: Directory containing experiment results.
+        pattern: Glob pattern to match experiment directories.
+        output_dir: Directory to write plots.
+        config: Optional plotting config overrides with keys:
+            filters, load_levels, num_tables_values.
+    """
+    config = config or {}
+    os.makedirs(output_dir, exist_ok=True)
+    dpi = config.get("dpi", DEFAULT_DPI)
+    figsize = tuple(config.get("figsize", [14, 8]))
+
+    filters = config.get("filters", None)
+    load_levels = config.get("load_levels", None)
+    num_tables_values = config.get("num_tables_values", None)
+
+    # Convert to float for matching
+    if load_levels:
+        load_levels = [float(x) for x in load_levels]
+    if num_tables_values:
+        num_tables_values = [int(x) for x in num_tables_values]
+
+    print(f"Analyzing per-table breakdown for {pattern}...")
+    df = _analyze_per_table_experiments(
+        base_dir, pattern,
+        filters=filters, load_levels=load_levels,
+        num_tables_values=num_tables_values,
+    )
+    if len(df) == 0:
+        print(f"  No per-table data found for {pattern}")
+        return
+
+    # Aggregate across seeds
+    group_cols = ["num_tables", "inter_arrival_scale", "catalog_service_latency_ms",
+                  "table_rank", "operation_type"]
+    agg = df.groupby(group_cols).agg({
+        "write_share": "mean",
+        "success_rate": "mean",
+        "mean_retries": "mean",
+        "catalog_conflicts": "mean",
+        "tblptn_conflicts": "mean",
+        "mean_latency": "mean",
+        "p95_latency": "mean",
+    }).reset_index()
+
+    # Save CSV
+    csv_path = os.path.join(output_dir, "per_table_data.csv")
+    agg.to_csv(csv_path, index=False, float_format="%.4f")
+    print(f"  Saved: {csv_path}")
+
+    # Detect mixed workload
+    is_mixed = agg["operation_type"].nunique() > 1
+
+    # Get unique operating points
+    nt_values = sorted(agg["num_tables"].unique())
+    scale_values = sorted(agg["inter_arrival_scale"].unique())
+    cas_values = sorted(agg["catalog_service_latency_ms"].unique())
+
+    # Typically there's one CAS value after filtering
+    for cas_lat in cas_values:
+        # Plot 1 & 3: Per-table charts for each (num_tables, load) combo
+        for nt in nt_values:
+            for scale in scale_values:
+                _plot_per_table_success_rate(
+                    agg, output_dir, nt, scale, cas_lat, is_mixed, figsize, dpi)
+                _plot_conflict_type_by_table(
+                    agg, output_dir, nt, scale, cas_lat, is_mixed, figsize, dpi)
+
+        # Plot 2: Lorenz curves (one per load level, all num_tables)
+        for scale in scale_values:
+            _plot_write_concentration(
+                agg, output_dir, scale, cas_lat, nt_values, figsize, dpi)
+
+
 def cli():
     global CONFIG
 
