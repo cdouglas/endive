@@ -151,3 +151,24 @@ filters = ["catalog_service_latency_ms==1.0"]
 load_levels = [50, 100, 200]
 num_tables_values = [10, 50]
 output_suffix = "cas_1ms"
+
+[[plots.graphs]]
+type = "per_table_breakdown"
+filters = ["catalog_service_latency_ms==10.0"]
+load_levels = [50, 100, 200]
+num_tables_values = [10, 50]
+output_suffix = "cas_10ms"
+
+[[plots.graphs]]
+type = "per_table_breakdown"
+filters = ["catalog_service_latency_ms==50.0"]
+load_levels = [50, 100, 200]
+num_tables_values = [10, 50]
+output_suffix = "cas_50ms"
+
+[[plots.graphs]]
+type = "per_table_breakdown"
+filters = ["catalog_service_latency_ms==120.0"]
+load_levels = [50, 100, 200]
+num_tables_values = [10, 50]
+output_suffix = "cas_120ms"
