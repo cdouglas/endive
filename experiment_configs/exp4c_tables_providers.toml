@@ -352,3 +352,7 @@ output_suffix = "op_types_fa50_1t"
 
 [[plots.graphs]]
 type = "commit_rate_over_time"
+
+[[plots.graphs]]
+type = "workload_knee_table"
+output_suffix = "workload_knee"

@@ -3308,6 +3308,334 @@ def _plot_conflict_type_by_table(agg: pd.DataFrame, output_dir: str,
     print(f"  Saved: {path}")
 
 
+def _analyze_workload_experiments(experiments_dir: str, pattern: str,
+                                  filters: list = None) -> pd.DataFrame:
+    """Extract per-operation-type metrics with provider and table count.
+
+    Similar to _analyze_op_type_experiments but always extracts
+    storage_provider and num_tables alongside fa_ratio and scale.
+    Applies warmup/cooldown filtering (middle 80% of simulation).
+
+    Args:
+        experiments_dir: Base directory containing experiment results.
+        pattern: Glob pattern to match experiment directories.
+        filters: Optional list of filter expressions (e.g. ["num_tables==1"]).
+
+    Returns:
+        DataFrame with columns: seed, storage_provider, num_tables, fa_ratio,
+        inter_arrival_scale, operation_type, total, committed, success_rate,
+        mean_latency, p95_latency, active_window_s
+    """
+    records = []
+    experiments = scan_all_experiments(experiments_dir, pattern)
+    consolidated_path = os.path.join(experiments_dir, 'consolidated.parquet')
+    reader = _ConsolidatedReader.open(consolidated_path)
+
+    for dir_key, exp_info in experiments.items():
+        cfg = exp_info['config']
+
+        txn = cfg.get("transaction", {})
+        fa_ratio = txn.get("operation_types", {}).get("fast_append", 0.5)
+        scale = txn.get("inter_arrival", {}).get("scale", 100.0)
+        provider = _extract_param_value(cfg, "storage_provider") or "unknown"
+        num_tables = _extract_param_value(cfg, "num_tables") or 1
+
+        def _process_seed_df(seed_df, seed_label):
+            # Warmup/cooldown: keep middle 80%
+            duration = seed_df["t_commit"].max() - seed_df["t_submit"].min()
+            if duration <= 0:
+                return
+            warmup = duration * 0.1
+            t_min = seed_df["t_submit"].min() + warmup
+            t_max = seed_df["t_commit"].max() - warmup
+            steady = seed_df[(seed_df["t_submit"] >= t_min) & (seed_df["t_commit"] <= t_max)]
+            if len(steady) == 0:
+                return
+            active_window_s = (t_max - t_min) / 1000.0
+
+            for op_type in steady["operation_type"].dropna().unique():
+                op_df = steady[steady["operation_type"] == op_type]
+                if len(op_df) == 0:
+                    continue
+                committed = op_df[op_df["status"].str.lower() == "committed"]
+                records.append({
+                    "seed": seed_label,
+                    "storage_provider": provider,
+                    "num_tables": num_tables,
+                    "fa_ratio": fa_ratio,
+                    "inter_arrival_scale": scale,
+                    "operation_type": op_type,
+                    "total": len(op_df),
+                    "committed": len(committed),
+                    "success_rate": len(committed) / len(op_df) * 100 if len(op_df) > 0 else 0,
+                    "mean_latency": committed["commit_latency"].mean() if len(committed) > 0 else np.nan,
+                    "p95_latency": committed["commit_latency"].quantile(0.95) if len(committed) > 0 else np.nan,
+                    "active_window_s": active_window_s,
+                })
+
+        if exp_info['dir'] is None:
+            if reader is None:
+                continue
+            df = _load_from_consolidated(reader, exp_info)
+            if df is None or len(df) == 0:
+                continue
+            for seed_val in df['seed'].unique() if 'seed' in df.columns else [0]:
+                seed_df = df[df['seed'] == seed_val] if 'seed' in df.columns else df
+                _process_seed_df(seed_df, str(seed_val))
+        else:
+            exp_dir = Path(exp_info['dir'])
+            for seed_dir in exp_dir.iterdir():
+                if not seed_dir.is_dir() or not seed_dir.name.isdigit():
+                    continue
+                results_path = seed_dir / "results.parquet"
+                if not results_path.exists():
+                    continue
+                df = pd.read_parquet(results_path)
+                _process_seed_df(df, seed_dir.name)
+
+    result = pd.DataFrame(records)
+
+    if filters and len(result) > 0:
+        result = apply_filters(result, filters)
+
+    return result
+
+
+def generate_workload_knee_table(base_dir: str, pattern: str, output_dir: str,
+                                 config: dict = None):
+    """Generate markdown table of usable (>95% success) commit rates per provider.
+
+    For each (provider, num_tables, fa_ratio), finds the knee point — the
+    lowest inter_arrival_scale where the binding constraint exceeds 95% success.
+    Extracts total committed/sec and per-type mean latencies at that point.
+
+    Outputs:
+        workload_knee_table.md — one markdown section per num_tables value
+        workload_knee_data.csv — full per-type metrics at every load point
+
+    Args:
+        base_dir: Directory containing experiment results.
+        pattern: Glob pattern to match experiment directories.
+        output_dir: Directory to write outputs.
+        config: Optional config overrides (e.g. success_threshold).
+    """
+    config = config or {}
+    success_threshold = config.get("success_threshold", 95.0)
+    os.makedirs(output_dir, exist_ok=True)
+
+    print(f"Analyzing workload knees for {pattern}...")
+    df = _analyze_workload_experiments(base_dir, pattern,
+                                       filters=config.get("filters"))
+    if len(df) == 0:
+        print(f"  No workload data found for {pattern}")
+        return
+
+    # Aggregate across seeds: average metrics, sum counts
+    group_cols = ["storage_provider", "num_tables", "fa_ratio",
+                  "inter_arrival_scale", "operation_type"]
+    agg = df.groupby(group_cols).agg({
+        "total": "sum",
+        "committed": "sum",
+        "success_rate": "mean",
+        "mean_latency": "mean",
+        "p95_latency": "mean",
+        "active_window_s": "mean",
+    }).reset_index()
+    # Recompute success_rate from totals for accuracy
+    agg["success_rate"] = agg["committed"] / agg["total"] * 100
+
+    # Save full CSV
+    csv_path = os.path.join(output_dir, "workload_knee_data.csv")
+    agg.to_csv(csv_path, index=False)
+    print(f"  Saved: {csv_path}")
+
+    # Compute throughput: total committed/sec across all op types per load point
+    load_cols = ["storage_provider", "num_tables", "fa_ratio", "inter_arrival_scale"]
+    throughput = agg.groupby(load_cols).agg(
+        total_committed=("committed", "sum"),
+        active_window_s=("active_window_s", "first"),
+    ).reset_index()
+    throughput["committed_per_sec"] = (
+        throughput["total_committed"] / throughput["active_window_s"]
+    )
+
+    # Pivot op-type metrics for easy lookup
+    fa_data = agg[agg["operation_type"] == "fast_append"].copy()
+    vo_data = agg[agg["operation_type"].isin(
+        ["validated_overwrite", "merge_append"]
+    )].copy()
+
+    # Find knee for each (provider, num_tables, fa_ratio)
+    knee_records = []
+    for (prov, nt, far), grp in throughput.groupby(
+        ["storage_provider", "num_tables", "fa_ratio"]
+    ):
+        # Sort by inter_arrival_scale ascending (heaviest load first)
+        grp = grp.sort_values("inter_arrival_scale", ascending=True)
+
+        for _, row in grp.iterrows():
+            ias = row["inter_arrival_scale"]
+
+            # Determine binding constraint success rate
+            if far == 1.0:
+                constraint_df = fa_data[
+                    (fa_data["storage_provider"] == prov) &
+                    (fa_data["num_tables"] == nt) &
+                    (fa_data["fa_ratio"] == far) &
+                    (fa_data["inter_arrival_scale"] == ias)
+                ]
+            else:
+                constraint_df = vo_data[
+                    (vo_data["storage_provider"] == prov) &
+                    (vo_data["num_tables"] == nt) &
+                    (vo_data["fa_ratio"] == far) &
+                    (vo_data["inter_arrival_scale"] == ias)
+                ]
+
+            if len(constraint_df) == 0:
+                continue
+            constraint_success = constraint_df["success_rate"].values[0]
+            if constraint_success < success_threshold:
+                continue
+
+            # This is the knee — highest throughput meeting threshold
+            fa_row = fa_data[
+                (fa_data["storage_provider"] == prov) &
+                (fa_data["num_tables"] == nt) &
+                (fa_data["fa_ratio"] == far) &
+                (fa_data["inter_arrival_scale"] == ias)
+            ]
+            vo_row = vo_data[
+                (vo_data["storage_provider"] == prov) &
+                (vo_data["num_tables"] == nt) &
+                (vo_data["fa_ratio"] == far) &
+                (vo_data["inter_arrival_scale"] == ias)
+            ]
+
+            fa_lat = fa_row["mean_latency"].values[0] / 1000.0 if len(fa_row) > 0 else np.nan
+            vo_lat = vo_row["mean_latency"].values[0] / 1000.0 if len(vo_row) > 0 else np.nan
+
+            knee_records.append({
+                "storage_provider": prov,
+                "num_tables": nt,
+                "fa_ratio": far,
+                "inter_arrival_scale": ias,
+                "committed_per_sec": row["committed_per_sec"],
+                "fa_mean_latency_s": fa_lat,
+                "vo_mean_latency_s": vo_lat,
+            })
+            break  # Found knee for this combo
+
+    if not knee_records:
+        print("  No knee points found above threshold")
+        return
+
+    knee_df = pd.DataFrame(knee_records)
+
+    # Provider display order
+    provider_order = ["instant", "s3x", "s3", "azurex", "azure", "gcp"]
+    knee_df["_prov_order"] = knee_df["storage_provider"].map(
+        {p: i for i, p in enumerate(provider_order)}
+    ).fillna(99)
+    knee_df = knee_df.sort_values(["num_tables", "_prov_order", "fa_ratio"])
+
+    # Build markdown
+    lines = ["# Workload Knee Table", "",
+             f"Highest total committed/sec where binding constraint > {success_threshold:.0f}% success.", ""]
+
+    fa_ratios = sorted(knee_df["fa_ratio"].unique(), reverse=True)
+
+    for nt in sorted(knee_df["num_tables"].unique()):
+        nt_df = knee_df[knee_df["num_tables"] == nt]
+        lines.append(f"## num_tables = {int(nt)}")
+        lines.append("")
+
+        # Header
+        header = "| Provider"
+        sep = "|----------"
+        for far in fa_ratios:
+            fa_pct = int(far * 100)
+            vo_pct = 100 - fa_pct
+            label = f"{fa_pct}/{vo_pct}"
+            header += f" | {label} (c/s)"
+            header += f" | {label} (FA/VO lat)"
+            sep += "|-----------:" * 2
+        header += " |"
+        sep += "|"
+        lines.append(header)
+        lines.append(sep)
+
+        for prov in provider_order:
+            prov_df = nt_df[nt_df["storage_provider"] == prov]
+            if len(prov_df) == 0:
+                continue
+            row_str = f"| {prov}"
+            for far in fa_ratios:
+                match = prov_df[prov_df["fa_ratio"] == far]
+                if len(match) == 0:
+                    row_str += " | — | — "
+                else:
+                    m = match.iloc[0]
+                    row_str += f" | {m['committed_per_sec']:.1f}"
+                    fa_s = f"{m['fa_mean_latency_s']:.2f}s" if not np.isnan(m['fa_mean_latency_s']) else "—"
+                    vo_s = f"{m['vo_mean_latency_s']:.1f}s" if not np.isnan(m['vo_mean_latency_s']) else "—"
+                    row_str += f" | {fa_s} / {vo_s}"
+            row_str += " |"
+            lines.append(row_str)
+
+        lines.append("")
+
+    md_path = os.path.join(output_dir, "workload_knee_table.md")
+    with open(md_path, "w") as f:
+        f.write("\n".join(lines) + "\n")
+    print(f"  Saved: {md_path}")
+
+    # Plot: committed/sec vs num_tables, one subplot per fa_ratio
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    dpi = config.get("dpi", DEFAULT_DPI)
+    n_ratios = len(fa_ratios)
+    fig, axes = plt.subplots(1, n_ratios, figsize=(5 * n_ratios, 5), squeeze=False)
+
+    provider_colors = {
+        "instant": "#888888", "s3x": "#1f77b4", "s3": "#ff7f0e",
+        "azurex": "#2ca02c", "azure": "#d62728", "gcp": "#9467bd",
+    }
+    markers = ["o", "s", "D", "^", "v", "P"]
+
+    for col_idx, far in enumerate(fa_ratios):
+        ax = axes[0, col_idx]
+        fa_pct = int(far * 100)
+        vo_pct = 100 - fa_pct
+        ax.set_title(f"FA/VO = {fa_pct}/{vo_pct}")
+
+        ratio_df = knee_df[knee_df["fa_ratio"] == far]
+        for i, prov in enumerate(provider_order):
+            prov_data = ratio_df[ratio_df["storage_provider"] == prov].sort_values("num_tables")
+            if len(prov_data) == 0:
+                continue
+            ax.plot(prov_data["num_tables"], prov_data["committed_per_sec"],
+                    color=provider_colors.get(prov, "#333333"),
+                    marker=markers[i % len(markers)], label=prov,
+                    linewidth=2, markersize=6)
+
+        ax.set_xlabel("Number of Tables")
+        ax.set_ylabel("Committed / sec")
+        ax.set_xscale("log")
+        ax.grid(True, alpha=0.3)
+        ax.legend(fontsize=8, loc="best")
+
+    plt.suptitle(f"Usable Throughput vs Table Count (>{success_threshold:.0f}% success)",
+                 fontsize=13, fontweight="bold")
+    plt.tight_layout()
+    plot_path = os.path.join(output_dir, "workload_knee_vs_tables.png")
+    plt.savefig(plot_path, dpi=dpi)
+    plt.close()
+    print(f"  Saved: {plot_path}")
+
+
 def generate_per_table_plots(base_dir: str, pattern: str, output_dir: str,
                               config: dict = None):
     """Generate per-table-rank breakdown plots for Zipf experiments.
