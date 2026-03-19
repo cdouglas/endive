@@ -2901,7 +2901,6 @@ def generate_operation_type_plots(base_dir: str, pattern: str, output_dir: str,
         ax.set_xlabel("Inter-Arrival Scale (ms)")
         ax.set_ylabel(ylabel)
         ax.set_title(ylabel, fontsize=12, fontweight="bold")
-        ax.set_xscale("log")
         ax.invert_xaxis()  # High load (small scale) on left
         if use_log_y and has_data:
             ax.set_yscale("log")
@@ -3623,7 +3622,6 @@ def generate_workload_knee_table(base_dir: str, pattern: str, output_dir: str,
 
         ax.set_xlabel("Number of Tables")
         ax.set_ylabel("Committed / sec")
-        ax.set_xscale("log")
         ax.grid(True, alpha=0.3)
         ax.legend(fontsize=8, loc="best")
 
