@@ -844,6 +844,120 @@ class TestCrossTableRetry:
         assert result.manifest_list_reads == 3
         assert result.conflict_io_ms > 0
 
+    def test_vo_convoy_uses_table_version_not_catalog_seq(self):
+        """10-table catalog. VO writes table 0. 9 FA commits to tables 1-9
+        advance catalog seq by 9, but table 0 version stays unchanged.
+        VO should see no overlap → zero conflict I/O.
+        Regression: previously used catalog seq delta (9) for I/O convoy."""
+        catalog = make_instant_catalog(num_tables=10,
+                                       partitions=(1,)*10)
+        storage = InstantStorageProvider(rng=np.random.RandomState(42))
+        detector = NeverRealConflictDetector()
+
+        # Start VO targeting table 0
+        vo = ValidatedOverwriteTransaction(
+            txn_id=100, submit_time_ms=0.0, runtime_ms=100.0,
+            tables_written=frozenset({0}),
+            partitions_written={0: frozenset({0})},
+        )
+        gen = vo.execute(catalog, storage, detector)
+        next(gen)   # catalog read
+        gen.send(None)  # runtime yield
+
+        # Commit 9 FA transactions to tables 1-9 (not table 0)
+        for i in range(1, 10):
+            fa = make_fast_append(txn_id=i, tables_written=frozenset({i}),
+                                  partitions_written={i: frozenset({0})})
+            drive_generator(fa.execute(catalog, storage, detector))
+
+        # Catalog seq advanced by 9, but table 0 is unchanged
+        assert catalog.seq == 9  # 9 FA commits (reads don't advance seq)
+
+        result = drive_generator(gen)
+        assert result.status == TransactionStatus.COMMITTED
+        assert result.total_retries == 1
+        # Cross-table: no overlap → no historical ML reads (no convoy)
+        assert result.conflict_io_ms == 0.0
+
+    def test_vo_convoy_scales_with_same_table_commits(self):
+        """10-table catalog. VO writes table 0. 9 commits to other tables
+        plus 2 commits to table 0. Convoy should read 2 historical MLs,
+        not 11 (the catalog seq delta).
+        Regression: I/O convoy was proportional to catalog seq delta."""
+        catalog = make_instant_catalog(num_tables=10,
+                                       partitions=(1,)*10)
+        storage = InstantStorageProvider(rng=np.random.RandomState(42))
+        detector = NeverRealConflictDetector()
+
+        # Start VO targeting table 0
+        vo = ValidatedOverwriteTransaction(
+            txn_id=100, submit_time_ms=0.0, runtime_ms=100.0,
+            tables_written=frozenset({0}),
+            partitions_written={0: frozenset({0})},
+        )
+        gen = vo.execute(catalog, storage, detector)
+        next(gen)
+        gen.send(None)
+
+        # Commit 9 FA to other tables
+        for i in range(1, 10):
+            fa = make_fast_append(txn_id=i, tables_written=frozenset({i}),
+                                  partitions_written={i: frozenset({0})})
+            drive_generator(fa.execute(catalog, storage, detector))
+
+        # Commit 2 FA to table 0 (same table as VO)
+        for i in range(10, 12):
+            fa = make_fast_append(txn_id=i, tables_written=frozenset({0}),
+                                  partitions_written={0: frozenset({0})})
+            drive_generator(fa.execute(catalog, storage, detector))
+
+        # Catalog seq advanced by 11, table 0 version advanced by 2
+        assert catalog.seq == 11  # 11 commits (reads don't advance seq)
+
+        result = drive_generator(gen)
+        assert result.status == TransactionStatus.COMMITTED
+        assert result.total_retries == 1
+        # Per-attempt: 2 attempts × 1 ML read = 2
+        # Convoy: 2 historical ML reads (only table 0 commits, not all 11)
+        assert result.manifest_list_reads == 2 + 2
+        assert result.conflict_io_ms > 0
+
+    def test_merge_append_remerge_uses_table_version(self):
+        """10-table catalog. MergeAppend writes table 0. 9 commits to other
+        tables, 2 to table 0. Re-merge cost should scale with 2 (same-table),
+        not 11 (catalog seq delta)."""
+        catalog = make_instant_catalog(num_tables=10,
+                                       partitions=(1,)*10)
+        storage = InstantStorageProvider(rng=np.random.RandomState(42))
+        detector = NeverRealConflictDetector()
+
+        ma = MergeAppendTransaction(
+            txn_id=100, submit_time_ms=0.0, runtime_ms=100.0,
+            tables_written=frozenset({0}),
+            partitions_written={0: frozenset({0})},
+            manifests_per_concurrent_commit=1.0,
+        )
+        gen = ma.execute(catalog, storage, detector)
+        next(gen)
+        gen.send(None)
+
+        # 9 other-table + 2 same-table commits
+        for i in range(1, 10):
+            fa = make_fast_append(txn_id=i, tables_written=frozenset({i}),
+                                  partitions_written={i: frozenset({0})})
+            drive_generator(fa.execute(catalog, storage, detector))
+        for i in range(10, 12):
+            fa = make_fast_append(txn_id=i, tables_written=frozenset({0}),
+                                  partitions_written={0: frozenset({0})})
+            drive_generator(fa.execute(catalog, storage, detector))
+
+        result = drive_generator(gen)
+        assert result.status == TransactionStatus.COMMITTED
+        assert result.total_retries == 1
+        # Re-merge: 2 same-table commits × 1.0 manifests_per_commit = 2 MF reads + 2 MF writes
+        # (not 11 × 1.0 = 11)
+        assert result.manifest_file_reads == 2
+
     def test_disjoint_partitions_skips_io(self):
         """1-table 4 partitions. T1→p0, T2→p1. T2 skips per-attempt I/O on retry."""
         catalog = make_instant_catalog(num_tables=1, partitions=(4,))

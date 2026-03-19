@@ -486,9 +486,17 @@ class Transaction(ABC):
 
             if overlap.has_overlap:
                 # Same-table/partition conflict: pay scaled validation I/O
+                # Use per-table version deltas (not catalog seq delta) to
+                # determine I/O cost.  Only commits to overlapping tables
+                # require manifest list / manifest file work.
+                n_table_versions_behind = sum(
+                    current_snapshot.get_table(tid).version
+                    - last_snapshot.get_table(tid).version
+                    for tid in overlap.overlapping
+                )
                 before = self._elapsed
                 cost = self.get_conflict_cost(
-                    n_behind, ml_append_mode,
+                    n_table_versions_behind, ml_append_mode,
                     n_partitions=overlap.n_partitions,
                 )
                 yield from self._pay_conflict_cost(cost, storage)
