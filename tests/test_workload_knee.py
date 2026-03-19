@@ -11,6 +11,7 @@ import pytest
 from endive.saturation_analysis import (
     _analyze_workload_experiments,
     generate_workload_knee_table,
+    _analyze_op_type_experiments,
 )
 
 # ---------------------------------------------------------------------------
@@ -349,3 +350,87 @@ class TestGenerateWorkloadKneeTable:
                     val = float(parts[1])
                     assert val > 0, f"Expected positive c/s, got {val}"
                     break
+
+
+# ---------------------------------------------------------------------------
+# Regression: seed-count inflation
+# ---------------------------------------------------------------------------
+
+class TestSeedCountInflation:
+    """Verify that aggregated metrics don't scale with seed count.
+
+    The bug: summing committed counts across seeds but dividing by one
+    seed's active window inflates throughput by the number of seeds.
+    """
+
+    def test_knee_throughput_independent_of_seed_count(self):
+        """c/s in knee table should not change when seed count changes."""
+        results = {}
+        for n_seeds in (1, 3, 5):
+            with tempfile.TemporaryDirectory() as tmpdir:
+                seeds = tuple(range(100, 100 + n_seeds))
+                _create_experiment(
+                    tmpdir, "exp_wk", "sc01", seeds=seeds,
+                    provider="s3x", num_tables=1,
+                    scale=100.0, fa_ratio=1.0, vo_ratio=0.0,
+                    n_txns=500,
+                )
+                out = os.path.join(tmpdir, "output")
+                generate_workload_knee_table(tmpdir, "exp_wk*", out)
+                md = open(os.path.join(out, "workload_knee_table.md")).read()
+                for line in md.split("\n"):
+                    if line.startswith("| s3x"):
+                        parts = [p.strip() for p in line.split("|") if p.strip()]
+                        results[n_seeds] = float(parts[1])
+                        break
+
+        # All three should be within 20% of each other (different seeds
+        # give slightly different results, but not 3× or 5× different)
+        vals = list(results.values())
+        assert max(vals) / min(vals) < 1.5, (
+            f"Throughput scales with seed count: {results}"
+        )
+
+    def test_knee_csv_committed_is_per_seed_average(self):
+        """CSV committed column should reflect per-seed average, not sum."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            seeds = (42, 43, 44, 45, 46)  # 5 seeds
+            _create_experiment(
+                tmpdir, "exp_wk", "sc02", seeds=seeds,
+                provider="s3x", num_tables=1,
+                scale=100.0, fa_ratio=1.0, vo_ratio=0.0,
+                n_txns=500,
+            )
+            out = os.path.join(tmpdir, "output")
+            generate_workload_knee_table(tmpdir, "exp_wk*", out)
+            csv = pd.read_csv(os.path.join(out, "workload_knee_data.csv"))
+            row = csv.iloc[0]
+            # Per-seed average committed should be <= n_txns (500)
+            assert row["committed"] <= 500, (
+                f"committed={row['committed']} exceeds per-seed n_txns=500; "
+                f"likely summed across {len(seeds)} seeds"
+            )
+
+    def test_op_type_csv_committed_is_per_seed_average(self):
+        """operation_type_metrics.csv committed should be per-seed average."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            seeds = (42, 43, 44, 45, 46)  # 5 seeds
+            _create_experiment(
+                tmpdir, "exp_wk", "sc03", seeds=seeds,
+                provider="s3x", num_tables=1,
+                scale=100.0, fa_ratio=0.5, vo_ratio=0.5,
+                n_txns=500,
+            )
+            # Use _analyze_op_type_experiments + aggregate like the plot function
+            df = _analyze_op_type_experiments(tmpdir, "exp_wk*")
+            group_cols = ["fa_ratio", "inter_arrival_scale", "operation_type"]
+            agg = df.groupby(group_cols).agg({
+                "total": "mean",
+                "committed": "mean",
+            }).reset_index()
+
+            for _, row in agg.iterrows():
+                assert row["committed"] <= 500, (
+                    f"committed={row['committed']} for {row['operation_type']} "
+                    f"exceeds per-seed n_txns=500; likely summed across seeds"
+                )

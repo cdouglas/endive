@@ -2835,9 +2835,9 @@ def generate_operation_type_plots(base_dir: str, pattern: str, output_dir: str,
         return
 
     agg = df.groupby(group_cols).agg({
-        "total": "sum",
-        "committed": "sum",
-        "aborted": "sum",
+        "total": "mean",
+        "committed": "mean",
+        "aborted": "mean",
         "success_rate": "mean",
         "mean_latency": "mean",
         "p95_latency": "mean",
