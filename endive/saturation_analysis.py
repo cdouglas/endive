@@ -3433,14 +3433,14 @@ def generate_workload_knee_table(base_dir: str, pattern: str, output_dir: str,
     group_cols = ["storage_provider", "num_tables", "fa_ratio",
                   "inter_arrival_scale", "operation_type"]
     agg = df.groupby(group_cols).agg({
-        "total": "sum",
-        "committed": "sum",
+        "total": "mean",
+        "committed": "mean",
         "success_rate": "mean",
         "mean_latency": "mean",
         "p95_latency": "mean",
         "active_window_s": "mean",
     }).reset_index()
-    # Recompute success_rate from totals for accuracy
+    # Recompute success_rate from per-seed averages for accuracy
     agg["success_rate"] = agg["committed"] / agg["total"] * 100
 
     # Save full CSV
