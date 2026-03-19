@@ -344,7 +344,7 @@ class TestValidatedOverwriteTransaction:
         assert cost.metadata_reads == 0       # Moved to per-attempt
         assert cost.manifest_list_reads == 0  # Moved to per-attempt
         assert cost.manifest_list_writes == 0  # Moved to per-attempt
-        assert cost.historical_ml_reads == 3  # I/O convoy (stays here)
+        assert cost.historical_ml_reads == 2  # I/O convoy: 3-1 (per-attempt reads current)
         assert cost.manifest_file_reads == 0
         assert cost.manifest_file_writes == 0
 
@@ -354,11 +354,11 @@ class TestValidatedOverwriteTransaction:
         assert cost.manifest_list_writes == 0  # ML+ doesn't affect retry cost
 
     def test_historical_ml_reads_scale_with_n_behind(self):
-        """I/O convoy: historical ML reads = n_snapshots_behind."""
+        """I/O convoy: historical ML reads = n_snapshots_behind - 1 (per-attempt reads current)."""
         txn = make_txn(ValidatedOverwriteTransaction)
         for n in [1, 5, 10, 50]:
             cost = txn.get_conflict_cost(n_snapshots_behind=n, ml_append_mode=False)
-            assert cost.historical_ml_reads == n
+            assert cost.historical_ml_reads == n - 1
 
     def test_zero_historical_reads_when_zero_behind(self):
         txn = make_txn(ValidatedOverwriteTransaction)
@@ -700,10 +700,10 @@ class TestScaledConflictCost:
         assert cost.manifest_file_writes == 12
 
     def test_validated_overwrite_scales_by_n_partitions(self):
-        """ValidatedOverwrite: historical_ml_reads = n_behind * n_partitions."""
+        """ValidatedOverwrite: historical_ml_reads = (n_behind - 1) * n_partitions."""
         txn = make_txn(ValidatedOverwriteTransaction)
         cost = txn.get_conflict_cost(n_snapshots_behind=3, ml_append_mode=False, n_partitions=5)
-        assert cost.historical_ml_reads == 15
+        assert cost.historical_ml_reads == 10  # (3-1) * 5
 
     def test_default_n_partitions_unchanged_merge_append(self):
         txn = make_txn(MergeAppendTransaction, manifests_per_concurrent_commit=2.0)
@@ -715,4 +715,4 @@ class TestScaledConflictCost:
     def test_default_n_partitions_unchanged_validated_overwrite(self):
         txn = make_txn(ValidatedOverwriteTransaction)
         cost = txn.get_conflict_cost(n_snapshots_behind=3, ml_append_mode=False)
-        assert cost.historical_ml_reads == 3
+        assert cost.historical_ml_reads == 2  # 3-1, per-attempt reads current

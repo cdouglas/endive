@@ -389,13 +389,13 @@ class TestValidatedOverwriteAbort:
             ti = make_fast_append(txn_id=i + 1)
             drive_generator(ti.execute(catalog, storage, detector))
 
-        # T3 retries with n_behind=2 → 2 historical ML reads
+        # T3 retries with 2 same-table commits behind
         result = drive_generator(gen)
         assert result.status == TransactionStatus.COMMITTED
         assert result.total_retries == 1
         # 2 attempts × per-attempt (1 ML read each) = 2 ML reads
-        # + 2 historical ML reads (I/O convoy) = 4 total ML reads
-        assert result.manifest_list_reads == 4
+        # + 1 historical ML read (2 behind, minus 1 already read by per-attempt) = 3
+        assert result.manifest_list_reads == 3
         # 2 attempts × per-attempt (1 ML write each) = 2 ML writes
         assert result.manifest_list_writes == 2
         # 2 attempts × per-attempt (1 MF write each) = 2 MF writes
@@ -840,9 +840,10 @@ class TestCrossTableRetry:
         result = drive_generator(gen)
         assert result.status == TransactionStatus.COMMITTED
         assert result.total_retries == 1
-        # 2 per-attempt ML reads + 1 historical ML read (I/O convoy) = 3
-        assert result.manifest_list_reads == 3
-        assert result.conflict_io_ms > 0
+        # 2 per-attempt ML reads + 0 historical ML reads (1 behind, but
+        # per-attempt already reads current ML, so N-1=0 additional) = 2
+        assert result.manifest_list_reads == 2
+        assert result.conflict_io_ms == 0.0
 
     def test_vo_convoy_uses_table_version_not_catalog_seq(self):
         """10-table catalog. VO writes table 0. 9 FA commits to tables 1-9
@@ -918,8 +919,9 @@ class TestCrossTableRetry:
         assert result.status == TransactionStatus.COMMITTED
         assert result.total_retries == 1
         # Per-attempt: 2 attempts × 1 ML read = 2
-        # Convoy: 2 historical ML reads (only table 0 commits, not all 11)
-        assert result.manifest_list_reads == 2 + 2
+        # Convoy: 1 historical ML read (2 same-table commits, minus 1
+        # already read by per-attempt cost = 1 additional)
+        assert result.manifest_list_reads == 2 + 1
         assert result.conflict_io_ms > 0
 
     def test_merge_append_remerge_uses_table_version(self):
@@ -1227,10 +1229,10 @@ class TestOverlapScaling:
         result = drive_generator(gen)
         assert result.status == TransactionStatus.COMMITTED
         assert result.total_retries == 1
-        # n_behind=1, n_partitions=2 (p0,p1 overlap) → 2 historical ML reads
+        # n_behind=1, n_partitions=2 (p0,p1 overlap)
+        # Historical ML reads: max(0, 1-1) * 2 = 0 (per-attempt already reads current)
         # Per-attempt ML reads: 3 (first) + 2 (retry, scaled to overlap) = 5
-        # Historical ML reads: 2
-        assert result.manifest_list_reads == 5 + 2
+        assert result.manifest_list_reads == 5 + 0
 
     def test_single_partition_backward_compat(self):
         """Single-table single-partition → identical I/O to pre-scaling behavior."""

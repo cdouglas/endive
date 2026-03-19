@@ -704,7 +704,10 @@ class ValidatedOverwriteTransaction(Transaction):
         ml_append_mode: bool,
         n_partitions: int = 1,
     ) -> ConflictCost:
-        # Only I/O convoy cost — per-attempt cost (ML read/MF write/ML write) is separate
+        # I/O convoy: read historical MLs at versions K+1..K+N to validate.
+        # The per-attempt cost already reads the ML at version K+N, so only
+        # K+1..K+N-1 need additional reads (N-1, not N).
+        n_historical = max(0, n_snapshots_behind - 1) * n_partitions
         return ConflictCost(
-            historical_ml_reads=n_snapshots_behind * n_partitions,
+            historical_ml_reads=n_historical,
         )
