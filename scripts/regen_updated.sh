@@ -17,8 +17,19 @@ generate_operation_type_plots(
     group_by='catalog_service_latency_ms',
 )
 generate_operation_type_plots(
+    'experiments', 'exp4c_*', 'plots/exp4c_tables_providers/op_types_fa100_1t',
+    group_by='storage_provider',
+    config={'filters': ['num_tables==1', 'fast_append_ratio==1.0']},
+)
+generate_operation_type_plots(
+    'experiments', 'exp4c_*', 'plots/exp4c_tables_providers/op_types_fa90_1t',
+    group_by='storage_provider',
+    config={'filters': ['num_tables==1', 'fast_append_ratio==0.9']},
+)
+generate_operation_type_plots(
     'experiments', 'exp4c_*', 'plots/exp4c_tables_providers/op_types_fa50_1t',
     group_by='storage_provider',
+    config={'filters': ['num_tables==1', 'fast_append_ratio==0.5']},
 )
 "
 

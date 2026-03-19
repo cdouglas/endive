@@ -2715,6 +2715,7 @@ def _analyze_op_type_experiments(experiments_dir: str, pattern: str,
         txn = cfg.get("transaction", {})
         fa_ratio = txn.get("operation_types", {}).get("fast_append", 0.5)
         scale = txn.get("inter_arrival", {}).get("scale", 100.0)
+        num_tables = _extract_param_value(cfg, "num_tables") or 1
 
         # Extract additional group_by parameter if requested
         group_val = None
@@ -2742,6 +2743,8 @@ def _analyze_op_type_experiments(experiments_dir: str, pattern: str,
                     record = {
                         "seed": str(seed_val),
                         "fa_ratio": fa_ratio,
+                        "fast_append_ratio": fa_ratio,
+                        "num_tables": num_tables,
                         "inter_arrival_scale": scale,
                         "operation_type": op_type,
                         "total": len(op_df),
@@ -2776,6 +2779,8 @@ def _analyze_op_type_experiments(experiments_dir: str, pattern: str,
                     record = {
                         "seed": seed_dir.name,
                         "fa_ratio": fa_ratio,
+                        "fast_append_ratio": fa_ratio,
+                        "num_tables": num_tables,
                         "inter_arrival_scale": scale,
                         "operation_type": op_type,
                         "total": len(op_df),
@@ -2826,6 +2831,14 @@ def generate_operation_type_plots(base_dir: str, pattern: str, output_dir: str,
     if len(df) == 0:
         print(f"  No operation type data found for {pattern}")
         return
+
+    # Apply filters from config (e.g. num_tables==1, fast_append_ratio==0.9)
+    filters = config.get("filters", [])
+    if filters:
+        df = apply_filters(df, filters)
+        if len(df) == 0:
+            print(f"  No data after applying filters {filters}")
+            return
 
     # Aggregate across seeds
     group_cols = [group_by, "inter_arrival_scale", "operation_type"]
