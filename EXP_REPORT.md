@@ -21,26 +21,39 @@ Distributing writes uniformly across N tables reduces per-table contention linea
 
 **CAS = 1ms (instant catalog)**
 
-| Tables | Max Throughput | Success @ Max | ~98% Success Throughput |
-|--------|---------------|---------------|------------------------|
-| 1      | 7.8 c/s       | 19%           | 2.8 c/s                |
-| 5      | 29.8 c/s      | 73%           | 16.3 c/s               |
-| 10     | 40.2 c/s      | 98%           | 40.2 c/s               |
-| 50     | 41.0 c/s      | 100%          | 41.0 c/s               |
+| Tables | Knee (c/s) | Knee SR | Max Throughput (c/s) | Success @ Max |
+|--------|-----------|---------|---------------------|---------------|
+| 1      | 2.9       | 99%     | 5.8                 | 20%           |
+| 5      | 11.9      | 100%    | 21.9                | 75%           |
+| 10     | 29.3      | 98%     | 29.3                | 98%           |
+| 50     | 29.8      | 100%    | 29.8                | 100%          |
 
-Near-linear scaling from 1 to 5 tables. At 10+ tables the I/O bandwidth ceiling (~41
-c/s) is reached. The bottleneck shifts from catalog contention to aggregate S3 I/O.
+Near-linear scaling from 1 to 10 tables, where the I/O bandwidth ceiling (~30 c/s) is
+reached. At 10+ tables, per-table contention is negligible and the bottleneck is aggregate
+S3 manifest I/O.
 
-**CAS = 120ms**: Ceiling drops to ~8 c/s at 50 tables — 5x lower than with 1ms CAS.
-Catalog round-trip overhead on retries is the bottleneck.
+**CAS = 120ms**: The ceiling drops to ~3 c/s at 50 tables — 10x lower than with 1ms CAS.
+Multi-table scaling still helps (1.5 c/s at 1 table → 3.0 c/s at 50), but the catalog
+round-trip dominates retry cost at every table count.
 
 ## Exp4b: Uniform Tables, Mixed Workload (90/10)
 
-Adding 10% VO to the workload mix reduces the ceiling modestly (37 vs 41 c/s at 50
-tables, CAS=1ms) but introduces extreme tail latency: P99 exceeds 400s at moderate
-loads due to VO retry cascading.
+Adding 10% VO has almost no effect on the throughput ceiling: ~30 c/s at 50 tables with
+CAS=1ms, matching exp4a. VO's impact is on tail latency, not throughput.
 
-With 120ms CAS, the ceiling is ~8 c/s — identical to exp4a — confirming that catalog
+| Tables | Knee (c/s) | Knee SR | Knee P99  | Max Throughput (c/s) |
+|--------|-----------|---------|-----------|---------------------|
+| 1      | 2.9       | 98%     | 81s       | 5.7                 |
+| 5      | 11.8      | 99%     | 73s       | 21.4                |
+| 10     | 28.8      | 97%     | 80s       | 28.8                |
+| 50     | 29.8      | 100%    | 19s       | 29.8                |
+
+P99 latency at the knee ranges from 19s (50 tables) to 81s (1 table). The VO component
+drives these tails: each VO retry reads manifest lists proportional to missed versions.
+With more tables, fewer versions are missed per retry, so P99 drops. At 50 tables, P99
+is 19s — still 27x the P50 of 337ms, but tractable for batch workloads.
+
+With 120ms CAS, the ceiling is ~3 c/s — identical to exp4a — confirming that catalog
 latency dominates over operation type at high CAS.
 
 ## Exp4a-Zipf: Skewed Tables, FastAppend
@@ -51,7 +64,7 @@ table count to 3-5 regardless of physical N.
 | Metric (ias=20ms, CAS=1ms) | Zipf 50 tables | Uniform 50 tables |
 |-----------------------------|----------------|-------------------|
 | Success rate                | 73%            | 100%              |
-| Throughput                  | 78 c/s         | 107 c/s           |
+| Throughput                  | 21.5 c/s       | 29.8 c/s          |
 | Zipf effective equivalent   | ~5 uniform     | —                 |
 
 70% of retries under Zipf are same-table conflicts (requiring manifest I/O), vs <2%
@@ -91,21 +104,21 @@ See [PROVIDER_SUMMARY.md](PROVIDER_SUMMARY.md) for per-provider analysis.
 
 ### 1. Provider choice > table count > workload mix
 
-S3 Express at 1 table (14.6 c/s) outperforms S3 at 50 tables with 120ms CAS (8 c/s).
-Choosing a faster provider yields more throughput improvement than any amount of table
-sharding.
+S3 Express at 1 table (14.6 c/s) outperforms S3 at 50 tables (7.4 c/s) and every other
+provider at any table count. Choosing a faster storage backend yields more throughput
+improvement than table sharding.
 
 ### 2. The single-file catalog has a hard CAS ceiling
 
-At 120ms CAS, 50 tables can only sustain ~8 c/s regardless of workload. This is set by
-catalog round-trip time, not I/O bandwidth. A catalog service with sub-10ms CAS would
-remove this constraint.
+At 120ms CAS, 50 tables can only sustain ~3 c/s regardless of workload. At 1ms CAS, the
+ceiling is ~30 c/s. The ratio tracks CAS latency directly: a catalog service with sub-10ms
+CAS would lift the ceiling proportionally.
 
 ### 3. 10 tables is the sweet spot for uniform distribution
 
-Under uniform table selection, 10 tables captures most of the contention benefit (98%
-of the ceiling for FA at CAS=1ms). Beyond 10 tables, returns are negligible unless CAS
-latency is very high.
+Under uniform table selection with 1ms CAS, 10 tables captures 98% of the I/O ceiling
+(29.3 of 29.8 c/s). Beyond 10 tables, returns are negligible. With higher CAS latency,
+more tables are needed to reach the (lower) ceiling.
 
 ### 4. Zipf distribution negates table sharding
 
@@ -113,26 +126,26 @@ With alpha=1.5, 50 Zipf tables perform like ~5 uniform tables. The hot table abs
 50% of writes and 70% of expensive same-table retries. Table sharding is not a solution
 for skewed workloads.
 
-### 5. VO is the tail-latency driver, not the throughput driver
+### 5. VO adds tail latency, not throughput loss
 
-At 50 tables, VO has zero effect on the throughput knee. Its impact is on latency: VO
-commit latency is 3-100x FA latency depending on provider and table count. Systems that
-tolerate high VO latency can run mixed workloads at the FA throughput ceiling.
+Adding 10% VO to an FA workload leaves the throughput ceiling unchanged (~30 c/s at 50
+tables). VO's cost is in P99 latency: 19s at 50 tables, 80s at 1-10 tables. Systems that
+can tolerate these tails run mixed workloads at the FA throughput ceiling.
 
-### 6. Multi-table VO latency is manageable
+### 6. Multi-table distribution compresses VO tails
 
-VO latency drops from 6.6-29s (1 table) to 0.4-8s (50 tables) across providers. The
-reduction is proportional to contention reduction — fewer missed versions per retry means
-shorter manifest list reads. At 20+ tables, VO latency is within 10x of FA latency for
-all providers except GCP.
+VO P99 drops from 81s (1 table) to 19s (50 tables) at CAS=1ms. With real providers
+(exp4c), VO mean latency drops from 6.6-29s (1 table) to 0.4-8s (50 tables). The
+mechanism is contention reduction: fewer missed versions per retry means shorter manifest
+list reads per VO attempt.
 
 ## Actionable Recommendations
 
 - **For high-throughput FA workloads**: Use S3 Express. A single table sustains 14.6 c/s
   with no sharding overhead.
 
-- **For mixed FA/VO workloads**: Use 10-20 tables to reduce VO latency to acceptable
-  levels. At 20 tables, S3 Express VO latency is 0.8s; S3/Azure Premium is 4.5s.
+- **For mixed FA/VO workloads**: Use 10-20 tables to compress VO tail latency. At 20
+  tables, S3 Express VO latency is 0.8s; S3/Azure Premium is 4.5s.
 
 - **For Zipf-skewed workloads**: Table sharding is insufficient. Consider partition-level
   diversity within hot tables, or isolate VO operations on hot tables to dedicated time
@@ -141,5 +154,5 @@ all providers except GCP.
 - **For cost-sensitive deployments**: S3 Standard and Azure Premium are interchangeable
   at 7.4 c/s ceiling (10+ tables). Choose based on cost/availability, not throughput.
 
-- **For GCP**: Budget for 50+ tables and accept 3.6 c/s ceiling, or consider a separate
+- **For GCP**: Budget for 50+ tables and accept 3.6 c/s ceiling, or use a separate
   low-latency catalog service to decouple CAS from storage I/O.

@@ -40,12 +40,12 @@ at ias=20ms with 50 tables, Uniform reaches 100% while Zipf stalls at 73%. At lo
 
 | Load (ias) | 1 table | 5 Z / U   | 10 Z / U   | 50 Z / U    |
 |------------|---------|-----------|------------|-------------|
-| 20ms       | 20.7    | 59/79     | 68/105     | 78/107      |
-| 50ms       | 18.4    | 35/43     | 37/43      | 40/43       |
-| 100ms      | 16.0    | 21/22     | 21/22      | 21/22       |
+| 20ms       | 5.7     | 16.4/21.9 | 18.9/29.3  | 21.5/29.8   |
+| 50ms       | 5.1     | 9.7/11.9  | 10.4/11.9  | 11.0/11.9   |
+| 100ms      | 4.5     | 5.9/6.0   | 5.9/6.0    | 6.0/6.0     |
 
-At ias=20ms with 50 tables, Uniform achieves 107 c/s (5.2x over 1 table). Zipf achieves
-78 c/s (3.7x). The Zipf/Uniform throughput ratio ranges from 0.65 (10 tables) to 0.72
+At ias=20ms with 50 tables, Uniform achieves 29.8 c/s (5.2x over 1 table). Zipf achieves
+21.5 c/s (3.8x). The Zipf/Uniform throughput ratio ranges from 0.65 (10 tables) to 0.72
 (50 tables).
 
 ## Effective table count
