@@ -2283,16 +2283,19 @@ def apply_filters(df: pd.DataFrame, filter_expressions: List[str]) -> pd.DataFra
 
 def _extract_heatmap_params(experiments_dir: str, pattern: str,
                             x_param: str, y_param: str,
-                            extra_params: list = None) -> pd.DataFrame:
+                            extra_params: list = None,
+                            experiments_cache: dict = None) -> pd.DataFrame:
     """Extract parameters for heatmap from experiment directories and consolidated.
 
     Args:
         extra_params: Additional parameter names to extract (e.g. for filtering).
+        experiments_cache: Pre-scanned experiments dict from scan_all_experiments().
+                          If provided, skips redundant directory scan.
     """
     extra_params = extra_params or []
     records = []
 
-    experiments = scan_all_experiments(experiments_dir, pattern)
+    experiments = experiments_cache if experiments_cache is not None else scan_all_experiments(experiments_dir, pattern)
 
     for dir_key, exp_info in experiments.items():
         cfg = exp_info['config']
@@ -2458,6 +2461,107 @@ def _load_heatmap_results(params_df: pd.DataFrame,
     return pd.DataFrame(all_results)
 
 
+def _load_raw_heatmap_data(params_df: pd.DataFrame) -> dict:
+    """Load raw seed DataFrames for all experiments in params_df.
+
+    Returns dict keyed by experiment identifier, containing list of
+    per-seed DataFrames.  This allows computing metrics for multiple
+    op_type filters without re-reading parquet files from disk.
+    """
+    raw_data = {}
+
+    # Set up consolidated reader if needed
+    consolidated_path = None
+    if "_exp_label" in params_df.columns:
+        for _, r in params_df.iterrows():
+            if r["exp_dir"] is not None:
+                consolidated_path = os.path.join(
+                    str(Path(r["exp_dir"]).parent), 'consolidated.parquet')
+                break
+        if consolidated_path is None:
+            consolidated_path = CONFIG.get('paths', {}).get(
+                'consolidated_file', 'experiments/consolidated.parquet')
+
+    reader = _ConsolidatedReader.open(consolidated_path) if consolidated_path else None
+
+    for idx, row in params_df.iterrows():
+        if row["exp_dir"] is not None:
+            exp_key = str(row["exp_dir"])
+        elif "_exp_label" in params_df.columns:
+            exp_key = f"{row['_exp_label']}-{row['_exp_hash']}"
+        else:
+            continue
+
+        seed_dfs = []
+
+        if row["exp_dir"] is None:
+            if reader is not None:
+                exp_info = {'label': row["_exp_label"], 'hash': row["_exp_hash"]}
+                df = _load_from_consolidated(reader, exp_info)
+                if df is not None and len(df) > 0:
+                    for seed_val, seed_df in df.groupby('seed'):
+                        seed_dfs.append(seed_df)
+        else:
+            exp_dir = Path(row["exp_dir"])
+            for seed_dir in exp_dir.iterdir():
+                if not seed_dir.is_dir() or not seed_dir.name.isdigit():
+                    continue
+                results_path = seed_dir / "results.parquet"
+                if not results_path.exists():
+                    continue
+                seed_dfs.append(pd.read_parquet(results_path))
+
+        if seed_dfs:
+            raw_data[exp_key] = seed_dfs
+
+    return raw_data
+
+
+def _aggregate_heatmap_metrics(raw_data: dict, params_df: pd.DataFrame,
+                                x_param: str, y_param: str,
+                                op_type_filter: str = None) -> pd.DataFrame:
+    """Compute aggregated metrics from cached raw data.
+
+    Args:
+        raw_data: Dict keyed by experiment identifier, containing per-seed DataFrames.
+        params_df: DataFrame with experiment parameters.
+        x_param, y_param: Parameter names for axes.
+        op_type_filter: Optional operation type to filter by before computing metrics.
+    """
+    all_results = []
+
+    for _, row in params_df.iterrows():
+        if row["exp_dir"] is not None:
+            exp_key = str(row["exp_dir"])
+        elif "_exp_label" in params_df.columns:
+            exp_key = f"{row['_exp_label']}-{row['_exp_hash']}"
+        else:
+            continue
+
+        seed_dfs = raw_data.get(exp_key, [])
+        seed_results = []
+        for seed_df in seed_dfs:
+            metrics = _compute_seed_metrics(seed_df, op_type_filter)
+            if metrics:
+                seed_results.append(metrics)
+
+        if seed_results:
+            agg_df = pd.DataFrame(seed_results)
+            all_results.append({
+                x_param: row[x_param],
+                y_param: row[y_param],
+                "num_seeds": len(seed_results),
+                "success_rate": agg_df["success_rate"].mean(),
+                "throughput": agg_df["throughput"].mean(),
+                "mean_latency": agg_df["mean_latency"].mean(),
+                "p50_latency": agg_df["p50_latency"].mean(),
+                "p95_latency": agg_df["p95_latency"].mean(),
+                "p99_latency": agg_df["p99_latency"].mean(),
+            })
+
+    return pd.DataFrame(all_results)
+
+
 def _create_single_heatmap(data: pd.DataFrame, x_param: str, y_param: str,
                            value_col: str, title: str, output_path,
                            cmap: str = "viridis", vmin=None, vmax=None,
@@ -2549,7 +2653,8 @@ def _create_single_heatmap(data: pd.DataFrame, x_param: str, y_param: str,
 
 def generate_heatmap_plots(base_dir: str, pattern: str, output_dir: str,
                            x_param: str, y_param: str, metrics: list,
-                           config: dict = None):
+                           config: dict = None,
+                           experiments_cache: dict = None):
     """Generate heatmap plots for a 2D parameter sweep.
 
     Args:
@@ -2560,6 +2665,8 @@ def generate_heatmap_plots(base_dir: str, pattern: str, output_dir: str,
         y_param: Parameter name for Y axis.
         metrics: List of metric names to generate heatmaps for.
         config: Optional plotting config overrides.
+        experiments_cache: Pre-scanned experiments dict from scan_all_experiments().
+                          If provided, avoids redundant directory scanning.
     """
     config = config or {}
     os.makedirs(output_dir, exist_ok=True)
@@ -2582,7 +2689,8 @@ def generate_heatmap_plots(base_dir: str, pattern: str, output_dir: str,
 
     print(f"Generating heatmaps for {pattern}...")
     params_df = _extract_heatmap_params(base_dir, pattern, x_param, y_param,
-                                        extra_params=extra_params)
+                                        extra_params=extra_params,
+                                        experiments_cache=experiments_cache)
     if len(params_df) == 0:
         print(f"  No experiments found matching {pattern}")
         return
@@ -2592,12 +2700,23 @@ def generate_heatmap_plots(base_dir: str, pattern: str, output_dir: str,
         if len(params_df) == 0:
             print(f"  No experiments remain after filtering")
             return
-        # Drop extra filter columns before passing to _load_heatmap_results
+        # Drop extra filter columns before passing to metric computation
         drop_cols = [c for c in extra_params if c in params_df.columns]
         if drop_cols:
             params_df = params_df.drop(columns=drop_cols)
 
-    results_df = _load_heatmap_results(params_df, x_param, y_param)
+    # Load raw seed data once; compute metrics for aggregate and per-type
+    # from the cached data to avoid redundant parquet reads.
+    per_type_metrics = config.get("per_type_metrics", [])
+    need_raw_cache = bool(per_type_metrics)
+
+    if need_raw_cache:
+        raw_data = _load_raw_heatmap_data(params_df)
+        results_df = _aggregate_heatmap_metrics(raw_data, params_df, x_param, y_param)
+    else:
+        raw_data = None
+        results_df = _load_heatmap_results(params_df, x_param, y_param)
+
     if len(results_df) == 0:
         print(f"  No results loaded for {pattern}")
         return
@@ -2645,14 +2764,13 @@ def generate_heatmap_plots(base_dir: str, pattern: str, output_dir: str,
                 unreliable_threshold=unreliable_threshold,
             )
 
-    # Per-operation-type heatmaps
-    per_type_metrics = config.get("per_type_metrics", [])
+    # Per-operation-type heatmaps — reuse cached raw data
     if per_type_metrics:
         for op_type in ["fast_append", "validated_overwrite"]:
             prefix = "fa" if op_type == "fast_append" else "vo"
-            print(f"  Loading per-type heatmap data for {op_type}...")
-            type_results = _load_heatmap_results(params_df, x_param, y_param,
-                                                  op_type_filter=op_type)
+            print(f"  Computing per-type metrics for {op_type}...")
+            type_results = _aggregate_heatmap_metrics(
+                raw_data, params_df, x_param, y_param, op_type_filter=op_type)
             if len(type_results) == 0:
                 print(f"    No data for {op_type}")
                 continue
@@ -2695,7 +2813,8 @@ def generate_heatmap_plots(base_dir: str, pattern: str, output_dir: str,
 # ---------------------------------------------------------------------------
 
 def _analyze_op_type_experiments(experiments_dir: str, pattern: str,
-                                  group_by: str = None) -> pd.DataFrame:
+                                  group_by: str = None,
+                                  experiments_cache: dict = None) -> pd.DataFrame:
     """Extract per-operation-type metrics from experiment directories and consolidated.
 
     Args:
@@ -2703,9 +2822,10 @@ def _analyze_op_type_experiments(experiments_dir: str, pattern: str,
         pattern: Glob pattern to match experiment directories.
         group_by: Additional config parameter to extract (e.g. 'catalog_service_latency_ms').
                   If None, defaults to 'fa_ratio'.
+        experiments_cache: Pre-scanned experiments dict from scan_all_experiments().
     """
     records = []
-    experiments = scan_all_experiments(experiments_dir, pattern)
+    experiments = experiments_cache if experiments_cache is not None else scan_all_experiments(experiments_dir, pattern)
     consolidated_path = os.path.join(experiments_dir, 'consolidated.parquet')
     reader = _ConsolidatedReader.open(consolidated_path)
 
@@ -2800,7 +2920,8 @@ def _analyze_op_type_experiments(experiments_dir: str, pattern: str,
 
 def generate_operation_type_plots(base_dir: str, pattern: str, output_dir: str,
                                   load_levels: list = None, config: dict = None,
-                                  group_by: str = None):
+                                  group_by: str = None,
+                                  experiments_cache: dict = None):
     """Generate per-operation-type comparison plots as a 2x2 grid.
 
     Layout:
@@ -2819,6 +2940,7 @@ def generate_operation_type_plots(base_dir: str, pattern: str, output_dir: str,
         load_levels: Unused (kept for backward compatibility). All available loads are plotted.
         config: Optional plotting config overrides.
         group_by: Parameter to group lines by. Defaults to 'fa_ratio'.
+        experiments_cache: Pre-scanned experiments dict from scan_all_experiments().
     """
     config = config or {}
     group_by = group_by or "fa_ratio"
@@ -2827,7 +2949,8 @@ def generate_operation_type_plots(base_dir: str, pattern: str, output_dir: str,
     figsize = config.get("figsize", [12, 7.5])
 
     print(f"Analyzing operation types for {pattern}...")
-    df = _analyze_op_type_experiments(base_dir, pattern, group_by=group_by)
+    df = _analyze_op_type_experiments(base_dir, pattern, group_by=group_by,
+                                      experiments_cache=experiments_cache)
     if len(df) == 0:
         print(f"  No operation type data found for {pattern}")
         return
@@ -2967,6 +3090,7 @@ def _analyze_per_table_experiments(
     experiments_dir: str, pattern: str,
     filters: list = None, load_levels: list = None,
     num_tables_values: list = None,
+    experiments_cache: dict = None,
 ) -> pd.DataFrame:
     """Extract per-table-rank metrics from experiment parquets.
 
@@ -2977,7 +3101,7 @@ def _analyze_per_table_experiments(
         mean_latency, p95_latency
     """
     records = []
-    experiments = scan_all_experiments(experiments_dir, pattern)
+    experiments = experiments_cache if experiments_cache is not None else scan_all_experiments(experiments_dir, pattern)
     consolidated_path = os.path.join(experiments_dir, 'consolidated.parquet')
     reader = _ConsolidatedReader.open(consolidated_path)
 
@@ -3321,7 +3445,8 @@ def _plot_conflict_type_by_table(agg: pd.DataFrame, output_dir: str,
 
 
 def _analyze_workload_experiments(experiments_dir: str, pattern: str,
-                                  filters: list = None) -> pd.DataFrame:
+                                  filters: list = None,
+                                  experiments_cache: dict = None) -> pd.DataFrame:
     """Extract per-operation-type metrics with provider and table count.
 
     Similar to _analyze_op_type_experiments but always extracts
@@ -3332,6 +3457,7 @@ def _analyze_workload_experiments(experiments_dir: str, pattern: str,
         experiments_dir: Base directory containing experiment results.
         pattern: Glob pattern to match experiment directories.
         filters: Optional list of filter expressions (e.g. ["num_tables==1"]).
+        experiments_cache: Pre-scanned experiments dict from scan_all_experiments().
 
     Returns:
         DataFrame with columns: seed, storage_provider, num_tables, fa_ratio,
@@ -3339,7 +3465,7 @@ def _analyze_workload_experiments(experiments_dir: str, pattern: str,
         mean_latency, p95_latency, active_window_s
     """
     records = []
-    experiments = scan_all_experiments(experiments_dir, pattern)
+    experiments = experiments_cache if experiments_cache is not None else scan_all_experiments(experiments_dir, pattern)
     consolidated_path = os.path.join(experiments_dir, 'consolidated.parquet')
     reader = _ConsolidatedReader.open(consolidated_path)
 
@@ -3414,7 +3540,8 @@ def _analyze_workload_experiments(experiments_dir: str, pattern: str,
 
 
 def generate_workload_knee_table(base_dir: str, pattern: str, output_dir: str,
-                                 config: dict = None):
+                                 config: dict = None,
+                                 experiments_cache: dict = None):
     """Generate markdown table of usable (>95% success) commit rates per provider.
 
     For each (provider, num_tables, fa_ratio), finds the knee point — the
@@ -3430,6 +3557,7 @@ def generate_workload_knee_table(base_dir: str, pattern: str, output_dir: str,
         pattern: Glob pattern to match experiment directories.
         output_dir: Directory to write outputs.
         config: Optional config overrides (e.g. success_threshold).
+        experiments_cache: Pre-scanned experiments dict from scan_all_experiments().
     """
     config = config or {}
     success_threshold = config.get("success_threshold", 95.0)
@@ -3437,7 +3565,8 @@ def generate_workload_knee_table(base_dir: str, pattern: str, output_dir: str,
 
     print(f"Analyzing workload knees for {pattern}...")
     df = _analyze_workload_experiments(base_dir, pattern,
-                                       filters=config.get("filters"))
+                                       filters=config.get("filters"),
+                                       experiments_cache=experiments_cache)
     if len(df) == 0:
         print(f"  No workload data found for {pattern}")
         return
@@ -3648,7 +3777,8 @@ def generate_workload_knee_table(base_dir: str, pattern: str, output_dir: str,
 
 
 def generate_per_table_plots(base_dir: str, pattern: str, output_dir: str,
-                              config: dict = None):
+                              config: dict = None,
+                              experiments_cache: dict = None):
     """Generate per-table-rank breakdown plots for Zipf experiments.
 
     Produces:
@@ -3663,6 +3793,7 @@ def generate_per_table_plots(base_dir: str, pattern: str, output_dir: str,
         output_dir: Directory to write plots.
         config: Optional plotting config overrides with keys:
             filters, load_levels, num_tables_values.
+        experiments_cache: Pre-scanned experiments dict from scan_all_experiments().
     """
     config = config or {}
     os.makedirs(output_dir, exist_ok=True)
@@ -3684,6 +3815,7 @@ def generate_per_table_plots(base_dir: str, pattern: str, output_dir: str,
         base_dir, pattern,
         filters=filters, load_levels=load_levels,
         num_tables_values=num_tables_values,
+        experiments_cache=experiments_cache,
     )
     if len(df) == 0:
         print(f"  No per-table data found for {pattern}")
