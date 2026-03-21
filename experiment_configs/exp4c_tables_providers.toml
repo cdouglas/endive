@@ -337,8 +337,10 @@ title_suffix = " (GCP, FA=50%)"
 output_suffix = "gcp_fa50"
 
 # ===================================================================
-# Operation type breakdown per provider
+# Operation type breakdown per provider (num_tables x fa_ratio)
 # ===================================================================
+
+# --- 1 table ---
 
 [[plots.graphs]]
 type = "operation_types"
@@ -357,6 +359,106 @@ type = "operation_types"
 group_by = "storage_provider"
 filters = ["num_tables==1", "fast_append_ratio==0.5"]
 output_suffix = "op_types_fa50_1t"
+
+# --- 2 tables ---
+
+[[plots.graphs]]
+type = "operation_types"
+group_by = "storage_provider"
+filters = ["num_tables==2", "fast_append_ratio==1.0"]
+output_suffix = "op_types_fa100_2t"
+
+[[plots.graphs]]
+type = "operation_types"
+group_by = "storage_provider"
+filters = ["num_tables==2", "fast_append_ratio==0.9"]
+output_suffix = "op_types_fa90_2t"
+
+[[plots.graphs]]
+type = "operation_types"
+group_by = "storage_provider"
+filters = ["num_tables==2", "fast_append_ratio==0.5"]
+output_suffix = "op_types_fa50_2t"
+
+# --- 5 tables ---
+
+[[plots.graphs]]
+type = "operation_types"
+group_by = "storage_provider"
+filters = ["num_tables==5", "fast_append_ratio==1.0"]
+output_suffix = "op_types_fa100_5t"
+
+[[plots.graphs]]
+type = "operation_types"
+group_by = "storage_provider"
+filters = ["num_tables==5", "fast_append_ratio==0.9"]
+output_suffix = "op_types_fa90_5t"
+
+[[plots.graphs]]
+type = "operation_types"
+group_by = "storage_provider"
+filters = ["num_tables==5", "fast_append_ratio==0.5"]
+output_suffix = "op_types_fa50_5t"
+
+# --- 10 tables ---
+
+[[plots.graphs]]
+type = "operation_types"
+group_by = "storage_provider"
+filters = ["num_tables==10", "fast_append_ratio==1.0"]
+output_suffix = "op_types_fa100_10t"
+
+[[plots.graphs]]
+type = "operation_types"
+group_by = "storage_provider"
+filters = ["num_tables==10", "fast_append_ratio==0.9"]
+output_suffix = "op_types_fa90_10t"
+
+[[plots.graphs]]
+type = "operation_types"
+group_by = "storage_provider"
+filters = ["num_tables==10", "fast_append_ratio==0.5"]
+output_suffix = "op_types_fa50_10t"
+
+# --- 20 tables ---
+
+[[plots.graphs]]
+type = "operation_types"
+group_by = "storage_provider"
+filters = ["num_tables==20", "fast_append_ratio==1.0"]
+output_suffix = "op_types_fa100_20t"
+
+[[plots.graphs]]
+type = "operation_types"
+group_by = "storage_provider"
+filters = ["num_tables==20", "fast_append_ratio==0.9"]
+output_suffix = "op_types_fa90_20t"
+
+[[plots.graphs]]
+type = "operation_types"
+group_by = "storage_provider"
+filters = ["num_tables==20", "fast_append_ratio==0.5"]
+output_suffix = "op_types_fa50_20t"
+
+# --- 50 tables ---
+
+[[plots.graphs]]
+type = "operation_types"
+group_by = "storage_provider"
+filters = ["num_tables==50", "fast_append_ratio==1.0"]
+output_suffix = "op_types_fa100_50t"
+
+[[plots.graphs]]
+type = "operation_types"
+group_by = "storage_provider"
+filters = ["num_tables==50", "fast_append_ratio==0.9"]
+output_suffix = "op_types_fa90_50t"
+
+[[plots.graphs]]
+type = "operation_types"
+group_by = "storage_provider"
+filters = ["num_tables==50", "fast_append_ratio==0.5"]
+output_suffix = "op_types_fa50_50t"
 
 # ===================================================================
 # Commit rate over time
