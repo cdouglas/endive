@@ -269,19 +269,20 @@ class CASCatalog(Catalog):
         intention: Optional[IntentionRecord] = None,
         partitions_written: Optional[Dict[int, FrozenSet[int]]] = None,
     ) -> Generator[float, None, CommitResult]:
-        # Single CAS round-trip
-        result = yield from self._storage.cas(
+        # Sample CAS latency from the storage provider
+        cas_gen = self._storage.cas(
             key="catalog_metadata",
             expected_version=expected_seq,
             size_bytes=100,
         )
-        latency = result.latency_ms
+        latency = next(cas_gen)
 
-        # Check CAS condition
+        # Request travels to server (half RTT)
+        yield latency / 2.0
+
+        # Server evaluates version condition and applies writes
         success = (self._seq == expected_seq)
-
         if success:
-            # Apply writes atomically
             for table_id, version in writes.items():
                 self._tables[table_id].version = version
             if partitions_written:
@@ -289,9 +290,11 @@ class CASCatalog(Catalog):
                     for pid in pids:
                         self._tables[table_id].partition_versions[pid] += 1
             self._seq += 1
-            return CommitResult(success=True, latency_ms=latency)
-        else:
-            return CommitResult(success=False, latency_ms=latency)
+
+        # Response travels back (remaining half RTT)
+        yield latency - latency / 2.0
+
+        return CommitResult(success=success, latency_ms=latency)
 
     @property
     def seq(self) -> int:
@@ -473,7 +476,12 @@ class InstantCatalog(Catalog):
         intention: Optional[IntentionRecord] = None,
         partitions_written: Optional[Dict[int, FrozenSet[int]]] = None,
     ) -> Generator[float, None, CommitResult]:
-        yield self._latency
+        half = self._latency / 2.0
+
+        # Request travels to server (half RTT)
+        yield half
+
+        # Server evaluates version condition and applies writes
         success = (self._seq == expected_seq)
         if success:
             for table_id, version in writes.items():
@@ -483,9 +491,11 @@ class InstantCatalog(Catalog):
                     for pid in pids:
                         self._tables[table_id].partition_versions[pid] += 1
             self._seq += 1
-            return CommitResult(success=True, latency_ms=self._latency)
-        else:
-            return CommitResult(success=False, latency_ms=self._latency)
+
+        # Response travels back (remaining half RTT)
+        yield self._latency - half
+
+        return CommitResult(success=success, latency_ms=self._latency)
 
     @property
     def seq(self) -> int:

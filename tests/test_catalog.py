@@ -393,6 +393,87 @@ class TestInstantCatalog:
 
 
 # ---------------------------------------------------------------------------
+# Half-RTT commit semantics
+# ---------------------------------------------------------------------------
+
+class TestHalfRTTCommit:
+    """CAS version check and seq increment happen at half-RTT (server-side)."""
+
+    def test_cas_two_yield_structure(self):
+        """CASCatalog.commit() yields twice, each ~half the CAS latency."""
+        storage = make_s3x_storage()
+        cat = CASCatalog(storage, 1, (1,))
+        gen = cat.commit(expected_seq=0, writes={0: 1})
+        first = step(gen)
+        second = step(gen)
+        assert first > 0
+        assert second > 0
+        total = first + second
+        assert abs(first - total / 2.0) < 1e-10
+
+    def test_instant_two_yield_structure(self):
+        """InstantCatalog.commit() yields twice, each exactly half the latency."""
+        cat = InstantCatalog(1, (1,), latency_ms=4.0)
+        gen = cat.commit(expected_seq=0, writes={0: 1})
+        first = step(gen)
+        second = step(gen)
+        assert first == 2.0
+        assert second == 2.0
+
+    def test_cas_seq_incremented_at_half_rtt(self):
+        """After first yield (half-RTT), server has applied the write."""
+        storage = make_instant_storage()
+        cat = CASCatalog(storage, 1, (1,))
+        gen = cat.commit(expected_seq=0, writes={0: 1})
+        assert cat.seq == 0
+        step(gen)           # request reaches server
+        gen.send(None)      # resume — server applies write
+        assert cat.seq == 1  # incremented at half-RTT
+
+    def test_instant_seq_incremented_at_half_rtt(self):
+        """InstantCatalog also increments seq at half-RTT."""
+        cat = InstantCatalog(1, (1,))
+        gen = cat.commit(expected_seq=0, writes={0: 1})
+        assert cat.seq == 0
+        step(gen)           # request reaches server
+        gen.send(None)      # resume — server applies write
+        assert cat.seq == 1
+
+    def test_cas_seq_unchanged_on_failure_at_half_rtt(self):
+        """Failed CAS does not increment seq at half-RTT."""
+        storage = make_instant_storage()
+        cat = CASCatalog(storage, 1, (1,))
+        exhaust(cat.commit(expected_seq=0, writes={0: 1}))
+        assert cat.seq == 1
+
+        gen = cat.commit(expected_seq=0, writes={0: 2})  # stale
+        step(gen)           # request reaches server
+        gen.send(None)      # resume — server rejects
+        assert cat.seq == 1  # unchanged
+
+    def test_instant_seq_unchanged_on_failure_at_half_rtt(self):
+        """Failed InstantCatalog commit does not increment seq at half-RTT."""
+        cat = InstantCatalog(1, (1,))
+        exhaust(cat.commit(expected_seq=0, writes={0: 1}))
+        assert cat.seq == 1
+
+        gen = cat.commit(expected_seq=0, writes={0: 2})  # stale
+        step(gen)
+        gen.send(None)
+        assert cat.seq == 1
+
+    def test_cas_total_latency_preserved(self):
+        """Total latency across both yields equals the sampled CAS latency."""
+        storage = make_s3x_storage()
+        cat = CASCatalog(storage, 1, (1,))
+        gen = cat.commit(expected_seq=0, writes={0: 1})
+        first = step(gen)
+        second = step(gen)
+        result = exhaust(gen)
+        assert abs(first + second - result.latency_ms) < 1e-10
+
+
+# ---------------------------------------------------------------------------
 # Invariant: seq never skips or decreases
 # ---------------------------------------------------------------------------
 
