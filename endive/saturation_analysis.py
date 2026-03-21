@@ -2999,6 +2999,22 @@ def generate_operation_type_plots(base_dir: str, pattern: str, output_dir: str,
     # Format group label for legend
     group_label = group_by.replace("_", " ").title()
 
+    # Build descriptive title from data
+    fa_ratios = df["fa_ratio"].unique() if "fa_ratio" in df.columns else []
+    num_tables_vals = df["num_tables"].unique() if "num_tables" in df.columns else []
+    if len(fa_ratios) == 1:
+        fa_pct = int(round(fa_ratios[0] * 100))
+        vo_pct = 100 - fa_pct
+        ratio_str = f"({fa_pct}/{vo_pct}) FA/VO"
+    else:
+        ratio_str = "FA/VO"
+    if len(num_tables_vals) == 1:
+        nt = int(num_tables_vals[0])
+        table_str = "Single-Table" if nt == 1 else f"{nt}-Table"
+    else:
+        table_str = "Multi-Table"
+    plot_title = f"{ratio_str} {table_str} {group_label} Metrics"
+
     # 2x2 grid: [FA success, VO success] / [FA latency, VO latency]
     fig, axes = plt.subplots(2, 2, figsize=figsize)
 
@@ -3046,8 +3062,7 @@ def generate_operation_type_plots(base_dir: str, pattern: str, output_dir: str,
         if has_data:
             ax.legend(fontsize=8, loc="best")
 
-    plt.suptitle(f"Per-Operation-Type Metrics vs Load (grouped by {group_label})",
-                 fontsize=14, fontweight="bold")
+    plt.suptitle(plot_title, fontsize=14, fontweight="bold")
     plt.tight_layout()
     output_path = os.path.join(output_dir, "op_type_vs_load.png")
     plt.savefig(output_path, dpi=dpi)
