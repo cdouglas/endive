@@ -6,6 +6,7 @@ across disk directories and consolidated parquet files.
 """
 from __future__ import annotations
 
+import json
 import sys
 import time
 import tomllib
@@ -394,7 +395,268 @@ class ExperimentStore:
 
 
 # ---------------------------------------------------------------------------
-# CLI entry point (placeholder for subcommands)
+# list subcommand
+# ---------------------------------------------------------------------------
+
+def cmd_list(args) -> None:
+    """List experiments with optional filtering and output modes."""
+    store = ExperimentStore(base_dir=args.dir)
+    store.scan()
+
+    entries = store.get_entries(
+        group=args.group if args.group else None,
+        pattern=args.pattern,
+        exclude=args.exclude,
+    )
+    if args.stale:
+        entries = [e for e in entries if e.is_stale]
+
+    if args.json:
+        _list_json(entries)
+    elif args.physical:
+        _list_physical(entries)
+    elif args.verbose:
+        _list_verbose(entries)
+    else:
+        _list_default(entries)
+
+
+def _synthesize_status(label_entries: list[ExperimentEntry]) -> str:
+    """Synthesize a single status string from entries sharing a label."""
+    if any(e.is_stale for e in label_entries):
+        return "stale"
+    if any(e.seeds_active for e in label_entries):
+        return "active"
+    if any(e.seeds_crashed for e in label_entries):
+        return "crashed"
+    max_seeds = max(e.seed_count for e in label_entries) if label_entries else 0
+    if max_seeds > 0 and any(e.seed_count < max_seeds for e in label_entries):
+        return "incomplete"
+    return ""
+
+
+def _aggregate_source(label_entries: list[ExperimentEntry]) -> str:
+    """Aggregate source across entries for a label."""
+    sources = {e.source for e in label_entries}
+    if "both" in sources:
+        return "both"
+    if len(sources) > 1:
+        return "both"
+    return sources.pop() if sources else "disk"
+
+
+def _list_default(entries: list[ExperimentEntry]) -> None:
+    """Per-label aggregation table."""
+    if not entries:
+        print("No experiments found.")
+        return
+
+    # Group by label
+    by_label: dict[str, list[ExperimentEntry]] = defaultdict(list)
+    for e in entries:
+        by_label[e.label].append(e)
+
+    # Build rows
+    rows: list[tuple[str, str, int, str, str, str, str]] = []
+    total_seeds = 0
+    total_configs = 0
+    total_bytes = 0
+
+    for label in sorted(by_label, key=lambda l: (by_label[l][0].group, l)):
+        label_entries = by_label[label]
+        group = label_entries[0].group
+        n_configs = len(label_entries)
+        all_seeds: set[int] = set()
+        for e in label_entries:
+            all_seeds |= e.all_seeds
+        max_per_hash = max(e.seed_count for e in label_entries)
+        seeds_str = f"{len(all_seeds)}/{max_per_hash}"
+        source = _aggregate_source(label_entries)
+        disk_bytes = sum(e.disk_bytes for e in label_entries)
+        size_str = format_bytes(disk_bytes) if disk_bytes > 0 else "\u2014"
+        status = _synthesize_status(label_entries)
+
+        rows.append((group, label, n_configs, seeds_str, source, size_str, status))
+        total_seeds += len(all_seeds)
+        total_configs += n_configs
+        total_bytes += disk_bytes
+
+    # Compute column widths
+    headers = ("Group", "Label", "Configs", "Seeds", "Source", "Size", "Status")
+    w_group = max(len(headers[0]), max(len(r[0]) for r in rows))
+    w_label = max(len(headers[1]), max(len(r[1]) for r in rows))
+    w_configs = max(len(headers[2]), max(len(str(r[2])) for r in rows))
+    w_seeds = max(len(headers[3]), max(len(r[3]) for r in rows))
+    w_source = max(len(headers[4]), max(len(r[4]) for r in rows))
+    w_size = max(len(headers[5]), max(len(r[5]) for r in rows))
+
+    # Print header
+    hdr = (
+        f"{headers[0]:<{w_group}}  {headers[1]:<{w_label}}  "
+        f"{headers[2]:>{w_configs}}  {headers[3]:>{w_seeds}}  "
+        f"{headers[4]:<{w_source}}  {headers[5]:>{w_size}}  {headers[6]}"
+    )
+    print()
+    print(hdr)
+
+    # Print rows
+    for group, label, n_configs, seeds_str, source, size_str, status in rows:
+        line = (
+            f"{group:<{w_group}}  {label:<{w_label}}  "
+            f"{n_configs:>{w_configs}}  {seeds_str:>{w_seeds}}  "
+            f"{source:<{w_source}}  {size_str:>{w_size}}  {status}"
+        )
+        print(line)
+
+    # Summary
+    n_labels = len(by_label)
+    print(f"\n{n_labels} labels, {total_configs} configs, "
+          f"{total_seeds} seeds ({format_bytes(total_bytes)} on disk)")
+
+
+def _list_verbose(entries: list[ExperimentEntry]) -> None:
+    """Per-hash detail table."""
+    if not entries:
+        print("No experiments found.")
+        return
+
+    # Build rows
+    rows: list[tuple[str, str, str, str, str, str, str]] = []
+    total_seeds = 0
+    total_bytes = 0
+
+    for e in entries:
+        nd = len(e.seeds_disk)
+        nc = len(e.seeds_consolidated)
+        nt = e.seed_count
+        seeds_str = f"{nd}d + {nc}c ({nt})"
+        if e.seeds_active:
+            seeds_str += f"  +{len(e.seeds_active)} active"
+        if e.seeds_crashed:
+            seeds_str += f"  +{len(e.seeds_crashed)} crashed"
+        size_str = format_bytes(e.disk_bytes) if e.disk_bytes > 0 else "\u2014"
+        status = "stale" if e.is_stale else ""
+        rows.append((e.group, e.label, e.exp_hash[:8], seeds_str, e.source, size_str, status))
+        total_seeds += nt
+        total_bytes += e.disk_bytes
+
+    headers = ("Group", "Label", "Hash", "Seeds", "Source", "Size", "Status")
+    w_group = max(len(headers[0]), max(len(r[0]) for r in rows))
+    w_label = max(len(headers[1]), max(len(r[1]) for r in rows))
+    w_hash = max(len(headers[2]), 8)
+    w_seeds = max(len(headers[3]), max(len(r[3]) for r in rows))
+    w_source = max(len(headers[4]), max(len(r[4]) for r in rows))
+    w_size = max(len(headers[5]), max(len(r[5]) for r in rows))
+
+    hdr = (
+        f"{headers[0]:<{w_group}}  {headers[1]:<{w_label}}  "
+        f"{headers[2]:<{w_hash}}  {headers[3]:<{w_seeds}}  "
+        f"{headers[4]:<{w_source}}  {headers[5]:>{w_size}}  {headers[6]}"
+    )
+    print()
+    print(hdr)
+
+    for group, label, h, seeds_str, source, size_str, status in rows:
+        line = (
+            f"{group:<{w_group}}  {label:<{w_label}}  "
+            f"{h:<{w_hash}}  {seeds_str:<{w_seeds}}  "
+            f"{source:<{w_source}}  {size_str:>{w_size}}  {status}"
+        )
+        print(line)
+
+    n_configs = len(entries)
+    print(f"\n{n_configs} configs, {total_seeds} seeds ({format_bytes(total_bytes)} on disk)")
+
+
+def _list_physical(entries: list[ExperimentEntry]) -> None:
+    """Per-directory rows (disk-only)."""
+    disk_entries = [e for e in entries if e.disk_dir is not None]
+    if not disk_entries:
+        print("No disk directories found.")
+        return
+
+    rows: list[tuple[str, int, int, int, int, str, str]] = []
+    total_bytes = 0
+
+    for e in disk_entries:
+        dir_name = e.disk_dir.name
+        n_seeds = len(e.seeds_disk)
+        n_active = len(e.seeds_active)
+        n_crashed = len(e.seeds_crashed)
+        n_empty = len(e.seeds_empty)
+        size_str = format_bytes(e.disk_bytes) if e.disk_bytes > 0 else "\u2014"
+        status = "stale" if e.is_stale else ""
+        rows.append((dir_name, n_seeds, n_active, n_crashed, n_empty, size_str, status))
+        total_bytes += e.disk_bytes
+
+    headers = ("Directory", "Seeds", "Active", "Crashed", "Empty", "Size", "Status")
+    w_dir = max(len(headers[0]), max(len(r[0]) for r in rows))
+    w_seeds = max(len(headers[1]), max(len(str(r[1])) for r in rows))
+    w_active = max(len(headers[2]), max(len(str(r[2])) for r in rows))
+    w_crashed = max(len(headers[3]), max(len(str(r[3])) for r in rows))
+    w_empty = max(len(headers[4]), max(len(str(r[4])) for r in rows))
+    w_size = max(len(headers[5]), max(len(r[5]) for r in rows))
+
+    hdr = (
+        f"{headers[0]:<{w_dir}}  {headers[1]:>{w_seeds}}  "
+        f"{headers[2]:>{w_active}}  {headers[3]:>{w_crashed}}  "
+        f"{headers[4]:>{w_empty}}  {headers[5]:>{w_size}}  {headers[6]}"
+    )
+    print()
+    print(hdr)
+
+    for dir_name, n_seeds, n_active, n_crashed, n_empty, size_str, status in rows:
+        line = (
+            f"{dir_name:<{w_dir}}  {n_seeds:>{w_seeds}}  "
+            f"{n_active:>{w_active}}  {n_crashed:>{w_crashed}}  "
+            f"{n_empty:>{w_empty}}  {size_str:>{w_size}}  {status}"
+        )
+        print(line)
+
+    n_dirs = len(disk_entries)
+    print(f"\n{n_dirs} directories ({format_bytes(total_bytes)})")
+
+
+def _list_json(entries: list[ExperimentEntry]) -> None:
+    """Structured JSON output."""
+    entry_dicts = []
+    total_seeds = 0
+    total_bytes = 0
+    labels_seen: set[str] = set()
+
+    for e in entries:
+        entry_dicts.append({
+            "label": e.label,
+            "exp_hash": e.exp_hash,
+            "group": e.group,
+            "source": e.source,
+            "seeds_disk": len(e.seeds_disk),
+            "seeds_consolidated": len(e.seeds_consolidated),
+            "seeds_total": e.seed_count,
+            "seeds_active": len(e.seeds_active),
+            "seeds_crashed": len(e.seeds_crashed),
+            "seeds_empty": len(e.seeds_empty),
+            "disk_bytes": e.disk_bytes,
+            "is_stale": e.is_stale,
+        })
+        total_seeds += e.seed_count
+        total_bytes += e.disk_bytes
+        labels_seen.add(e.label)
+
+    output = {
+        "entries": entry_dicts,
+        "summary": {
+            "labels": len(labels_seen),
+            "configs": len(entries),
+            "seeds": total_seeds,
+            "disk_bytes": total_bytes,
+        },
+    }
+    print(json.dumps(output, indent=2))
+
+
+# ---------------------------------------------------------------------------
+# CLI entry point
 # ---------------------------------------------------------------------------
 
 def main() -> None:
@@ -407,9 +669,18 @@ def main() -> None:
     subparsers = parser.add_subparsers(dest="command")
     subparsers.required = True
 
-    # Placeholder subcommands — will be implemented in dependent issues
+    # list subcommand
     sub_list = subparsers.add_parser("list", help="List experiments")
-    sub_list.set_defaults(func=lambda _args: print("list: not yet implemented"))
+    sub_list.add_argument("--group", action="append", help="Filter by group (repeatable)")
+    sub_list.add_argument("--pattern", help="fnmatch pattern on label")
+    sub_list.add_argument("--exclude", help="fnmatch pattern to exclude")
+    mode = sub_list.add_mutually_exclusive_group()
+    mode.add_argument("--verbose", "-v", action="store_true", help="Per-hash detail")
+    mode.add_argument("--physical", action="store_true", help="Raw directory layout")
+    mode.add_argument("--json", action="store_true", help="JSON output")
+    sub_list.add_argument("--stale", action="store_true", help="Only stale experiments")
+    sub_list.add_argument("--dir", default="experiments", help="Base directory")
+    sub_list.set_defaults(func=cmd_list)
 
     sub_compact = subparsers.add_parser("compact", help="Compact experiments")
     sub_compact.set_defaults(func=lambda _args: print("compact: not yet implemented"))
