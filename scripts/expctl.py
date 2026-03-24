@@ -754,6 +754,173 @@ def cmd_complete(args) -> None:
 
 
 # ---------------------------------------------------------------------------
+# compact subcommand
+# ---------------------------------------------------------------------------
+
+def cmd_compact(args) -> None:
+    """Compact experiment data into consolidated parquet files."""
+    from concurrent.futures import ProcessPoolExecutor, as_completed
+
+    from consolidate import (
+        _experiment_sort_key,
+        scan_experiments,
+    )
+
+    if args.destructive and args.verify:
+        print("Error: --destructive cannot be combined with --verify")
+        sys.exit(1)
+
+    # Safety check: refuse if active seeds
+    store = ExperimentStore(base_dir=args.dir)
+    store.scan()
+    entries = store.get_entries(
+        group=args.group if args.group else None,
+        pattern=args.pattern,
+        exclude=args.exclude,
+    )
+    active = [(e.label, e.exp_hash[:8], len(e.seeds_active))
+              for e in entries if e.seeds_active]
+    if active:
+        print("Refusing to compact: active seeds detected:")
+        for label, h, n in active:
+            print(f"  {label}-{h}: {n} active")
+        sys.exit(1)
+
+    # Scan and filter experiments
+    all_experiments = scan_experiments(args.dir)
+    allowed = {(e.label, e.exp_hash) for e in entries}
+    experiments = [e for e in all_experiments if (e[0], e[1]) in allowed]
+    experiments.sort(key=lambda e: _experiment_sort_key(*e))
+
+    if not experiments:
+        print("No experiments to compact.")
+        return
+
+    total_seeds = sum(len(s) for _, _, _, s in experiments)
+    print(f"Found {len(experiments)} experiments, {total_seeds} seeds")
+
+    # Choose mode: partition when filtering subset, single-file otherwise
+    is_subset = len(experiments) < len(all_experiments)
+    if args.partition or is_subset:
+        _compact_partitioned(experiments, args)
+    else:
+        _compact_incremental(experiments, args)
+
+    # Verify if requested — scoped to compacted experiments only
+    if args.verify:
+        import random
+
+        from consolidate import _verify_one_sample
+
+        partitioned = args.partition or is_subset
+        consolidated_path = str(Path(args.dir) / "consolidated.parquet")
+
+        # Collect result files from compacted experiments only
+        all_files = []
+        for _, _, exp_dir, seed_dirs in experiments:
+            for sd in seed_dirs:
+                rp = sd / "results.parquet"
+                if rp.exists():
+                    all_files.append(rp)
+
+        sample = random.sample(all_files, min(args.verify_sample, len(all_files)))
+        print(f"\nVerifying {len(sample)} / {len(all_files)} files...")
+        passed = failed = 0
+        for fp in sample:
+            try:
+                result = _verify_one_sample(consolidated_path, args.dir, fp, partitioned)
+                if result is None:
+                    continue
+                if result[0] == "pass":
+                    passed += 1
+                else:
+                    failed += 1
+                    if result[1]:
+                        print(f"  {result[1]}")
+            except Exception as exc:
+                print(f"  ERROR: {fp.parent.parent.name}/{fp.parent.name}: {exc}")
+                failed += 1
+        print(f"Verification: {passed} passed, {failed} failed")
+
+
+def _compact_incremental(experiments, args) -> None:
+    """Single-file consolidation."""
+    from consolidate import (
+        _consolidate_experiments,
+        discover_schema,
+    )
+
+    output_path = str(Path(args.dir) / "consolidated.parquet")
+    print(f"Writing {output_path} ({args.compression}, level {args.compression_level})")
+
+    schema = discover_schema(experiments)
+    total_rows, deleted_dirs, deleted_bytes = _consolidate_experiments(
+        experiments, output_path, schema,
+        args.compression, args.compression_level, args.destructive,
+    )
+
+    file_size = Path(output_path).stat().st_size
+    print(f"Wrote {total_rows:,} rows ({format_bytes(file_size)})")
+    if args.destructive and deleted_dirs:
+        print(f"Deleted {deleted_dirs} directories ({format_bytes(deleted_bytes)} freed)")
+
+
+def _compact_partitioned(experiments, args) -> None:
+    """Per-label partitioned consolidation."""
+    from concurrent.futures import ProcessPoolExecutor, as_completed
+
+    from consolidate import _consolidate_group
+
+    # Group by label
+    groups: dict[str, list] = defaultdict(list)
+    for exp_name, exp_hash, exp_dir, seed_dirs in experiments:
+        groups[exp_name].append((exp_name, exp_hash, exp_dir, seed_dirs))
+
+    print(f"Compacting {len(groups)} labels in partitioned mode")
+
+    # Build work items — convert Paths to strings for pickling
+    work_items = []
+    for group_name in sorted(groups):
+        output_path = str(Path(args.dir) / f"{group_name}.parquet")
+        tuples = [
+            (n, h, str(d), [str(s) for s in seeds])
+            for n, h, d, seeds in groups[group_name]
+        ]
+        work_items.append((
+            group_name, tuples, output_path,
+            args.compression, args.compression_level, args.destructive,
+        ))
+
+    total_rows = 0
+    total_deleted = 0
+    total_freed = 0
+    failures = []
+
+    with ProcessPoolExecutor(max_workers=args.max_workers) as executor:
+        futures = {
+            executor.submit(_consolidate_group, item): item[0]
+            for item in work_items
+        }
+        for future in as_completed(futures):
+            name, rows, deleted, freed, out_path, error = future.result()
+            if error:
+                print(f"  FAIL {name}: {error}")
+                failures.append(name)
+            else:
+                file_size = Path(out_path).stat().st_size
+                print(f"  {name}: {rows:,} rows ({format_bytes(file_size)})")
+                total_rows += rows
+                total_deleted += deleted
+                total_freed += freed
+
+    print(f"\nWrote {total_rows:,} rows across {len(groups) - len(failures)} labels")
+    if failures:
+        print(f"Failed: {', '.join(failures)}")
+    if args.destructive and total_deleted:
+        print(f"Deleted {total_deleted} directories ({format_bytes(total_freed)} freed)")
+
+
+# ---------------------------------------------------------------------------
 # gc subcommand
 # ---------------------------------------------------------------------------
 
@@ -863,8 +1030,22 @@ def main() -> None:
     sub_list.add_argument("--dir", default="experiments", help="Base directory")
     sub_list.set_defaults(func=cmd_list)
 
-    sub_compact = subparsers.add_parser("compact", help="Compact experiments")
-    sub_compact.set_defaults(func=lambda _args: print("compact: not yet implemented"))
+    sub_compact = subparsers.add_parser("compact", help="Compact experiments to parquet")
+    sub_compact.add_argument("--group", action="append", help="Filter by group (repeatable)")
+    sub_compact.add_argument("--pattern", help="fnmatch pattern on label")
+    sub_compact.add_argument("--exclude", help="fnmatch pattern to exclude")
+    sub_compact.add_argument("--partition", action="store_true",
+                             help="Per-label parquet files (auto when filtering)")
+    sub_compact.add_argument("--destructive", action="store_true",
+                             help="Delete source dirs after compaction")
+    sub_compact.add_argument("--verify", action="store_true",
+                             help="Verify after compaction")
+    sub_compact.add_argument("--verify-sample", type=int, default=20)
+    sub_compact.add_argument("--compression", default="zstd", choices=["zstd", "snappy"])
+    sub_compact.add_argument("--compression-level", type=int, default=3)
+    sub_compact.add_argument("--max-workers", type=int, default=None)
+    sub_compact.add_argument("--dir", default="experiments", help="Base directory")
+    sub_compact.set_defaults(func=cmd_compact)
 
     sub_gc = subparsers.add_parser("gc", help="Garbage collect experiments")
     sub_gc.add_argument("--group", action="append", help="Filter by group (repeatable)")
