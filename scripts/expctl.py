@@ -422,17 +422,29 @@ def cmd_list(args) -> None:
 
 
 def _synthesize_status(label_entries: list[ExperimentEntry]) -> str:
-    """Synthesize a single status string from entries sharing a label."""
+    """Synthesize status flags from entries sharing a label.
+
+    Multiple flags can appear (e.g. "stale (a1b2c3), incomplete").
+    """
+    flags: list[str] = []
     if any(e.is_stale for e in label_entries):
-        return "stale"
+        code_versions = {
+            e.code_version[:7]
+            for e in label_entries
+            if e.is_stale and e.code_version
+        }
+        if code_versions:
+            flags.append(f"stale ({', '.join(sorted(code_versions))})")
+        else:
+            flags.append("stale")
     if any(e.seeds_active for e in label_entries):
-        return "active"
+        flags.append("active")
     if any(e.seeds_crashed for e in label_entries):
-        return "crashed"
+        flags.append("crashed")
     max_seeds = max(e.seed_count for e in label_entries) if label_entries else 0
     if max_seeds > 0 and any(e.seed_count < max_seeds for e in label_entries):
-        return "incomplete"
-    return ""
+        flags.append("incomplete")
+    return ", ".join(flags)
 
 
 def _aggregate_source(label_entries: list[ExperimentEntry]) -> str:
@@ -535,7 +547,12 @@ def _list_verbose(entries: list[ExperimentEntry]) -> None:
         if e.seeds_crashed:
             seeds_str += f"  +{len(e.seeds_crashed)} crashed"
         size_str = format_bytes(e.disk_bytes) if e.disk_bytes > 0 else "\u2014"
-        status = "stale" if e.is_stale else ""
+        if e.is_stale and e.code_version:
+            status = f"stale ({e.code_version[:7]})"
+        elif e.is_stale:
+            status = "stale"
+        else:
+            status = ""
         rows.append((e.group, e.label, e.exp_hash[:8], seeds_str, e.source, size_str, status))
         total_seeds += nt
         total_bytes += e.disk_bytes
@@ -585,7 +602,12 @@ def _list_physical(entries: list[ExperimentEntry]) -> None:
         n_crashed = len(e.seeds_crashed)
         n_empty = len(e.seeds_empty)
         size_str = format_bytes(e.disk_bytes) if e.disk_bytes > 0 else "\u2014"
-        status = "stale" if e.is_stale else ""
+        if e.is_stale and e.code_version:
+            status = f"stale ({e.code_version[:7]})"
+        elif e.is_stale:
+            status = "stale"
+        else:
+            status = ""
         rows.append((dir_name, n_seeds, n_active, n_crashed, n_empty, size_str, status))
         total_bytes += e.disk_bytes
 
