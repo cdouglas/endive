@@ -678,6 +678,82 @@ def _list_json(entries: list[ExperimentEntry]) -> None:
 
 
 # ---------------------------------------------------------------------------
+# complete subcommand
+# ---------------------------------------------------------------------------
+
+def cmd_complete(args) -> None:
+    """Find and execute missing experiment runs."""
+    from concurrent.futures import ProcessPoolExecutor, as_completed
+
+    from run_all_experiments import (
+        EXPERIMENT_GROUPS,
+        check_experiment_exists,
+        generate_all_runs,
+        run_single_experiment,
+    )
+
+    groups = args.group if args.group else list(EXPERIMENT_GROUPS.keys())
+    all_runs = generate_all_runs(groups, args.seeds)
+    missing = [r for r in all_runs if not check_experiment_exists(r)]
+
+    # Aggregate by label
+    by_label: dict[str, dict[str, int]] = defaultdict(lambda: {"expected": 0, "missing": 0})
+    for r in all_runs:
+        by_label[r.label]["expected"] += 1
+    for r in missing:
+        by_label[r.label]["missing"] += 1
+
+    # Print summary table
+    total_expected = len(all_runs)
+    total_missing = len(missing)
+    total_existing = total_expected - total_missing
+
+    if by_label:
+        w_label = max(len("Label"), max(len(l) for l in by_label))
+        print()
+        print(f"{'Label':<{w_label}}  {'Expected':>8}  {'Existing':>8}  {'Missing':>7}")
+        for label in sorted(by_label):
+            info = by_label[label]
+            existing = info["expected"] - info["missing"]
+            print(
+                f"{label:<{w_label}}  {info['expected']:>8}  "
+                f"{existing:>8}  {info['missing']:>7}"
+            )
+        n_labels = len(by_label)
+        print(f"\n{n_labels} labels, {total_expected} expected, "
+              f"{total_existing} existing, {total_missing} missing")
+
+    if not missing:
+        print("\nAll runs complete!")
+        return
+
+    if args.dry_run:
+        return
+
+    # Execute missing runs
+    print(f"\nExecuting {total_missing} missing runs "
+          f"with {args.parallel} workers...")
+    completed = 0
+    failed = 0
+
+    with ProcessPoolExecutor(max_workers=args.parallel) as executor:
+        futures = {
+            executor.submit(run_single_experiment, r): r for r in missing
+        }
+        for future in as_completed(futures):
+            run_id, success, message = future.result()
+            if success:
+                completed += 1
+            else:
+                failed += 1
+                print(f"  FAIL: {run_id}: {message[:100]}")
+            done = completed + failed
+            print(f"[{done}/{total_missing}] ok={completed} fail={failed}")
+
+    print(f"\nComplete: {completed} ok, {failed} failed")
+
+
+# ---------------------------------------------------------------------------
 # CLI entry point
 # ---------------------------------------------------------------------------
 
@@ -711,7 +787,12 @@ def main() -> None:
     sub_gc.set_defaults(func=lambda _args: print("gc: not yet implemented"))
 
     sub_complete = subparsers.add_parser("complete", help="Complete missing seeds")
-    sub_complete.set_defaults(func=lambda _args: print("complete: not yet implemented"))
+    sub_complete.add_argument("--group", action="append", help="Filter by group (repeatable)")
+    sub_complete.add_argument("--seeds", type=int, required=True, help="Seeds per configuration")
+    sub_complete.add_argument("--parallel", type=int, default=4, help="Parallel workers")
+    sub_complete.add_argument("--dry-run", action="store_true", help="Report missing only")
+    sub_complete.add_argument("--dir", default="experiments", help="Base directory")
+    sub_complete.set_defaults(func=cmd_complete)
 
     args = parser.parse_args()
     args.func(args)
