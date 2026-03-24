@@ -754,6 +754,89 @@ def cmd_complete(args) -> None:
 
 
 # ---------------------------------------------------------------------------
+# gc subcommand
+# ---------------------------------------------------------------------------
+
+def cmd_gc(args) -> None:
+    """Garbage collect stale and incomplete experiment data."""
+    import shutil
+
+    store = ExperimentStore(base_dir=args.dir)
+    store.scan()
+
+    entries = store.get_entries(
+        group=args.group if args.group else None,
+        pattern=args.pattern,
+        exclude=args.exclude,
+    )
+
+    # Default: both modes if neither flag specified
+    do_stale = args.stale or not args.incomplete
+    do_incomplete = args.incomplete or not args.stale
+
+    targets: list[tuple[str, Path, int]] = []  # (reason, path, bytes)
+
+    for e in entries:
+        if e.disk_dir is None:
+            continue
+
+        # Stale: entire directory has hash mismatch
+        if do_stale and e.is_stale:
+            targets.append(("stale", e.disk_dir, e.disk_bytes))
+            continue  # whole dir; skip per-seed checks
+
+        # Incomplete: empty or crashed seed dirs (never active)
+        if do_incomplete:
+            for seed in sorted(e.seeds_crashed):
+                seed_dir = e.disk_dir / str(seed)
+                if seed_dir.is_dir():
+                    try:
+                        sz = sum(f.stat().st_size for f in seed_dir.rglob("*") if f.is_file())
+                    except OSError:
+                        sz = 0
+                    targets.append(("crashed", seed_dir, sz))
+            for seed in sorted(e.seeds_empty):
+                seed_dir = e.disk_dir / str(seed)
+                if seed_dir.is_dir():
+                    targets.append(("empty", seed_dir, 0))
+
+    if not targets:
+        print("Nothing to clean up.")
+        return
+
+    # Print what would be deleted
+    total_bytes = 0
+    w_reason = max(len("Reason"), max(len(t[0]) for t in targets))
+    w_path = max(len("Path"), max(len(str(t[1])) for t in targets))
+
+    print()
+    print(f"{'Reason':<{w_reason}}  {'Path':<{w_path}}  {'Size':>10}")
+    for reason, path, sz in targets:
+        print(f"{reason:<{w_reason}}  {str(path):<{w_path}}  {format_bytes(sz):>10}")
+        total_bytes += sz
+
+    print(f"\n{len(targets)} targets ({format_bytes(total_bytes)})")
+
+    if not args.force:
+        print("\nDry run. Use --force to delete.")
+        return
+
+    # Execute deletions
+    deleted = 0
+    freed = 0
+    for reason, path, sz in targets:
+        try:
+            if path.is_dir():
+                shutil.rmtree(path)
+            deleted += 1
+            freed += sz
+        except OSError as exc:
+            print(f"  ERROR: {path}: {exc}")
+
+    print(f"\nDeleted {deleted}/{len(targets)} ({format_bytes(freed)} freed)")
+
+
+# ---------------------------------------------------------------------------
 # CLI entry point
 # ---------------------------------------------------------------------------
 
@@ -784,7 +867,14 @@ def main() -> None:
     sub_compact.set_defaults(func=lambda _args: print("compact: not yet implemented"))
 
     sub_gc = subparsers.add_parser("gc", help="Garbage collect experiments")
-    sub_gc.set_defaults(func=lambda _args: print("gc: not yet implemented"))
+    sub_gc.add_argument("--group", action="append", help="Filter by group (repeatable)")
+    sub_gc.add_argument("--pattern", help="fnmatch pattern on label")
+    sub_gc.add_argument("--exclude", help="fnmatch pattern to exclude")
+    sub_gc.add_argument("--stale", action="store_true", help="Remove stale experiment dirs")
+    sub_gc.add_argument("--incomplete", action="store_true", help="Remove empty/crashed seed dirs")
+    sub_gc.add_argument("--force", action="store_true", help="Actually delete (default is dry run)")
+    sub_gc.add_argument("--dir", default="experiments", help="Base directory")
+    sub_gc.set_defaults(func=cmd_gc)
 
     sub_complete = subparsers.add_parser("complete", help="Complete missing seeds")
     sub_complete.add_argument("--group", action="append", help="Filter by group (repeatable)")
