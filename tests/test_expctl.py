@@ -1,10 +1,12 @@
-"""Tests for scripts/expctl.py — ExperimentStore core."""
+"""Tests for scripts/expctl.py — ExperimentStore core and subcommands."""
 from __future__ import annotations
 
 import json
 import sys
 import time
 import tomllib
+from argparse import Namespace
+from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
 
@@ -20,7 +22,16 @@ if str(_PROJECT_ROOT / "scripts") not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT / "scripts"))
 
 from endive.config import compute_experiment_hash
-from scripts.expctl import ExperimentEntry, ExperimentStore, format_bytes, _build_label_to_group
+from scripts.expctl import (
+    ExperimentEntry,
+    ExperimentStore,
+    _aggregate_source,
+    _build_label_to_group,
+    _synthesize_status,
+    cmd_gc,
+    cmd_list,
+    format_bytes,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -600,3 +611,347 @@ class TestFullScan:
         assert entry.seeds_active == {50}
         assert entry.seeds_crashed == {60}
         assert entry.all_seeds == {42, 43}  # active/crashed/empty not in all_seeds
+
+
+# ---------------------------------------------------------------------------
+# Unit tests: _synthesize_status and _aggregate_source
+# ---------------------------------------------------------------------------
+
+class TestSynthesizeStatus:
+    def _entry(self, **kwargs):
+        defaults = dict(
+            label="test", exp_hash="aabbccdd", group="g",
+            source="disk", disk_dir=None, config=None,
+        )
+        defaults.update(kwargs)
+        return ExperimentEntry(**defaults)
+
+    def test_all_clean(self):
+        entries = [self._entry(seeds_disk={1, 2, 3})]
+        assert _synthesize_status(entries) == ""
+
+    def test_stale_with_code_version(self):
+        entries = [self._entry(is_stale=True, code_version="abcdef1234567890")]
+        status = _synthesize_status(entries)
+        assert "stale" in status
+        assert "abcdef1" in status
+
+    def test_stale_without_code_version(self):
+        entries = [self._entry(is_stale=True)]
+        assert _synthesize_status(entries) == "stale"
+
+    def test_active(self):
+        entries = [self._entry(seeds_active={50})]
+        assert "active" in _synthesize_status(entries)
+
+    def test_crashed(self):
+        entries = [self._entry(seeds_crashed={60})]
+        assert "crashed" in _synthesize_status(entries)
+
+    def test_incomplete(self):
+        entries = [
+            self._entry(seeds_disk={1, 2, 3}),
+            self._entry(exp_hash="11223344", seeds_disk={1, 2}),
+        ]
+        assert "incomplete" in _synthesize_status(entries)
+
+    def test_multiple_flags(self):
+        """Stale + incomplete should both appear."""
+        entries = [
+            self._entry(is_stale=True, seeds_disk={1, 2, 3}),
+            self._entry(exp_hash="11223344", is_stale=True, seeds_disk={1}),
+        ]
+        status = _synthesize_status(entries)
+        assert "stale" in status
+        assert "incomplete" in status
+
+
+class TestAggregateSource:
+    def _entry(self, source):
+        return ExperimentEntry(
+            label="t", exp_hash="aa", group="g",
+            source=source, disk_dir=None, config=None,
+        )
+
+    def test_all_disk(self):
+        assert _aggregate_source([self._entry("disk")]) == "disk"
+
+    def test_all_consolidated(self):
+        assert _aggregate_source([self._entry("consolidated")]) == "consolidated"
+
+    def test_mixed_sources(self):
+        entries = [self._entry("disk"), self._entry("consolidated")]
+        assert _aggregate_source(entries) == "both"
+
+    def test_any_both(self):
+        entries = [self._entry("disk"), self._entry("both")]
+        assert _aggregate_source(entries) == "both"
+
+
+# ---------------------------------------------------------------------------
+# Integration: cmd_list
+# ---------------------------------------------------------------------------
+
+class TestCmdList:
+    def _run_list(self, tmp_path, capsys, mock_groups, **overrides):
+        defaults = dict(
+            dir=str(tmp_path), group=None, pattern=None, exclude=None,
+            verbose=False, physical=False, json=False, stale=False,
+        )
+        defaults.update(overrides)
+        cmd_list(Namespace(**defaults))
+        return capsys.readouterr().out
+
+    def test_default_output(self, tmp_path, capsys, mock_groups):
+        _make_experiment(tmp_path, "exp1_fa_baseline", "aabbccdd", seeds=[42, 43])
+        _make_experiment(tmp_path, "exp2_mix_heatmap", "55667788", seeds=[42])
+        out = self._run_list(tmp_path, capsys, mock_groups)
+        assert "exp1_fa_baseline" in out
+        assert "exp2_mix_heatmap" in out
+        assert "2 labels" in out
+
+    def test_verbose_output(self, tmp_path, capsys, mock_groups):
+        _make_experiment(tmp_path, "exp1_fa_baseline", "aabbccdd", seeds=[42])
+        out = self._run_list(tmp_path, capsys, mock_groups, verbose=True)
+        assert "aabbccdd" in out
+        assert "1d + 0c (1)" in out
+
+    def test_physical_output(self, tmp_path, capsys, mock_groups):
+        _make_experiment(tmp_path, "exp1_fa_baseline", "aabbccdd", seeds=[42])
+        out = self._run_list(tmp_path, capsys, mock_groups, physical=True)
+        assert "exp1_fa_baseline-aabbccdd" in out
+        assert "1 directories" in out
+
+    def test_json_output(self, tmp_path, capsys, mock_groups):
+        _make_experiment(tmp_path, "exp1_fa_baseline", "aabbccdd", seeds=[42])
+        out = self._run_list(tmp_path, capsys, mock_groups, json=True)
+        data = json.loads(out)
+        assert len(data["entries"]) == 1
+        assert data["entries"][0]["label"] == "exp1_fa_baseline"
+        assert data["summary"]["configs"] == 1
+
+    def test_empty_output(self, tmp_path, capsys, mock_groups):
+        out = self._run_list(tmp_path, capsys, mock_groups)
+        assert "No experiments found" in out
+
+    def test_stale_filter(self, tmp_path, capsys, mock_groups):
+        _make_experiment(tmp_path, "exp1_fa_baseline", "aabbccdd", seeds=[42])
+        _make_experiment(tmp_path, "exp1_fa_baseline", "deadbeef", seeds=[42])
+        # Without --stale, should see both
+        out = self._run_list(tmp_path, capsys, mock_groups, stale=False)
+        assert "exp1_fa_baseline" in out
+
+    def test_group_filter(self, tmp_path, capsys, mock_groups):
+        _make_experiment(tmp_path, "exp1_fa_baseline", "aabbccdd", seeds=[42])
+        _make_experiment(tmp_path, "exp2_mix_heatmap", "55667788", seeds=[42])
+        out = self._run_list(tmp_path, capsys, mock_groups, group=["baseline"])
+        assert "exp1_fa_baseline" in out
+        assert "exp2_mix_heatmap" not in out
+
+
+# ---------------------------------------------------------------------------
+# Integration: cmd_gc
+# ---------------------------------------------------------------------------
+
+class TestCmdGc:
+    def test_gc_dry_run_stale(self, tmp_path, capsys, mock_groups):
+        """Dry run lists stale dirs but doesn't delete."""
+        _make_experiment(tmp_path, "exp1_fa_baseline", "deadbeef", seeds=[42])
+        args = Namespace(
+            dir=str(tmp_path), group=None, pattern=None, exclude=None,
+            stale=True, incomplete=False, force=False,
+        )
+        cmd_gc(args)
+        out = capsys.readouterr().out
+        assert "stale" in out
+        assert "Dry run" in out
+        # Directory still exists
+        assert (tmp_path / "exp1_fa_baseline-deadbeef").exists()
+
+    def test_gc_force_deletes(self, tmp_path, capsys, mock_groups):
+        """--force actually removes stale dirs."""
+        _make_experiment(tmp_path, "exp1_fa_baseline", "deadbeef", seeds=[42])
+        args = Namespace(
+            dir=str(tmp_path), group=None, pattern=None, exclude=None,
+            stale=True, incomplete=False, force=True,
+        )
+        cmd_gc(args)
+        out = capsys.readouterr().out
+        assert "Deleted" in out
+        assert not (tmp_path / "exp1_fa_baseline-deadbeef").exists()
+
+    def test_gc_incomplete_crashed(self, tmp_path, capsys, mock_groups):
+        """--incomplete targets crashed seed dirs."""
+        _make_experiment(tmp_path, "exp1_fa_baseline", "aabbccdd",
+                         seeds=[42], crashed_seeds=[60])
+        args = Namespace(
+            dir=str(tmp_path), group=None, pattern=None, exclude=None,
+            stale=False, incomplete=True, force=True,
+        )
+        cmd_gc(args)
+        out = capsys.readouterr().out
+        assert "crashed" in out
+        # Seed dir 60 deleted, but experiment dir and seed 42 remain
+        assert (tmp_path / "exp1_fa_baseline-aabbccdd").exists()
+        assert not (tmp_path / "exp1_fa_baseline-aabbccdd" / "60").exists()
+        assert (tmp_path / "exp1_fa_baseline-aabbccdd" / "42").exists()
+
+    def test_gc_incomplete_empty(self, tmp_path, capsys, mock_groups):
+        """--incomplete targets empty seed dirs."""
+        _make_experiment(tmp_path, "exp1_fa_baseline", "aabbccdd",
+                         seeds=[42], empty_seeds=[99])
+        args = Namespace(
+            dir=str(tmp_path), group=None, pattern=None, exclude=None,
+            stale=False, incomplete=True, force=True,
+        )
+        cmd_gc(args)
+        out = capsys.readouterr().out
+        assert "empty" in out
+        assert not (tmp_path / "exp1_fa_baseline-aabbccdd" / "99").exists()
+
+    def test_gc_nothing_to_clean(self, tmp_path, capsys, mock_groups):
+        """Clean experiment: nothing to gc."""
+        _make_experiment(tmp_path, "exp1_fa_baseline", "aabbccdd", seeds=[42])
+        args = Namespace(
+            dir=str(tmp_path), group=None, pattern=None, exclude=None,
+            stale=False, incomplete=True, force=False,
+        )
+        cmd_gc(args)
+        out = capsys.readouterr().out
+        assert "Nothing to clean up" in out
+
+    def test_gc_never_touches_active(self, tmp_path, capsys, mock_groups):
+        """Active seeds are never targeted by gc."""
+        _make_experiment(tmp_path, "exp1_fa_baseline", "aabbccdd",
+                         seeds=[42], active_seeds=[50])
+        args = Namespace(
+            dir=str(tmp_path), group=None, pattern=None, exclude=None,
+            stale=False, incomplete=True, force=True,
+        )
+        cmd_gc(args)
+        out = capsys.readouterr().out
+        assert "Nothing to clean up" in out
+        assert (tmp_path / "exp1_fa_baseline-aabbccdd" / "50").exists()
+
+    def test_gc_pattern_filter(self, tmp_path, capsys, mock_groups):
+        """--pattern limits which experiments gc considers."""
+        _make_experiment(tmp_path, "exp1_fa_baseline", "deadbeef", seeds=[42])
+        _make_experiment(tmp_path, "exp2_mix_heatmap", "deadbeef", seeds=[42])
+        args = Namespace(
+            dir=str(tmp_path), group=None, pattern="exp1*", exclude=None,
+            stale=True, incomplete=False, force=True,
+        )
+        cmd_gc(args)
+        # Only exp1 dir should be deleted
+        assert not (tmp_path / "exp1_fa_baseline-deadbeef").exists()
+        assert (tmp_path / "exp2_mix_heatmap-deadbeef").exists()
+
+
+# ---------------------------------------------------------------------------
+# Integration: cmd_compact
+# ---------------------------------------------------------------------------
+
+class TestCmdCompact:
+    def test_compact_refuses_active_seeds(self, tmp_path, mock_groups):
+        """Compact should refuse when active seeds exist."""
+        from scripts.expctl import cmd_compact
+
+        _make_experiment(tmp_path, "exp1_fa_baseline", "aabbccdd",
+                         seeds=[42], active_seeds=[50])
+
+        args = Namespace(
+            dir=str(tmp_path), group=None, pattern=None, exclude=None,
+            partition=False, destructive=False, verify=False, verify_sample=20,
+            compression="zstd", compression_level=3, max_workers=1,
+        )
+        with pytest.raises(SystemExit):
+            cmd_compact(args)
+
+    def test_compact_empty(self, tmp_path, capsys, mock_groups):
+        """No experiments to compact."""
+        from scripts.expctl import cmd_compact
+
+        args = Namespace(
+            dir=str(tmp_path), group=None, pattern=None, exclude=None,
+            partition=False, destructive=False, verify=False, verify_sample=20,
+            compression="zstd", compression_level=3, max_workers=1,
+        )
+        cmd_compact(args)
+        out = capsys.readouterr().out
+        assert "No experiments to compact" in out
+
+    def test_compact_destructive_verify_error(self, tmp_path, mock_groups):
+        """--destructive + --verify should error."""
+        from scripts.expctl import cmd_compact
+
+        args = Namespace(
+            dir=str(tmp_path), group=None, pattern=None, exclude=None,
+            partition=False, destructive=True, verify=True, verify_sample=20,
+            compression="zstd", compression_level=3, max_workers=1,
+        )
+        with pytest.raises(SystemExit):
+            cmd_compact(args)
+
+
+# ---------------------------------------------------------------------------
+# Integration: cmd_complete
+# ---------------------------------------------------------------------------
+
+class TestCmdComplete:
+    def test_complete_dry_run_all_present(self, tmp_path, capsys, mock_groups):
+        """When all runs exist, reports 'All runs complete!'."""
+        from dataclasses import dataclass, field
+        from scripts.expctl import cmd_complete
+
+        @dataclass
+        class FakeRun:
+            config_path: str = "exp1.toml"
+            label: str = "exp1_fa_baseline"
+            seed: int = 42
+            params: dict = field(default_factory=dict)
+            run_id: str = "exp1_42"
+
+        fake_runs = [FakeRun()]
+
+        with patch("scripts.expctl.cmd_complete.__module__", "scripts.expctl"):
+            pass
+
+        args = Namespace(
+            dir=str(tmp_path), group=["baseline"], seeds=1,
+            parallel=1, dry_run=True,
+        )
+        with patch("run_all_experiments.generate_all_runs", return_value=fake_runs), \
+             patch("run_all_experiments.check_experiment_exists", return_value=True), \
+             patch("run_all_experiments.EXPERIMENT_GROUPS", _MOCK_GROUPS):
+            cmd_complete(args)
+
+        out = capsys.readouterr().out
+        assert "All runs complete" in out
+
+    def test_complete_dry_run_missing(self, tmp_path, capsys, mock_groups):
+        """When runs are missing, reports count."""
+        from dataclasses import dataclass, field
+        from scripts.expctl import cmd_complete
+
+        @dataclass
+        class FakeRun:
+            config_path: str = "exp1.toml"
+            label: str = "exp1_fa_baseline"
+            seed: int = 42
+            params: dict = field(default_factory=dict)
+            run_id: str = "exp1_42"
+
+        fake_runs = [FakeRun(seed=42, run_id="r1"), FakeRun(seed=43, run_id="r2")]
+
+        args = Namespace(
+            dir=str(tmp_path), group=["baseline"], seeds=2,
+            parallel=1, dry_run=True,
+        )
+        with patch("run_all_experiments.generate_all_runs", return_value=fake_runs), \
+             patch("run_all_experiments.check_experiment_exists", return_value=False), \
+             patch("run_all_experiments.EXPERIMENT_GROUPS", _MOCK_GROUPS):
+            cmd_complete(args)
+
+        out = capsys.readouterr().out
+        assert "2" in out  # 2 missing
+        assert "missing" in out.lower() or "Missing" in out
