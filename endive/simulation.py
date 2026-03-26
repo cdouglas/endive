@@ -62,6 +62,7 @@ class SimulationConfig:
     # Transaction limits
     max_retries: int = 10
     ml_append_mode: bool = False
+    metadata_inlined: bool = False
 
     # Backoff configuration
     backoff_enabled: bool = False
@@ -492,6 +493,7 @@ class Simulation:
             self._config.conflict_detector,
             self._config.max_retries,
             self._config.ml_append_mode,
+            self._config.metadata_inlined,
         )
 
         try:

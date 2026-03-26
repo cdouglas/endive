@@ -32,7 +32,12 @@ from endive.storage import (
     LognormalLatency,
     create_provider,
 )
-from endive.workload import Workload, WorkloadConfig, ZipfTableSelector
+from endive.workload import (
+    Workload,
+    WorkloadConfig,
+    ZipfPartitionSelector,
+    ZipfTableSelector,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -98,7 +103,8 @@ def load_simulation_config(
     storage = _build_storage_provider(raw.get("storage", {}), rng)
     catalog = _build_catalog(catalog_cfg, storage, num_tables, partitions_per_table)
     workload = _build_workload(raw.get("transaction", {}), num_tables,
-                                partitions_per_table, seed)
+                                partitions_per_table, seed,
+                                partition_cfg=raw.get("partition", {}))
     conflict_detector = _build_conflict_detector(
         raw.get("transaction", {}), raw.get("partition", {}), rng,
     )
@@ -116,6 +122,7 @@ def load_simulation_config(
         conflict_detector=conflict_detector,
         max_retries=txn_cfg.get("retry", 10),
         ml_append_mode=(ml_mode == "append"),
+        metadata_inlined=catalog_cfg.get("table_metadata_inlined", False),
     )
 
 
@@ -163,22 +170,35 @@ def _build_catalog(
     mode = catalog_cfg.get("mode", "cas")
     backend = catalog_cfg.get("backend", "storage")
 
+    # Inlined metadata parameters
+    metadata_inlined = catalog_cfg.get("table_metadata_inlined", False)
+    initial_partition_size = catalog_cfg.get("initial_partition_size_bytes", 2048)
+    commit_growth = catalog_cfg.get("commit_growth_bytes", 100)
+
     # Handle catalog.backend = "service" with [catalog.service] section
     if backend == "service":
         service_cfg = catalog_cfg.get("service", {})
         service_provider = service_cfg.get("provider", "")
         if service_provider == "instant":
             latency = service_cfg.get("latency_ms", 1.0)
+            latency_per_kib = service_cfg.get("latency_per_kib_ms", 0.0)
             return InstantCatalog(
                 num_tables=num_tables,
                 partitions_per_table=partitions_per_table,
                 latency_ms=latency,
+                metadata_inlined=metadata_inlined,
+                initial_partition_size_bytes=initial_partition_size,
+                commit_growth_bytes=commit_growth,
+                latency_per_kib_ms=latency_per_kib,
             )
         # Service backend with non-instant provider — use CAS with storage
         return CASCatalog(
             storage=storage,
             num_tables=num_tables,
             partitions_per_table=partitions_per_table,
+            metadata_inlined=metadata_inlined,
+            initial_partition_size_bytes=initial_partition_size,
+            commit_growth_bytes=commit_growth,
         )
 
     if mode == "cas" and catalog_cfg.get("provider", "") == "instant":
@@ -188,6 +208,9 @@ def _build_catalog(
             num_tables=num_tables,
             partitions_per_table=partitions_per_table,
             latency_ms=latency,
+            metadata_inlined=metadata_inlined,
+            initial_partition_size_bytes=initial_partition_size,
+            commit_growth_bytes=commit_growth,
         )
 
     # Check if storage provider is instant → use InstantCatalog
@@ -198,6 +221,9 @@ def _build_catalog(
             num_tables=num_tables,
             partitions_per_table=partitions_per_table,
             latency_ms=latency,
+            metadata_inlined=metadata_inlined,
+            initial_partition_size_bytes=initial_partition_size,
+            commit_growth_bytes=commit_growth,
         )
 
     # Default: CASCatalog with storage provider
@@ -205,6 +231,9 @@ def _build_catalog(
         storage=storage,
         num_tables=num_tables,
         partitions_per_table=partitions_per_table,
+        metadata_inlined=metadata_inlined,
+        initial_partition_size_bytes=initial_partition_size,
+        commit_growth_bytes=commit_growth,
     )
 
 
@@ -244,8 +273,9 @@ def _build_workload(
     num_tables: int,
     partitions_per_table: Tuple[int, ...],
     seed: int | None,
+    partition_cfg: dict | None = None,
 ):
-    """Build Workload from [transaction] config section."""
+    """Build Workload from [transaction] and [partition] config sections."""
     inter_arrival = _build_inter_arrival(txn_cfg)
     runtime = _build_runtime(txn_cfg)
 
@@ -260,6 +290,7 @@ def _build_workload(
     manifests_per_commit = cm.get("mean", 1.5)
 
     # Table selection
+    tables_per_txn = txn_cfg.get("tables_per_txn", 1)
     table_selection_cfg = txn_cfg.get("table_selection", {})
     table_selector = None
     ts_dist = table_selection_cfg.get("distribution", "uniform")
@@ -267,6 +298,18 @@ def _build_workload(
         table_selector = ZipfTableSelector(
             alpha=table_selection_cfg.get("zipf_alpha", 1.5),
         )
+
+    # Partition selection (from [partition] config section)
+    partitions_per_txn = None
+    partition_selector = None
+    if partition_cfg and partition_cfg.get("enabled", False):
+        partitions_per_txn = partition_cfg.get("partitions_per_txn", 1)
+        selection = partition_cfg.get("selection", {})
+        ps_dist = selection.get("distribution", "uniform")
+        if ps_dist == "zipf":
+            partition_selector = ZipfPartitionSelector(
+                alpha=selection.get("zipf_alpha", 1.5),
+            )
 
     wl_config = WorkloadConfig(
         inter_arrival=inter_arrival,
@@ -277,7 +320,10 @@ def _build_workload(
         merge_append_weight=ma_weight,
         validated_overwrite_weight=vo_weight,
         manifests_per_concurrent_commit=manifests_per_commit,
+        tables_per_txn=tables_per_txn,
         table_selector=table_selector,
+        partitions_per_txn=partitions_per_txn,
+        partition_selector=partition_selector,
     )
 
     # Workload seed is derived from simulation seed

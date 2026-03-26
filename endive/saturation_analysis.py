@@ -643,15 +643,31 @@ def extract_key_parameters(config: Dict) -> Dict:
             if ts.get('distribution') == 'zipf':
                 params['table_selection_zipf_alpha'] = ts.get('zipf_alpha', 1.5)
 
-    # Extract partition parameters
+    # Extract tables_per_txn (multi-table transactions)
+    if 'transaction' in config:
+        params['tables_per_txn'] = config['transaction'].get('tables_per_txn', 1)
+
+    # Extract partition parameters (from [partition] section)
     if 'partition' in config:
         params['partition_enabled'] = config['partition'].get('enabled', False)
         params['num_partitions'] = config['partition'].get('num_partitions', None)
+        params['partitions_per_txn'] = config['partition'].get('partitions_per_txn', None)
         if 'partitions_per_txn' in config['partition']:
             ppt = config['partition']['partitions_per_txn']
             if isinstance(ppt, dict):
                 params['partitions_per_txn_mean'] = ppt.get('mean', None)
                 params['partitions_per_txn_max'] = ppt.get('max', None)
+
+    # Extract per-table partition count (from [catalog.partition] section)
+    if 'catalog' in config and 'partition' in config['catalog']:
+        cat_part = config['catalog']['partition']
+        if isinstance(cat_part, dict):
+            params['partitions_per_table'] = cat_part.get('num_partitions', 1)
+
+    # Extract inlined metadata parameters
+    if 'catalog' in config:
+        params['initial_partition_size_bytes'] = config['catalog'].get('initial_partition_size_bytes', 2048)
+        params['commit_growth_bytes'] = config['catalog'].get('commit_growth_bytes', 100)
 
     return params
 

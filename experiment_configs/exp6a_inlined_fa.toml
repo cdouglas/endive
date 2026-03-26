@@ -1,0 +1,142 @@
+# Experiment 6a: Inlined Table Metadata (100% FastAppend)
+#
+# Goal: Show the tradeoff of inlining table manifests in the catalog CAS.
+#
+# With inlined metadata, the table manifest is stored in the catalog CAS
+# object. This eliminates ML reads/writes from per-attempt cost, but the
+# CAS payload grows with each successful commit (100 bytes per commit).
+# Each partition starts at 2 KiB in the catalog.
+#
+# Early in the simulation, inlined commits are faster (no ML I/O).
+# Late in the simulation, growing CAS size degrades performance.
+#
+# Sweep: num_tables x partitions_per_table x tables_per_txn x catalog_latency x arrival_rate (5D)
+#   num_tables:          [10, 50]
+#   partitions_per_table: [1, 10, 100]
+#   tables_per_txn:      [1, 3]
+#   catalog_latency:     [1, 50] ms (base latency; grows with catalog size)
+#   arrival_rate:        LOAD_SWEEP
+#
+# Operation types: 100% FastAppend (isolates inlining effect)
+#
+# Expected patterns:
+#   - Throughput degrades over time as catalog CAS payload grows
+#   - More partitions -> larger initial catalog -> earlier degradation onset
+#   - Compared to exp5a: initially faster (no ML I/O), later slower (CAS growth)
+#
+# Validation:
+#   - All operation_type values should be "fast_append"
+#   - Catalog CAS latency should increase monotonically over time
+#   - time-series commit rate plot should show degradation
+
+[simulation]
+duration_ms = 3600000  # 1 hour
+output_path = "results.parquet"
+
+[experiment]
+label = "exp6a_inlined_fa"
+
+[catalog]
+num_tables = 10          # Swept: [10, 50]
+num_groups = 1           # Single-file catalog: all tables share one seq
+table_metadata_inlined = true
+initial_partition_size_bytes = 2048  # 2 KiB per partition
+commit_growth_bytes = 100            # Each successful commit adds 100 bytes
+backend = "service"
+
+[catalog.partition]
+num_partitions = 10      # Swept: [1, 10, 100]
+
+[catalog.service]
+provider = "instant"
+latency_ms = 1.0         # Swept: [1, 50] (base latency)
+latency_per_kib_ms = 0.5 # Size-based latency component
+
+[transaction]
+retry = 10
+tables_per_txn = 1       # Swept: [1, 3]
+runtime.min = 30000
+runtime.mean = 180000
+runtime.sigma = 1.5
+
+inter_arrival.distribution = "exponential"
+inter_arrival.scale = 100.0  # Swept: LOAD_SWEEP
+
+# 100% FastAppend
+operation_types.fast_append = 1.0
+operation_types.validated_overwrite = 0.0
+real_conflict_probability = 0.0
+
+conflicting_manifests.distribution = "exponential"
+conflicting_manifests.mean = 3.0
+conflicting_manifests.min = 1
+conflicting_manifests.max = 10
+manifest_list_mode = "rewrite"
+
+[partition]
+enabled = true
+partitions_per_txn = 1   # Each txn writes 1 partition per table
+
+[storage]
+provider = "s3"  # Fixed S3 storage (catalog latency swept separately)
+max_parallel = 4
+
+[plots]
+output_dir = "plots/exp6a_inlined_fa"
+
+[[plots.graphs]]
+type = "commit_rate_over_time"
+
+[[plots.graphs]]
+type = "heatmap"
+x_param = "inter_arrival_scale"
+y_param = "partitions_per_table"
+metrics = ["success_rate", "throughput", "mean_latency", "p99_latency"]
+filters = ["catalog_service_latency_ms==1.0", "tables_per_txn==1", "num_tables==10"]
+title_suffix = " (CAS=1ms, tpt=1, T=10, inlined)"
+output_suffix = "cas_1ms_tpt1_t10"
+
+[[plots.graphs]]
+type = "heatmap"
+x_param = "inter_arrival_scale"
+y_param = "partitions_per_table"
+metrics = ["success_rate", "throughput", "mean_latency", "p99_latency"]
+filters = ["catalog_service_latency_ms==50.0", "tables_per_txn==1", "num_tables==10"]
+title_suffix = " (CAS=50ms, tpt=1, T=10, inlined)"
+output_suffix = "cas_50ms_tpt1_t10"
+
+[[plots.graphs]]
+type = "heatmap"
+x_param = "inter_arrival_scale"
+y_param = "partitions_per_table"
+metrics = ["success_rate", "throughput", "mean_latency", "p99_latency"]
+filters = ["catalog_service_latency_ms==1.0", "tables_per_txn==3", "num_tables==10"]
+title_suffix = " (CAS=1ms, tpt=3, T=10, inlined)"
+output_suffix = "cas_1ms_tpt3_t10"
+
+[[plots.graphs]]
+type = "heatmap"
+x_param = "inter_arrival_scale"
+y_param = "partitions_per_table"
+metrics = ["success_rate", "throughput", "mean_latency", "p99_latency"]
+filters = ["catalog_service_latency_ms==50.0", "tables_per_txn==3", "num_tables==10"]
+title_suffix = " (CAS=50ms, tpt=3, T=10, inlined)"
+output_suffix = "cas_50ms_tpt3_t10"
+
+[[plots.graphs]]
+type = "latency_vs_throughput"
+group_by = "partitions_per_table"
+filters = ["catalog_service_latency_ms==1.0", "tables_per_txn==1", "num_tables==10"]
+output_suffix = "cas_1ms_tpt1_t10"
+
+[[plots.graphs]]
+type = "latency_vs_throughput"
+group_by = "partitions_per_table"
+filters = ["catalog_service_latency_ms==50.0", "tables_per_txn==1", "num_tables==10"]
+output_suffix = "cas_50ms_tpt1_t10"
+
+[[plots.graphs]]
+type = "latency_vs_throughput"
+group_by = "tables_per_txn"
+filters = ["catalog_service_latency_ms==1.0", "partitions_per_table==10", "num_tables==10"]
+output_suffix = "cas_1ms_ppt10_t10"

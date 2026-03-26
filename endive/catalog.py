@@ -225,6 +225,10 @@ class CASCatalog(Catalog):
 
     commit() internally performs a CAS operation on the underlying storage.
     Single round-trip: the CAS response tells whether the commit succeeded.
+
+    When metadata_inlined=True, the catalog object size grows with each
+    successful commit, and the CAS/read latency scales with size via
+    the storage provider's SizeBasedLatency model.
     """
 
     def __init__(
@@ -232,6 +236,10 @@ class CASCatalog(Catalog):
         storage: StorageProvider,
         num_tables: int,
         partitions_per_table: Tuple[int, ...],
+        *,
+        metadata_inlined: bool = False,
+        initial_partition_size_bytes: int = 2048,
+        commit_growth_bytes: int = 100,
     ):
         if not storage.supports_cas:
             raise ValueError("CASCatalog requires storage with CAS support")
@@ -247,6 +255,23 @@ class CASCatalog(Catalog):
             for i in range(num_tables)
         ]
 
+        # Inlined metadata tracking
+        self._metadata_inlined = metadata_inlined
+        self._commit_growth_bytes = commit_growth_bytes
+        if metadata_inlined:
+            total_partitions = sum(partitions_per_table)
+            self._catalog_size_bytes = total_partitions * initial_partition_size_bytes
+        else:
+            self._catalog_size_bytes = 100  # Default fixed size
+
+    @property
+    def metadata_inlined(self) -> bool:
+        return self._metadata_inlined
+
+    @property
+    def catalog_size_bytes(self) -> int:
+        return self._catalog_size_bytes
+
     def _create_snapshot(self, timestamp_ms: float = 0.0) -> CatalogSnapshot:
         return CatalogSnapshot(
             seq=self._seq,
@@ -257,7 +282,7 @@ class CASCatalog(Catalog):
     def read(self, timestamp_ms: float = 0.0) -> Generator[float, None, CatalogSnapshot]:
         result = yield from self._storage.read(
             key="catalog_metadata",
-            expected_size_bytes=100,
+            expected_size_bytes=self._catalog_size_bytes,
         )
         return self._create_snapshot(timestamp_ms)
 
@@ -273,7 +298,7 @@ class CASCatalog(Catalog):
         cas_gen = self._storage.cas(
             key="catalog_metadata",
             expected_version=expected_seq,
-            size_bytes=100,
+            size_bytes=self._catalog_size_bytes,
         )
         latency = next(cas_gen)
 
@@ -290,6 +315,8 @@ class CASCatalog(Catalog):
                     for pid in pids:
                         self._tables[table_id].partition_versions[pid] += 1
             self._seq += 1
+            if self._metadata_inlined:
+                self._catalog_size_bytes += self._commit_growth_bytes
 
         # Response travels back (remaining half RTT)
         yield latency - latency / 2.0
@@ -437,6 +464,11 @@ class InstantCatalog(Catalog):
     """Catalog with instant (configurable fixed) latency for testing.
 
     Uses CAS semantics internally. No StorageProvider required.
+
+    When metadata_inlined=True, the catalog tracks a growing payload size.
+    Each partition starts at initial_partition_size_bytes, and each successful
+    commit adds commit_growth_bytes. CAS latency scales with payload size
+    via latency_per_kib_ms.
     """
 
     def __init__(
@@ -444,18 +476,48 @@ class InstantCatalog(Catalog):
         num_tables: int,
         partitions_per_table: Tuple[int, ...],
         latency_ms: float = 1.0,
+        *,
+        metadata_inlined: bool = False,
+        initial_partition_size_bytes: int = 2048,
+        commit_growth_bytes: int = 100,
+        latency_per_kib_ms: float = 0.0,
     ):
         if len(partitions_per_table) != num_tables:
             raise ValueError(
                 f"partitions_per_table length ({len(partitions_per_table)}) "
                 f"!= num_tables ({num_tables})"
             )
-        self._latency = float(latency_ms)
+        self._base_latency = float(latency_ms)
         self._seq = 0
         self._tables = [
             _MutableTable(i, partitions_per_table[i])
             for i in range(num_tables)
         ]
+
+        # Inlined metadata tracking
+        self._metadata_inlined = metadata_inlined
+        self._commit_growth_bytes = commit_growth_bytes
+        self._latency_per_kib_ms = latency_per_kib_ms
+        if metadata_inlined:
+            total_partitions = sum(partitions_per_table)
+            self._catalog_size_bytes = total_partitions * initial_partition_size_bytes
+        else:
+            self._catalog_size_bytes = 0
+
+    @property
+    def metadata_inlined(self) -> bool:
+        return self._metadata_inlined
+
+    @property
+    def catalog_size_bytes(self) -> int:
+        return self._catalog_size_bytes
+
+    def _effective_latency(self) -> float:
+        """Compute latency including size-based component."""
+        if not self._metadata_inlined or self._latency_per_kib_ms == 0.0:
+            return self._base_latency
+        size_kib = self._catalog_size_bytes / 1024.0
+        return self._base_latency + self._latency_per_kib_ms * size_kib
 
     def _create_snapshot(self, timestamp_ms: float = 0.0) -> CatalogSnapshot:
         return CatalogSnapshot(
@@ -465,7 +527,7 @@ class InstantCatalog(Catalog):
         )
 
     def read(self, timestamp_ms: float = 0.0) -> Generator[float, None, CatalogSnapshot]:
-        yield self._latency
+        yield self._effective_latency()
         return self._create_snapshot(timestamp_ms)
 
     def commit(
@@ -476,7 +538,8 @@ class InstantCatalog(Catalog):
         intention: Optional[IntentionRecord] = None,
         partitions_written: Optional[Dict[int, FrozenSet[int]]] = None,
     ) -> Generator[float, None, CommitResult]:
-        half = self._latency / 2.0
+        latency = self._effective_latency()
+        half = latency / 2.0
 
         # Request travels to server (half RTT)
         yield half
@@ -491,11 +554,13 @@ class InstantCatalog(Catalog):
                     for pid in pids:
                         self._tables[table_id].partition_versions[pid] += 1
             self._seq += 1
+            if self._metadata_inlined:
+                self._catalog_size_bytes += self._commit_growth_bytes
 
         # Response travels back (remaining half RTT)
-        yield self._latency - half
+        yield latency - half
 
-        return CommitResult(success=success, latency_ms=self._latency)
+        return CommitResult(success=success, latency_ms=latency)
 
     @property
     def seq(self) -> int:

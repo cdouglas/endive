@@ -77,6 +77,14 @@ EXPERIMENT_GROUPS = {
     "providers": [
         "exp4c_tables_providers.toml",  # Real provider profiles × tables × workload
     ],
+    "partition": [
+        "exp5a_partition_fa.toml",      # Partition-aware × 100% FA
+        "exp5b_partition_mix.toml",     # Partition-aware × 90/10 mix
+    ],
+    "inlined": [
+        "exp6a_inlined_fa.toml",        # Inlined metadata × 100% FA
+        "exp6b_inlined_mix.toml",       # Inlined metadata × 90/10 mix
+    ],
 }
 
 # Parameter sweeps
@@ -93,6 +101,11 @@ NUM_TABLES_LATENCY_SWEEP = [1.0, 10.0, 50.0, 120.0]  # Subset of CATALOG_LATENCY
 # Real storage provider sweep (exp4c: provider determines CAS + I/O latency)
 PROVIDER_SWEEP = ["s3x", "s3", "azurex", "azure", "gcp"]
 PROVIDER_FA_SWEEP = [1.0, 0.9, 0.5]
+# Partition-aware sweep (exp5/exp6)
+PARTITION_NUM_TABLES_SWEEP = [10, 50]
+PARTITION_PER_TABLE_SWEEP = [1, 10, 100]
+TABLES_PER_TXN_SWEEP = [1, 3]
+PARTITION_LATENCY_SWEEP = [1.0, 50.0]
 
 # Quick mode parameters
 QUICK_LOADS = [100, 500, 2000]
@@ -523,6 +536,36 @@ def generate_all_runs(groups: list, num_seeds: int, quick: bool = False) -> list
                                             "inter_arrival.scale": float(load),
                                         }
                                     ))
+
+            elif "exp5a_partition_fa" in config_name or "exp5b_partition_mix" in config_name \
+                    or "exp6a_inlined_fa" in config_name or "exp6b_inlined_mix" in config_name:
+                # Partition-aware / inlined: num_tables x partitions_per_table x tables_per_txn x catalog_latency x load
+                tables_list = [10, 50] if quick else PARTITION_NUM_TABLES_SWEEP
+                ppt_list = [1, 100] if quick else PARTITION_PER_TABLE_SWEEP
+                tpt_list = [1, 3] if quick else TABLES_PER_TXN_SWEEP
+                latencies = [1.0, 50.0] if quick else PARTITION_LATENCY_SWEEP
+                for num_t in tables_list:
+                    for ppt in ppt_list:
+                        for tpt in tpt_list:
+                            for cat_latency in latencies:
+                                for load in loads:
+                                    for seed_num in range(1, num_seeds + 1):
+                                        seed = generate_seed(nonce, base_name,
+                                            {"num_tables": num_t, "ppt": ppt,
+                                             "tpt": tpt, "cat_latency": cat_latency,
+                                             "load": load}, seed_num)
+                                        runs.append(ExperimentRun(
+                                            config_path=config_name,
+                                            label=base_name,
+                                            seed=seed,
+                                            params={
+                                                "catalog.num_tables": num_t,
+                                                "catalog.partition.num_partitions": ppt,
+                                                "transaction.tables_per_txn": tpt,
+                                                "catalog.service.latency_ms": cat_latency,
+                                                "inter_arrival.scale": float(load),
+                                            }
+                                        ))
 
             else:
                 print(f"Warning: no sweep config for '{config_name}', skipping")
