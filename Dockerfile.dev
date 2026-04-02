@@ -55,6 +55,7 @@ RUN git config --global --add safe.directory /app
 # Use the project's venv (bind-mounted from host)
 ENV VIRTUAL_ENV=/app/.venv
 ENV PATH="/app/.venv/bin:$PATH"
+ENV COLORTERM=truecolor
 
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 CMD ["bash"]
