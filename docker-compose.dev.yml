@@ -19,6 +19,8 @@ services:
       - .:/app:rw
       # Git configuration (read-only)
       - ~/.gitconfig:${HOST_HOME:-/home/dev}/.gitconfig:ro
+      # Claude Code binary from host (avoids deprecated npm install)
+      - ~/.local/bin/claude:/usr/local/bin/claude:ro
       # Claude Code config and API keys
       - ~/.claude:${HOST_HOME:-/home/dev}/.claude:rw
       # Experiments data (separate mount for clarity)

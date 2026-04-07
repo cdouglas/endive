@@ -1,5 +1,6 @@
 #!/bin/bash
-# Helper script for running the development container with Claude Code
+# Helper script for running the development container with Claude Code.
+# Claude Code binary is bind-mounted from the host (not installed in the image).
 # Usage:
 #   ./scripts/dev-container.sh                          # Interactive shell
 #   ./scripts/dev-container.sh claude                   # Run Claude Code
