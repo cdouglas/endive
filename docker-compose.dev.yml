@@ -23,6 +23,8 @@ services:
       - ~/.claude:${HOST_HOME:-/home/dev}/.claude:rw
       # Experiments data (separate mount for clarity)
       - ./experiments:/app/experiments:rw
+      # Obsidian vault review directory (~/.obsidian is a symlink/junction to Windows)
+      - ~/.obsidian/LST:/app/docs/review:rw
       # Beads data directory is part of .:/app:rw mount (.beads/)
     environment:
       # Pass through API key if set in host environment
