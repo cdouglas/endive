@@ -716,3 +716,89 @@ class TestScaledConflictCost:
         txn = make_txn(ValidatedOverwriteTransaction)
         cost = txn.get_conflict_cost(n_snapshots_behind=3, ml_append_mode=False)
         assert cost.historical_ml_reads == 2  # 3-1, per-attempt reads current
+
+
+# ---------------------------------------------------------------------------
+# Inlined metadata cost elimination
+# ---------------------------------------------------------------------------
+
+class TestInlinedMetadataCosts:
+    """Verify metadata_inlined=True eliminates ML I/O from per-attempt and conflict costs."""
+
+    def test_per_attempt_eliminates_ml_reads(self):
+        txn = make_txn(FastAppendTransaction)
+        cost = txn.get_per_attempt_cost(ml_append_mode=False, metadata_inlined=True)
+        assert cost.manifest_list_reads == 0
+
+    def test_per_attempt_eliminates_ml_writes(self):
+        txn = make_txn(FastAppendTransaction)
+        cost = txn.get_per_attempt_cost(ml_append_mode=False, metadata_inlined=True)
+        assert cost.manifest_list_writes == 0
+
+    def test_per_attempt_keeps_mf_writes(self):
+        txn = make_txn(FastAppendTransaction)
+        cost = txn.get_per_attempt_cost(ml_append_mode=False, metadata_inlined=True)
+        assert cost.manifest_file_writes == 1
+
+    def test_per_attempt_inlined_scales_mf_with_partitions(self):
+        txn = make_txn(FastAppendTransaction)
+        cost = txn.get_per_attempt_cost(
+            ml_append_mode=False, n_partitions=4, metadata_inlined=True,
+        )
+        assert cost.manifest_file_writes == 4
+        assert cost.manifest_list_reads == 0
+        assert cost.manifest_list_writes == 0
+
+    def test_per_attempt_non_inlined_has_ml_io(self):
+        """Baseline: non-inlined has ML reads and writes."""
+        txn = make_txn(FastAppendTransaction)
+        cost = txn.get_per_attempt_cost(ml_append_mode=False, metadata_inlined=False)
+        assert cost.manifest_list_reads == 1
+        assert cost.manifest_list_writes == 1
+
+    def test_vo_conflict_cost_zero_when_inlined(self):
+        """Inlining eliminates the I/O convoy for ValidatedOverwrite."""
+        txn = make_txn(ValidatedOverwriteTransaction)
+        cost = txn.get_conflict_cost(
+            n_snapshots_behind=5, ml_append_mode=False, metadata_inlined=True,
+        )
+        assert cost == ConflictCost()
+
+    def test_vo_conflict_cost_nonzero_when_not_inlined(self):
+        """Baseline: non-inlined VO has historical ML reads."""
+        txn = make_txn(ValidatedOverwriteTransaction)
+        cost = txn.get_conflict_cost(
+            n_snapshots_behind=5, ml_append_mode=False, metadata_inlined=False,
+        )
+        assert cost.historical_ml_reads == 4  # 5 - 1
+
+    def test_vo_conflict_cost_inlined_ignores_partitions(self):
+        """When inlined, n_partitions doesn't matter — cost is zero."""
+        txn = make_txn(ValidatedOverwriteTransaction)
+        cost = txn.get_conflict_cost(
+            n_snapshots_behind=5, ml_append_mode=False,
+            n_partitions=10, metadata_inlined=True,
+        )
+        assert cost == ConflictCost()
+
+    def test_fa_conflict_cost_unaffected_by_inlining(self):
+        """FastAppend has zero conflict cost regardless of inlining."""
+        txn = make_txn(FastAppendTransaction)
+        cost_inlined = txn.get_conflict_cost(
+            n_snapshots_behind=5, ml_append_mode=False, metadata_inlined=True,
+        )
+        cost_normal = txn.get_conflict_cost(
+            n_snapshots_behind=5, ml_append_mode=False, metadata_inlined=False,
+        )
+        assert cost_inlined == cost_normal == ConflictCost()
+
+    def test_ma_conflict_cost_unaffected_by_inlining(self):
+        """MergeAppend conflict cost (re-merge) is not affected by inlining."""
+        txn = make_txn(MergeAppendTransaction, manifests_per_concurrent_commit=2.0)
+        cost_inlined = txn.get_conflict_cost(
+            n_snapshots_behind=3, ml_append_mode=False, metadata_inlined=True,
+        )
+        cost_normal = txn.get_conflict_cost(
+            n_snapshots_behind=3, ml_append_mode=False, metadata_inlined=False,
+        )
+        assert cost_inlined == cost_normal

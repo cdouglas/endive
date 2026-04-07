@@ -719,3 +719,156 @@ class TestPartitionVersionTracking:
         assert snap.get_partition_version(1, 0) == 0
         assert snap.get_partition_version(1, 1) == 1
         assert snap.get_partition_version(1, 2) == 1
+
+
+# ---------------------------------------------------------------------------
+# Inlined metadata: effective latency and catalog size growth
+# ---------------------------------------------------------------------------
+
+class TestInlinedMetadataLatency:
+    """Verify _effective_latency, initial size, and growth for InstantCatalog."""
+
+    def test_non_inlined_returns_base_latency(self):
+        """metadata_inlined=False → latency is always base, regardless of latency_per_kib_ms."""
+        cat = InstantCatalog(
+            1, (10,), latency_ms=5.0,
+            metadata_inlined=False, latency_per_kib_ms=1.0,
+        )
+        gen = cat.read()
+        assert next(gen) == 5.0
+
+    def test_inlined_zero_rate_returns_base_latency(self):
+        """metadata_inlined=True but latency_per_kib_ms=0 → base latency only."""
+        cat = InstantCatalog(
+            1, (10,), latency_ms=5.0,
+            metadata_inlined=True, latency_per_kib_ms=0.0,
+        )
+        gen = cat.read()
+        assert next(gen) == 5.0
+
+    def test_initial_size_from_partitions(self):
+        """Initial catalog_size_bytes = total_partitions * initial_partition_size_bytes."""
+        cat = InstantCatalog(
+            2, (10, 5), latency_ms=1.0,
+            metadata_inlined=True, initial_partition_size_bytes=1024,
+        )
+        # 15 partitions * 1024 = 15360
+        assert cat.catalog_size_bytes == 15360
+
+    def test_initial_size_default(self):
+        """Default initial_partition_size_bytes=2048."""
+        cat = InstantCatalog(
+            1, (4,), latency_ms=1.0, metadata_inlined=True,
+        )
+        assert cat.catalog_size_bytes == 4 * 2048
+
+    def test_effective_latency_formula(self):
+        """Verify latency = base + (size_bytes / 1024) * latency_per_kib_ms."""
+        cat = InstantCatalog(
+            1, (1,), latency_ms=2.0,
+            metadata_inlined=True,
+            initial_partition_size_bytes=1024,  # 1 KiB
+            latency_per_kib_ms=3.0,
+        )
+        # Expected: 2.0 + (1024/1024) * 3.0 = 5.0
+        gen = cat.read()
+        assert next(gen) == pytest.approx(5.0)
+
+    def test_effective_latency_larger_catalog(self):
+        """Verify with multi-table, multi-partition initial size."""
+        cat = InstantCatalog(
+            2, (10, 10), latency_ms=1.0,
+            metadata_inlined=True,
+            initial_partition_size_bytes=2048,  # 20 partitions * 2 KiB = 40 KiB
+            latency_per_kib_ms=0.5,
+        )
+        # Expected: 1.0 + 40.0 * 0.5 = 21.0
+        gen = cat.read()
+        assert next(gen) == pytest.approx(21.0)
+
+    def test_commit_latency_matches_effective(self):
+        """commit() uses _effective_latency for its total latency."""
+        cat = InstantCatalog(
+            1, (1,), latency_ms=2.0,
+            metadata_inlined=True,
+            initial_partition_size_bytes=2048,
+            latency_per_kib_ms=1.0,
+        )
+        result = exhaust(cat.commit(expected_seq=0, writes={0: 1}))
+        # Expected: 2.0 + (2048/1024) * 1.0 = 4.0
+        assert result.latency_ms == pytest.approx(4.0)
+
+
+class TestCatalogSizeGrowth:
+    """Verify catalog_size_bytes grows by commit_growth_bytes on success only."""
+
+    def test_size_grows_on_successful_commit(self):
+        cat = InstantCatalog(
+            1, (1,), latency_ms=1.0,
+            metadata_inlined=True,
+            initial_partition_size_bytes=1024,
+            commit_growth_bytes=200,
+        )
+        initial = cat.catalog_size_bytes
+        exhaust(cat.commit(expected_seq=0, writes={0: 1}))
+        assert cat.catalog_size_bytes == initial + 200
+
+    def test_size_unchanged_on_failed_commit(self):
+        cat = InstantCatalog(
+            1, (1,), latency_ms=1.0,
+            metadata_inlined=True,
+            initial_partition_size_bytes=1024,
+            commit_growth_bytes=200,
+        )
+        exhaust(cat.commit(expected_seq=0, writes={0: 1}))
+        size_after_first = cat.catalog_size_bytes
+        # Stale seq → CAS failure
+        exhaust(cat.commit(expected_seq=0, writes={0: 2}))
+        assert cat.catalog_size_bytes == size_after_first
+
+    def test_size_after_n_commits(self):
+        """After N successful commits: initial + N * growth."""
+        cat = InstantCatalog(
+            1, (2,), latency_ms=1.0,
+            metadata_inlined=True,
+            initial_partition_size_bytes=512,
+            commit_growth_bytes=100,
+        )
+        initial = cat.catalog_size_bytes  # 2 * 512 = 1024
+        assert initial == 1024
+        n = 10
+        for i in range(n):
+            exhaust(cat.commit(expected_seq=i, writes={0: i + 1}))
+        assert cat.catalog_size_bytes == initial + n * 100
+
+    def test_latency_increases_with_growth(self):
+        """Each commit should increase the effective latency."""
+        cat = InstantCatalog(
+            1, (1,), latency_ms=0.0,
+            metadata_inlined=True,
+            initial_partition_size_bytes=0,
+            commit_growth_bytes=1024,  # +1 KiB per commit
+            latency_per_kib_ms=1.0,
+        )
+        latencies = []
+        for i in range(5):
+            gen = cat.read()
+            latencies.append(next(gen))
+            exhaust(gen)
+            exhaust(cat.commit(expected_seq=i, writes={0: i + 1}))
+        # Latency should be monotonically increasing
+        for j in range(1, len(latencies)):
+            assert latencies[j] > latencies[j - 1], (
+                f"Latency did not increase: {latencies}"
+            )
+
+    def test_non_inlined_size_stays_zero(self):
+        """metadata_inlined=False → size stays at 0 regardless of commits."""
+        cat = InstantCatalog(
+            1, (10,), latency_ms=1.0,
+            metadata_inlined=False,
+            commit_growth_bytes=500,
+        )
+        assert cat.catalog_size_bytes == 0
+        exhaust(cat.commit(expected_seq=0, writes={0: 1}))
+        assert cat.catalog_size_bytes == 0

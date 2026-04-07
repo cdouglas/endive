@@ -505,6 +505,100 @@ provider = "instant"
         finally:
             os.unlink(path)
 
+    def test_inlined_metadata_config(self):
+        """table_metadata_inlined=true creates InstantCatalog with inlining params."""
+        config_str = """\
+[simulation]
+duration_ms = 5000
+seed = 42
+
+[catalog]
+num_tables = 2
+table_metadata_inlined = true
+initial_partition_size_bytes = 1024
+commit_growth_bytes = 50
+backend = "service"
+
+[catalog.partition]
+num_partitions = 5
+
+[catalog.service]
+provider = "instant"
+latency_ms = 2.0
+latency_per_kib_ms = 0.5
+
+[transaction]
+retry = 3
+inter_arrival.distribution = "exponential"
+inter_arrival.scale = 100.0
+runtime.mean = 50000
+runtime.sigma = 1.0
+
+[partition]
+enabled = true
+
+[storage]
+provider = "instant"
+"""
+        path = write_toml(config_str)
+        try:
+            config = load_simulation_config(path)
+            assert isinstance(config.catalog, InstantCatalog)
+            assert config.catalog.metadata_inlined is True
+            # 2 tables * 5 partitions * 1024 bytes = 10240
+            assert config.catalog.catalog_size_bytes == 10240
+            assert config.metadata_inlined is True
+        finally:
+            os.unlink(path)
+
+    def test_inlined_metadata_default_false(self):
+        """Without table_metadata_inlined, defaults to False."""
+        path = write_toml(MINIMAL_CONFIG)
+        try:
+            config = load_simulation_config(path)
+            assert config.metadata_inlined is False
+        finally:
+            os.unlink(path)
+
+    def test_inlined_latency_per_kib_flows_to_catalog(self):
+        """latency_per_kib_ms affects effective latency on read."""
+        config_str = """\
+[simulation]
+duration_ms = 5000
+seed = 42
+
+[catalog]
+num_tables = 1
+table_metadata_inlined = true
+initial_partition_size_bytes = 2048
+backend = "service"
+
+[catalog.service]
+provider = "instant"
+latency_ms = 1.0
+latency_per_kib_ms = 1.0
+
+[transaction]
+retry = 3
+inter_arrival.distribution = "exponential"
+inter_arrival.scale = 100.0
+runtime.mean = 50000
+runtime.sigma = 1.0
+
+[storage]
+provider = "instant"
+"""
+        path = write_toml(config_str)
+        try:
+            config = load_simulation_config(path)
+            cat = config.catalog
+            # Effective latency = 1.0 + (2048/1024) * 1.0 = 3.0
+            gen = cat.read()
+            latency = next(gen)
+            assert latency == pytest.approx(3.0)
+        finally:
+            os.unlink(path)
+
 
 # ---------------------------------------------------------------------------
 # End-to-end: load → run → verify
@@ -573,6 +667,70 @@ provider = "instant"
         # Just verify it builds without error
         assert isinstance(config, SimulationConfig)
         assert config.seed == 42
+
+    def test_inlined_metadata_simulation(self):
+        """Full simulation with inlined metadata completes and shows latency growth."""
+        from endive.simulation import Simulation
+
+        config_str = """\
+[simulation]
+duration_ms = 10000
+seed = 42
+
+[catalog]
+num_tables = 1
+table_metadata_inlined = true
+initial_partition_size_bytes = 0
+commit_growth_bytes = 10240
+backend = "service"
+
+[catalog.partition]
+num_partitions = 1
+
+[catalog.service]
+provider = "instant"
+latency_ms = 0.0
+latency_per_kib_ms = 1.0
+
+[transaction]
+retry = 10
+tables_per_txn = 1
+inter_arrival.distribution = "exponential"
+inter_arrival.scale = 50.0
+runtime.mean = 10.0
+runtime.sigma = 0.5
+operation_types.fast_append = 1.0
+operation_types.validated_overwrite = 0.0
+
+[partition]
+enabled = true
+partitions_per_txn = 1
+
+[storage]
+provider = "instant"
+"""
+        path = write_toml(config_str)
+        try:
+            config = load_simulation_config(path)
+            assert config.metadata_inlined is True
+            stats = Simulation(config).run()
+            assert stats.total > 0
+            assert stats.committed > 0
+            # Catalog should have grown
+            assert config.catalog.catalog_size_bytes > 0
+            # Verify later commits have higher CAS latency than earlier commits
+            txns = [t for t in stats.transactions if t.status.name == "committed"]
+            if len(txns) >= 4:
+                early = txns[:len(txns) // 4]
+                late = txns[-len(txns) // 4:]
+                avg_early = sum(t.commit_time_ms - t.submit_time_ms for t in early) / len(early)
+                avg_late = sum(t.commit_time_ms - t.submit_time_ms for t in late) / len(late)
+                # Late transactions should have higher latency due to catalog growth
+                assert avg_late > avg_early, (
+                    f"Expected latency growth: early={avg_early:.1f}ms, late={avg_late:.1f}ms"
+                )
+        finally:
+            os.unlink(path)
 
 
 # ---------------------------------------------------------------------------
