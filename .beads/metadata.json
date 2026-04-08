@@ -2,6 +2,6 @@
   "database": "dolt",
   "backend": "dolt",
   "dolt_mode": "embedded",
-  "dolt_database": "beads_endive",
-  "project_id": "5e5cb9ca-c853-4009-8abc-960acc5cfa65"
+  "dolt_database": "endive",
+  "project_id": "cd740ba8-2424-4883-814b-d3cfc15d7478"
 }
