@@ -489,10 +489,10 @@ class TestTimingTracking:
 
         result = drive_generator(txn.execute(catalog, storage, detector))
         # Read: 2.0ms, Runtime: 50.0ms
-        # Per-attempt I/O: 2 × 1.0ms (ML read + ML write, all 1ms instant)
+        # Per-attempt I/O: TM_r(1) + ML_r(1) + ML_w(1) + TM_w(1) = 4ms
         # CAS: 2.0ms (catalog commit)
-        assert result.total_latency_ms == pytest.approx(56.0)
-        assert result.commit_latency_ms == pytest.approx(4.0)
+        assert result.total_latency_ms == pytest.approx(58.0)
+        assert result.commit_latency_ms == pytest.approx(6.0)
 
     def test_commit_time_is_absolute(self):
         """commit_time_ms = submit_time + total_latency."""
@@ -508,8 +508,8 @@ class TestTimingTracking:
             partitions_written={0: frozenset({0})},
         )
         result = drive_generator(txn.execute(catalog, storage, detector))
-        # submit=1000, read=1, runtime=100, per-attempt=2×1, commit=1 → total_latency=104
-        assert result.commit_time_ms == pytest.approx(1104.0)
+        # submit=1000, read=1, runtime=100, per-attempt=4×1, commit=1 → total_latency=106
+        assert result.commit_time_ms == pytest.approx(1106.0)
 
     def test_yields_are_latencies(self):
         """The generator yields latency floats."""

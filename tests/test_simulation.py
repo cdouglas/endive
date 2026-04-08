@@ -65,6 +65,8 @@ def make_result(
         total_latency_ms=total_latency_ms,
         operation_type=operation_type,
         runtime_ms=runtime_ms,
+        table_metadata_reads=0,
+        table_metadata_writes=0,
         manifest_list_reads=ml_reads,
         manifest_list_writes=ml_writes,
     )

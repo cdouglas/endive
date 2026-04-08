@@ -96,15 +96,10 @@ class TestYieldCount:
     """
 
     def test_fast_append_clean_commit_yield_count(self):
-        """FA, 1 partition, no retry → exactly 4 yields.
+        """FA, 1 partition, no retry, non-inlined.
 
-        1. catalog.read() — 1 yield (initial snapshot)
-        2. per-attempt ML read — 1 yield
-        3. per-attempt ML write — 1 yield
-        4. catalog.commit() — 2 yields (half-RTT split)
-        Total: 1 (catalog read) + 2 (per-attempt) + 2 (CAS) = 5
-        But runtime is yielded as 0 (it's tracked differently).
-        Actually runtime contributes 1 yield too.
+        Per-attempt: TM_read(1) + ML_read(1) + ML_write(1) + TM_write(1) = 4
+        catalog_read(1) + runtime(1) + per_attempt(4) + cas(2) = 8
         """
         catalog = make_catalog()
         storage = InstantStorageProvider(rng=np.random.RandomState(42))
@@ -114,14 +109,33 @@ class TestYieldCount:
         )
         assert result.status == TransactionStatus.COMMITTED
         assert result.total_retries == 0
-        # catalog_read(1) + runtime(1) + ml_read(1) + ml_write(1) + cas(2) = 6
-        assert len(yields) == 6, (
-            f"Expected 6 yields for clean FA commit, got {len(yields)}. "
+        assert len(yields) == 8, (
+            f"Expected 8 yields for clean FA commit, got {len(yields)}. "
             f"Yields: {yields}"
         )
 
+    def test_fast_append_clean_commit_inlined_yield_count(self):
+        """FA, 1 partition, no retry, metadata inlined → no TM I/O.
+
+        Per-attempt: ML_read(1) + ML_write(1) = 2 (no TM file)
+        catalog_read(1) + runtime(1) + per_attempt(2) + cas(2) = 6
+        """
+        catalog = make_catalog()
+        storage = InstantStorageProvider(rng=np.random.RandomState(42))
+        txn = make_fa()
+        yields, result = collect_yields(
+            txn.execute(catalog, storage, NeverRealDetector(),
+                        metadata_inlined=True)
+        )
+        assert result.status == TransactionStatus.COMMITTED
+        assert len(yields) == 6
+
     def test_fast_append_3_partitions_yield_count(self):
-        """FA, 3 partitions, no retry → 3× per-attempt yields."""
+        """FA, 3 partitions, no retry, non-inlined.
+
+        Per-attempt: TM_read(1) + ML_read(3) + ML_write(3) + TM_write(1) = 8
+        catalog_read(1) + runtime(1) + per_attempt(8) + cas(2) = 12
+        """
         catalog = make_catalog(num_tables=1, partitions=(3,))
         storage = InstantStorageProvider(rng=np.random.RandomState(42))
         txn = make_fa(partitions={0: frozenset({0, 1, 2})})
@@ -129,13 +143,12 @@ class TestYieldCount:
             txn.execute(catalog, storage, NeverRealDetector())
         )
         assert result.status == TransactionStatus.COMMITTED
-        # catalog_read(1) + runtime(1) + ml_read(3) + ml_write(3) + cas(2) = 10
-        assert len(yields) == 10, (
-            f"Expected 10 yields for 3-partition FA, got {len(yields)}"
+        assert len(yields) == 12, (
+            f"Expected 12 yields for 3-partition FA, got {len(yields)}"
         )
 
     def test_fast_append_ml_append_mode_yield_count(self):
-        """FA in ML+ mode → no ML writes, fewer yields."""
+        """FA in ML+ mode, non-inlined → no ML writes, still has TM I/O."""
         catalog = make_catalog()
         storage = InstantStorageProvider(rng=np.random.RandomState(42))
         txn = make_fa()
@@ -144,11 +157,11 @@ class TestYieldCount:
                         ml_append_mode=True)
         )
         assert result.status == TransactionStatus.COMMITTED
-        # catalog_read(1) + runtime(1) + ml_read(1) + cas(2) = 5
-        assert len(yields) == 5
+        # catalog_read(1) + runtime(1) + TM_read(1) + ML_read(1) + TM_write(1) + cas(2) = 7
+        assert len(yields) == 7
 
     def test_validated_overwrite_clean_commit_yield_count(self):
-        """VO, 1 partition, no retry → same yields as FA."""
+        """VO, 1 partition, no retry, non-inlined → same as FA."""
         catalog = make_catalog()
         storage = InstantStorageProvider(rng=np.random.RandomState(42))
         txn = make_vo()
@@ -156,13 +169,12 @@ class TestYieldCount:
             txn.execute(catalog, storage, NeverRealDetector())
         )
         assert result.status == TransactionStatus.COMMITTED
-        # catalog_read(1) + runtime(1) + ml_read(1) + ml_write(1) + cas(2) = 6
-        assert len(yields) == 6
+        assert len(yields) == 8
 
     def test_fast_append_retry_no_overlap_yield_count(self):
         """FA retry, cross-table (no overlap) → no per-attempt I/O on retry.
 
-        Attempt 0: per-attempt(2) + CAS(2) → fail
+        Attempt 0: per-attempt(4) + CAS(2) → fail
         catalog_read(1) → no overlap
         Attempt 1: CAS(2) → succeed (no per-attempt, per_attempt_n=0)
         """
@@ -173,11 +185,9 @@ class TestYieldCount:
         txn = make_fa(txn_id=2, tables=frozenset({1}),
                       partitions={1: frozenset({0})})
         gen = txn.execute(catalog, storage, detector)
-        # Drive past catalog_read + runtime
         next(gen)  # catalog read
         gen.send(None)  # runtime
 
-        # T1 commits to table 0 (cross-table)
         t1 = make_fa(txn_id=1, tables=frozenset({0}),
                      partitions={0: frozenset({0})})
         drive(t1.execute(catalog, storage, detector))
@@ -185,18 +195,18 @@ class TestYieldCount:
         yields, result = collect_yields(gen)
         assert result.status == TransactionStatus.COMMITTED
         assert result.total_retries == 1
-        # attempt0: ml_read(1) + ml_write(1) + cas(2) + catalog_read(1) = 5
-        # attempt1: cas(2) only (no per-attempt, cross-table)
-        assert len(yields) == 7, (
-            f"Expected 7 yields for cross-table retry, got {len(yields)}"
+        # attempt0: per_attempt(4) + cas(2) + catalog_read(1) = 7
+        # attempt1: cas(2) only
+        assert len(yields) == 9, (
+            f"Expected 9 yields for cross-table retry, got {len(yields)}"
         )
 
     def test_fast_append_retry_with_overlap_yield_count(self):
         """FA retry, same-table overlap → per-attempt I/O paid again on retry.
 
-        Attempt 0: per-attempt(2) + CAS(2) → fail
-        catalog_read(1) → overlap detected
-        Attempt 1: per-attempt(2) + CAS(2) → succeed
+        Attempt 0: per-attempt(4) + CAS(2) → fail
+        catalog_read(1) → overlap
+        Attempt 1: per-attempt(4) + CAS(2) → succeed
         """
         catalog = make_catalog()
         storage = InstantStorageProvider(rng=np.random.RandomState(42))
@@ -207,26 +217,24 @@ class TestYieldCount:
         next(gen)  # catalog read
         gen.send(None)  # runtime
 
-        # T1 commits to same table/partition
         t1 = make_fa(txn_id=1)
         drive(t1.execute(catalog, storage, detector))
 
         yields, result = collect_yields(gen)
         assert result.status == TransactionStatus.COMMITTED
         assert result.total_retries == 1
-        # attempt0: ml_read(1) + ml_write(1) + cas(2) + catalog_read(1) = 5
-        # attempt1: ml_read(1) + ml_write(1) + cas(2) = 4
-        assert len(yields) == 9, (
-            f"Expected 9 yields for same-table retry, got {len(yields)}"
+        # attempt0: per_attempt(4) + cas(2) + catalog_read(1) = 7
+        # attempt1: per_attempt(4) + cas(2) = 6
+        assert len(yields) == 13, (
+            f"Expected 13 yields for same-table retry, got {len(yields)}"
         )
 
     def test_vo_retry_with_overlap_convoy_yield_count(self):
         """VO retry with 2 versions behind → historical ML reads (convoy).
 
-        Attempt 0: per-attempt(2) + CAS(2) → fail
-        catalog_read(1)
-        Conflict: historical_ml_reads = max(0, 2-1) × 1 = 1
-        Attempt 1: per-attempt(2) + CAS(2) → succeed
+        Attempt 0: per-attempt(4) + CAS(2) → fail
+        catalog_read(1) + convoy(1) = 2
+        Attempt 1: per-attempt(4) + CAS(2) → succeed
         """
         catalog = make_catalog()
         storage = InstantStorageProvider(rng=np.random.RandomState(42))
@@ -237,7 +245,6 @@ class TestYieldCount:
         next(gen)  # catalog read
         gen.send(None)  # runtime
 
-        # Two commits to same table → 2 versions behind
         for i in range(2):
             t = make_fa(txn_id=i + 1)
             drive(t.execute(catalog, storage, detector))
@@ -245,11 +252,11 @@ class TestYieldCount:
         yields, result = collect_yields(gen)
         assert result.status == TransactionStatus.COMMITTED
         assert result.total_retries == 1
-        # attempt0: ml_read(1) + ml_write(1) + cas(2) = 4
+        # attempt0: per_attempt(4) + cas(2) = 6
         # fail: catalog_read(1) + convoy(1) = 2
-        # attempt1: ml_read(1) + ml_write(1) + cas(2) = 4
-        assert len(yields) == 10, (
-            f"Expected 10 yields for VO convoy retry, got {len(yields)}"
+        # attempt1: per_attempt(4) + cas(2) = 6
+        assert len(yields) == 14, (
+            f"Expected 14 yields for VO convoy retry, got {len(yields)}"
         )
 
 
@@ -268,7 +275,7 @@ class TestLatencyMagnitude:
     """
 
     def test_fa_per_attempt_io_s3_magnitude(self):
-        """FA per-attempt I/O with S3: 2 ops × ~43ms → [40, 250]ms."""
+        """FA per-attempt I/O with S3, non-inlined: 4 ops × ~43ms → [80, 500]ms."""
         rng = np.random.RandomState(42)
         catalog = make_catalog(latency_ms=0.001)  # ~zero catalog latency
         storage = create_provider("s3", rng=rng)
@@ -277,39 +284,43 @@ class TestLatencyMagnitude:
         result = drive(txn.execute(catalog, storage, NeverRealDetector()))
 
         assert result.status == TransactionStatus.COMMITTED
-        # 2 S3 operations: ML read (~43ms median) + ML write (~43ms median)
-        # With lognormal variance, allow [40, 250]ms
-        assert 40.0 < result.per_attempt_io_ms < 250.0, (
+        # 4 S3 operations: TM read + ML read + ML write + TM write (~43ms each)
+        assert 80.0 < result.per_attempt_io_ms < 500.0, (
             f"per_attempt_io_ms={result.per_attempt_io_ms:.1f}ms out of "
-            f"expected [40, 250]ms for 2 S3 operations"
+            f"expected [80, 500]ms for 4 S3 operations"
         )
 
-    def test_fa_per_attempt_io_s3_not_3_ops(self):
-        """Regression: per-attempt must NOT include 3 ops (the old bug).
-
-        With 3 ops × 43ms, median per_attempt_io_ms ≈ 129ms.
-        With 2 ops × 43ms, median per_attempt_io_ms ≈ 86ms.
-        Run multiple seeds and check the median is closer to 2-op model.
-        """
-        medians = []
-        for seed in range(50):
+    def test_fa_per_attempt_io_s3_inlined_fewer_ops(self):
+        """Inlined per-attempt has 2 fewer ops (no TM file I/O)."""
+        medians_non = []
+        medians_inl = []
+        for seed in range(30):
             rng = np.random.RandomState(seed)
-            catalog = make_catalog(latency_ms=0.001)
-            storage = create_provider("s3", rng=rng)
+            cat = make_catalog(latency_ms=0.001)
+            stor = create_provider("s3", rng=rng)
             txn = make_fa(txn_id=seed)
-            result = drive(txn.execute(catalog, storage, NeverRealDetector()))
-            medians.append(result.per_attempt_io_ms)
+            r = drive(txn.execute(cat, stor, NeverRealDetector()))
+            medians_non.append(r.per_attempt_io_ms)
 
-        sample_median = sorted(medians)[len(medians) // 2]
-        # 2-op model: median ≈ 86ms. 3-op model: median ≈ 129ms.
-        # Threshold at 110ms separates the two models clearly.
-        assert sample_median < 110.0, (
-            f"Median per_attempt_io_ms across 50 seeds = {sample_median:.1f}ms. "
-            f"Expected < 110ms (2-op model). Got > 110ms suggesting 3+ ops."
+            rng2 = np.random.RandomState(seed)
+            cat2 = make_catalog(latency_ms=0.001)
+            stor2 = create_provider("s3", rng=rng2)
+            txn2 = make_fa(txn_id=seed + 100)
+            r2 = drive(txn2.execute(cat2, stor2, NeverRealDetector(),
+                                     metadata_inlined=True))
+            medians_inl.append(r2.per_attempt_io_ms)
+
+        med_non = sorted(medians_non)[15]
+        med_inl = sorted(medians_inl)[15]
+        # Non-inlined: 4 ops. Inlined: 2 ops. Ratio ≈ 2.0
+        ratio = med_non / max(med_inl, 0.001)
+        assert ratio > 1.5, (
+            f"Non-inlined/inlined ratio = {ratio:.1f}x, expected > 1.5x "
+            f"(non={med_non:.0f}ms, inl={med_inl:.0f}ms)"
         )
 
     def test_fa_per_attempt_io_3_partitions_scales(self):
-        """3 partitions → 6 S3 ops → per_attempt > single-partition."""
+        """3 partitions, non-inlined → 8 S3 ops → per_attempt > single-partition."""
         rng = np.random.RandomState(42)
         catalog = make_catalog(num_tables=1, partitions=(3,), latency_ms=0.001)
         storage = create_provider("s3", rng=rng)
@@ -317,9 +328,9 @@ class TestLatencyMagnitude:
 
         result = drive(txn.execute(catalog, storage, NeverRealDetector()))
 
-        # 6 ops × ~43ms ≈ 258ms median, allow [150, 600]ms
-        assert result.per_attempt_io_ms > 150.0, (
-            f"3-partition per_attempt={result.per_attempt_io_ms:.1f}ms < 150ms"
+        # 8 ops (TM_r + 3×ML_r + 3×ML_w + TM_w) × ~43ms ≈ 344ms
+        assert result.per_attempt_io_ms > 200.0, (
+            f"3-partition per_attempt={result.per_attempt_io_ms:.1f}ms < 200ms"
         )
 
     def test_cross_provider_latency_ratio(self):
@@ -415,7 +426,7 @@ class TestRetryCostDecomposition:
     """
 
     def test_clean_commit_timing_decomposition(self):
-        """No retry → conflict_io_ms = 0, per_attempt_io_ms = 2ms, catalog_commit_ms = 2ms."""
+        """No retry, non-inlined → per_attempt includes TM + ML I/O."""
         catalog = make_catalog(latency_ms=1.0)
         storage = InstantStorageProvider(rng=np.random.RandomState(42), latency_ms=1.0)
         txn = make_fa()
@@ -424,16 +435,35 @@ class TestRetryCostDecomposition:
 
         assert result.status == TransactionStatus.COMMITTED
         assert result.total_retries == 0
-        # catalog_read: 1ms (initial)
         assert result.catalog_read_ms == pytest.approx(1.0)
-        # per_attempt: ML read (1ms) + ML write (1ms) = 2ms
-        assert result.per_attempt_io_ms == pytest.approx(2.0)
-        # catalog_commit: CAS = 1ms (split into 0.5 + 0.5)
+        # per_attempt: TM_read(1) + ML_read(1) + ML_write(1) + TM_write(1) = 4ms
+        assert result.per_attempt_io_ms == pytest.approx(4.0)
         assert result.catalog_commit_ms == pytest.approx(1.0)
-        # conflict: 0 (no retry)
         assert result.conflict_io_ms == pytest.approx(0.0)
+        # total: catalog_read(1) + runtime(100) + per_attempt(4) + cas(1) = 106
+        assert result.total_latency_ms == pytest.approx(106.0)
+        # I/O counters
+        assert result.table_metadata_reads == 1
+        assert result.table_metadata_writes == 1
+        assert result.manifest_list_reads == 1
+        assert result.manifest_list_writes == 1
+
+    def test_clean_commit_inlined_timing(self):
+        """No retry, inlined → no TM I/O, only ML."""
+        catalog = make_catalog(latency_ms=1.0)
+        storage = InstantStorageProvider(rng=np.random.RandomState(42), latency_ms=1.0)
+        txn = make_fa()
+
+        result = drive(txn.execute(catalog, storage, NeverRealDetector(),
+                                   metadata_inlined=True))
+
+        assert result.status == TransactionStatus.COMMITTED
+        # per_attempt: ML_read(1) + ML_write(1) = 2ms (no TM)
+        assert result.per_attempt_io_ms == pytest.approx(2.0)
         # total: catalog_read(1) + runtime(100) + per_attempt(2) + cas(1) = 104
         assert result.total_latency_ms == pytest.approx(104.0)
+        assert result.table_metadata_reads == 0
+        assert result.table_metadata_writes == 0
 
     def test_cross_table_retry_no_conflict_io(self):
         """Cross-table retry: conflict_io = 0, extra catalog_read only."""
@@ -447,7 +477,6 @@ class TestRetryCostDecomposition:
         next(gen)  # catalog read
         gen.send(None)  # runtime
 
-        # T1 commits to table 0
         t1 = make_fa(txn_id=1, tables=frozenset({0}),
                      partitions={0: frozenset({0})})
         drive(t1.execute(catalog, storage, detector))
@@ -456,14 +485,10 @@ class TestRetryCostDecomposition:
         assert result.status == TransactionStatus.COMMITTED
         assert result.total_retries == 1
         assert result.catalog_conflicts == 1
-        assert result.tblptn_conflicts == 0
-        # conflict_io: 0 (no overlap → no conflict cost)
         assert result.conflict_io_ms == pytest.approx(0.0)
         # per_attempt: only first attempt (retry skips per-attempt for no-overlap)
-        assert result.per_attempt_io_ms == pytest.approx(2.0)
-        # catalog_read: initial(1) + failure-path(1) = 2
+        assert result.per_attempt_io_ms == pytest.approx(4.0)
         assert result.catalog_read_ms == pytest.approx(2.0)
-        # catalog_commit: 2 CAS attempts × 1ms = 2ms
         assert result.catalog_commit_ms == pytest.approx(2.0)
 
     def test_same_table_retry_per_attempt_doubles(self):
@@ -474,8 +499,8 @@ class TestRetryCostDecomposition:
 
         txn = make_fa(txn_id=2)
         gen = txn.execute(catalog, storage, detector)
-        next(gen)  # catalog read
-        gen.send(None)  # runtime
+        next(gen)
+        gen.send(None)
 
         t1 = make_fa(txn_id=1)
         drive(t1.execute(catalog, storage, detector))
@@ -483,14 +508,13 @@ class TestRetryCostDecomposition:
         result = drive(gen)
         assert result.status == TransactionStatus.COMMITTED
         assert result.total_retries == 1
-        assert result.tblptn_conflicts == 1
-        # per_attempt: 2 attempts × 2ms = 4ms
-        assert result.per_attempt_io_ms == pytest.approx(4.0)
-        # conflict_io: 0 (FA has no conflict cost)
+        # per_attempt: 2 attempts × 4ms = 8ms
+        assert result.per_attempt_io_ms == pytest.approx(8.0)
         assert result.conflict_io_ms == pytest.approx(0.0)
-        # ML reads: 2 (one per attempt)
         assert result.manifest_list_reads == 2
         assert result.manifest_list_writes == 2
+        assert result.table_metadata_reads == 2
+        assert result.table_metadata_writes == 2
 
     def test_vo_convoy_cost_decomposition(self):
         """VO convoy: historical ML reads appear in conflict_io_ms."""
@@ -500,10 +524,9 @@ class TestRetryCostDecomposition:
 
         txn = make_vo(txn_id=4)
         gen = txn.execute(catalog, storage, detector)
-        next(gen)  # catalog read
-        gen.send(None)  # runtime
+        next(gen)
+        gen.send(None)
 
-        # 3 commits → 3 versions behind → 2 historical ML reads
         for i in range(3):
             t = make_fa(txn_id=i + 1)
             drive(t.execute(catalog, storage, detector))
@@ -511,10 +534,9 @@ class TestRetryCostDecomposition:
         result = drive(gen)
         assert result.status == TransactionStatus.COMMITTED
         assert result.total_retries == 1
-        # convoy: max(0, 3-1) × 1 partition = 2 historical ML reads × 1ms = 2ms
         assert result.conflict_io_ms == pytest.approx(2.0)
-        # per_attempt: 2 attempts × 2ms = 4ms
-        assert result.per_attempt_io_ms == pytest.approx(4.0)
+        # per_attempt: 2 attempts × 4ms = 8ms
+        assert result.per_attempt_io_ms == pytest.approx(8.0)
         # ML reads: 2 (per-attempt) + 2 (convoy) = 4
         assert result.manifest_list_reads == 4
 
@@ -529,7 +551,6 @@ class TestRetryCostDecomposition:
         next(gen)
         gen.send(None)
 
-        # 2 commits to all 3 partitions → 2 versions behind
         for i in range(2):
             t = make_fa(txn_id=i + 1,
                         partitions={0: frozenset({0, 1, 2})})
@@ -537,11 +558,10 @@ class TestRetryCostDecomposition:
 
         result = drive(gen)
         assert result.status == TransactionStatus.COMMITTED
-        # convoy: max(0, 2-1) × 3 partitions = 3 historical ML reads
         assert result.conflict_io_ms == pytest.approx(3.0)
-        # per_attempt first: 3 reads + 3 writes = 6ms
-        # per_attempt retry: 3 reads + 3 writes = 6ms
-        assert result.per_attempt_io_ms == pytest.approx(12.0)
+        # per_attempt first: TM_r(1) + ML_r×3 + ML_w×3 + TM_w(1) = 8ms
+        # per_attempt retry: TM_r(1) + ML_r×3 + ML_w×3 + TM_w(1) = 8ms
+        assert result.per_attempt_io_ms == pytest.approx(16.0)
         # ML reads: 6 (per-attempt: 2 × 3) + 3 (convoy) = 9
         assert result.manifest_list_reads == 9
 
@@ -555,12 +575,12 @@ class TestRetryCostDecomposition:
             txn.execute(catalog, storage, NeverRealDetector())
         )
 
-        # Total yields = catalog_read + runtime + ML ops + CAS ops
+        n_tm_ops = result.table_metadata_reads + result.table_metadata_writes
         n_ml_ops = result.manifest_list_reads + result.manifest_list_writes
-        # catalog_read(1) + runtime(1) + ml_ops + cas_yields(2)
-        expected_yields = 1 + 1 + n_ml_ops + 2
+        # catalog_read(1) + runtime(1) + tm_ops + ml_ops + cas_yields(2)
+        expected_yields = 1 + 1 + n_tm_ops + n_ml_ops + 2
         assert len(yields) == expected_yields, (
             f"Yield count ({len(yields)}) != analytical prediction "
             f"({expected_yields}): 1 cat_read + 1 runtime + "
-            f"{n_ml_ops} ML ops + 2 CAS"
+            f"{n_tm_ops} TM ops + {n_ml_ops} ML ops + 2 CAS"
         )

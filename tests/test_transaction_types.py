@@ -69,35 +69,38 @@ class TestConflictCost:
     def test_frozen(self):
         cost = ConflictCost()
         with pytest.raises(AttributeError):
-            cost.metadata_reads = 5
+            cost.table_metadata_reads = 5
 
     def test_defaults_are_zero(self):
         cost = ConflictCost()
-        assert cost.metadata_reads == 0
+        assert cost.table_metadata_reads == 0
+        assert cost.table_metadata_writes == 0
         assert cost.manifest_list_reads == 0
         assert cost.manifest_list_writes == 0
         assert cost.historical_ml_reads == 0
 
     def test_custom_values(self):
         cost = ConflictCost(
-            metadata_reads=1,
+            table_metadata_reads=1,
+            table_metadata_writes=1,
             manifest_list_reads=2,
             manifest_list_writes=3,
             historical_ml_reads=4,
         )
-        assert cost.metadata_reads == 1
+        assert cost.table_metadata_reads == 1
+        assert cost.table_metadata_writes == 1
         assert cost.manifest_list_reads == 2
         assert cost.manifest_list_writes == 3
         assert cost.historical_ml_reads == 4
 
     def test_equality(self):
-        a = ConflictCost(metadata_reads=1, manifest_list_reads=1)
-        b = ConflictCost(metadata_reads=1, manifest_list_reads=1)
+        a = ConflictCost(table_metadata_reads=1, manifest_list_reads=1)
+        b = ConflictCost(table_metadata_reads=1, manifest_list_reads=1)
         assert a == b
 
     def test_inequality(self):
-        a = ConflictCost(metadata_reads=1)
-        b = ConflictCost(metadata_reads=2)
+        a = ConflictCost(table_metadata_reads=1)
+        b = ConflictCost(table_metadata_reads=2)
         assert a != b
 
 
@@ -118,6 +121,8 @@ class TestTransactionResult:
             total_latency_ms=105.0,
             operation_type="fast_append",
             runtime_ms=100.0,
+            table_metadata_reads=0,
+            table_metadata_writes=0,
             manifest_list_reads=0,
             manifest_list_writes=0,
         )
@@ -136,6 +141,8 @@ class TestTransactionResult:
             total_latency_ms=110.0,
             operation_type="fast_append",
             runtime_ms=100.0,
+            table_metadata_reads=0,
+            table_metadata_writes=0,
             manifest_list_reads=3,
             manifest_list_writes=1,
         )
@@ -158,6 +165,8 @@ class TestTransactionResult:
             total_latency_ms=108.0,
             operation_type="validated_overwrite",
             runtime_ms=100.0,
+            table_metadata_reads=0,
+            table_metadata_writes=0,
             manifest_list_reads=2,
             manifest_list_writes=0,
         )
@@ -258,7 +267,7 @@ class TestValidatedOverwriteTransaction:
         """ValidatedOverwrite retry cost is only I/O convoy (per-attempt is separate)."""
         txn = make_txn(ValidatedOverwriteTransaction)
         cost = txn.get_conflict_cost(n_snapshots_behind=3, ml_append_mode=False)
-        assert cost.metadata_reads == 0       # Moved to per-attempt
+        assert cost.table_metadata_reads == 0       # Moved to per-attempt
         assert cost.manifest_list_reads == 0  # Moved to per-attempt
         assert cost.manifest_list_writes == 0  # Moved to per-attempt
         assert cost.historical_ml_reads == 2  # I/O convoy: 3-1 (per-attempt reads current)

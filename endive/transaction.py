@@ -73,7 +73,8 @@ class ConflictCost:
     All counts are number of I/O operations. Actual latency is
     determined by the StorageProvider's latency distributions.
     """
-    metadata_reads: int = 0
+    table_metadata_reads: int = 0  # Table metadata file reads (non-inlined only)
+    table_metadata_writes: int = 0 # Table metadata file writes (non-inlined only)
     manifest_list_reads: int = 0
     manifest_list_writes: int = 0
     historical_ml_reads: int = 0   # For validation history (I/O convoy)
@@ -94,6 +95,8 @@ class TransactionResult:
     runtime_ms: float              # Transaction runtime (execution phase)
 
     # Detailed I/O tracking
+    table_metadata_reads: int
+    table_metadata_writes: int
     manifest_list_reads: int
     manifest_list_writes: int
 
@@ -176,6 +179,8 @@ class Transaction(ABC):
         self._commit_start_elapsed = 0.0
 
         # I/O counters
+        self._tm_reads = 0
+        self._tm_writes = 0
         self._ml_reads = 0
         self._ml_writes = 0
 
@@ -203,18 +208,28 @@ class Transaction(ABC):
         self,
         ml_append_mode: bool,
         n_partitions: int = 1,
+        metadata_inlined: bool = False,
     ) -> ConflictCost:
         """I/O cost paid on every commit attempt (before CAS).
 
         Every attempt must, per partition:
+        - Read the table metadata file (1 TM read, non-inlined only)
         - Read the current manifest list (1 ML read)
         - Write a new manifest list (1 ML write) unless in ML+ mode
+        - Write the table metadata file (1 TM write, non-inlined only)
+
+        When metadata_inlined=True, table metadata is stored in the catalog
+        CAS object. The TM file doesn't exist, so TM reads/writes are
+        eliminated. ML reads/writes remain (the ML is not inlined).
 
         Args:
             ml_append_mode: If True, skip manifest list writes.
             n_partitions: Number of partitions needing manifest work.
+            metadata_inlined: If True, skip table metadata file I/O.
         """
         return ConflictCost(
+            table_metadata_reads=0 if metadata_inlined else 1,
+            table_metadata_writes=0 if metadata_inlined else 1,
             manifest_list_reads=n_partitions,
             manifest_list_writes=0 if ml_append_mode else n_partitions,
         )
@@ -322,6 +337,7 @@ class Transaction(ABC):
         conflict_detector: ConflictDetector,
         max_retries: int = 10,
         ml_append_mode: bool = False,
+        metadata_inlined: bool = False,
     ) -> Generator[float, None, TransactionResult]:
         """Execute transaction through commit protocol.
 
@@ -332,6 +348,11 @@ class Transaction(ABC):
         4. Returns TransactionResult
 
         All I/O operations yield latency timeouts (floats).
+
+        Args:
+            metadata_inlined: If True, table metadata is inlined in the
+                catalog CAS object. Eliminates table metadata file I/O
+                from per-attempt cost.
         """
         # Phase 1: Read catalog snapshot
         before = self._elapsed
@@ -351,7 +372,7 @@ class Transaction(ABC):
 
         result = yield from self._commit_loop(
             catalog, storage, conflict_detector, max_retries,
-            ml_append_mode,
+            ml_append_mode, metadata_inlined,
         )
         return result
 
@@ -403,6 +424,8 @@ class Transaction(ABC):
             total_latency_ms=self._elapsed,
             operation_type=self.operation_type,
             runtime_ms=self.runtime,
+            table_metadata_reads=self._tm_reads,
+            table_metadata_writes=self._tm_writes,
             manifest_list_reads=self._ml_reads,
             manifest_list_writes=self._ml_writes,
             catalog_read_ms=self._catalog_read_ms,
@@ -423,6 +446,7 @@ class Transaction(ABC):
         conflict_detector: ConflictDetector,
         max_retries: int,
         ml_append_mode: bool,
+        metadata_inlined: bool = False,
     ) -> Generator[float, None, TransactionResult]:
         """Execute commit loop with retries.
 
@@ -447,6 +471,7 @@ class Transaction(ABC):
                 before = self._elapsed
                 per_attempt = self.get_per_attempt_cost(
                     ml_append_mode, n_partitions=per_attempt_n,
+                    metadata_inlined=metadata_inlined,
                 )
                 yield from self._pay_conflict_cost(per_attempt, storage)
                 self._per_attempt_io_ms += self._elapsed - before
@@ -536,11 +561,12 @@ class Transaction(ABC):
         storage: StorageProvider,
     ) -> Generator[float, None, None]:
         """Pay I/O cost for conflict resolution via storage operations."""
-        # Metadata reads
-        for _ in range(cost.metadata_reads):
+        # Table metadata reads (non-inlined only)
+        for _ in range(cost.table_metadata_reads):
             yield from self._yield_from(
-                storage.read(key="metadata", expected_size_bytes=1024)
+                storage.read(key="table_metadata", expected_size_bytes=10240)
             )
+            self._tm_reads += 1
 
         # Historical ML reads (I/O convoy for validated operations)
         for _ in range(cost.historical_ml_reads):
@@ -562,6 +588,13 @@ class Transaction(ABC):
                 storage.write(key="manifest_list", size_bytes=10240)
             )
             self._ml_writes += 1
+
+        # Table metadata writes (non-inlined only)
+        for _ in range(cost.table_metadata_writes):
+            yield from self._yield_from(
+                storage.write(key="table_metadata", size_bytes=10240)
+            )
+            self._tm_writes += 1
 
 
 # ---------------------------------------------------------------------------

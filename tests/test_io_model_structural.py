@@ -135,7 +135,7 @@ class TestOperationTracking:
     """Use TrackingStorageProvider to verify exact I/O operation sequences."""
 
     def test_fa_clean_commit_operations(self):
-        """FA clean commit: exactly ML read + ML write, nothing else."""
+        """FA clean commit, non-inlined: TM_read + ML_read + ML_write + TM_write."""
         inner = InstantStorageProvider(rng=np.random.RandomState(42))
         storage = TrackingStorageProvider(inner)
         catalog = make_catalog()
@@ -145,14 +145,28 @@ class TestOperationTracking:
 
         assert result.status == TransactionStatus.COMMITTED
         keys = [key for _, key, _ in storage.ops]
-        assert keys == ["manifest_list", "manifest_list"], (
-            f"Expected [ML read, ML write], got ops: {storage.ops}"
+        assert keys == ["table_metadata", "manifest_list", "manifest_list", "table_metadata"], (
+            f"Expected [TM read, ML read, ML write, TM write], got ops: {storage.ops}"
         )
         methods = [m for m, _, _ in storage.ops]
-        assert methods == ["read", "write"]
+        assert methods == ["read", "read", "write", "write"]
+
+    def test_fa_clean_commit_inlined_operations(self):
+        """FA clean commit, inlined: ML_read + ML_write only (no TM file)."""
+        inner = InstantStorageProvider(rng=np.random.RandomState(42))
+        storage = TrackingStorageProvider(inner)
+        catalog = make_catalog()
+        txn = make_fa()
+
+        result = drive(txn.execute(catalog, storage, NeverRealDetector(),
+                                   metadata_inlined=True))
+
+        assert result.status == TransactionStatus.COMMITTED
+        keys = [key for _, key, _ in storage.ops]
+        assert keys == ["manifest_list", "manifest_list"]
 
     def test_fa_3_partition_operations(self):
-        """FA 3 partitions: 3 ML reads + 3 ML writes."""
+        """FA 3 partitions, non-inlined: TM_read + 3×ML_read + 3×ML_write + TM_write."""
         inner = InstantStorageProvider(rng=np.random.RandomState(42))
         storage = TrackingStorageProvider(inner)
         catalog = make_catalog(num_tables=1, partitions=(3,))
@@ -163,10 +177,11 @@ class TestOperationTracking:
         assert result.status == TransactionStatus.COMMITTED
         keys = Counter(key for _, key, _ in storage.ops)
         assert keys["manifest_list"] == 6  # 3 reads + 3 writes
-        assert len(storage.ops) == 6
+        assert keys["table_metadata"] == 2  # 1 read + 1 write
+        assert len(storage.ops) == 8
 
     def test_fa_ml_append_mode_no_writes(self):
-        """FA in ML+ mode: ML reads only, no ML writes."""
+        """FA in ML+ mode, non-inlined: TM_read + ML_read + TM_write (no ML writes)."""
         inner = InstantStorageProvider(rng=np.random.RandomState(42))
         storage = TrackingStorageProvider(inner)
         catalog = make_catalog()
@@ -175,9 +190,9 @@ class TestOperationTracking:
         result = drive(txn.execute(catalog, storage, NeverRealDetector(),
                                    ml_append_mode=True))
 
-        methods = [m for m, _, _ in storage.ops]
-        assert methods == ["read"], (
-            f"ML+ mode should only read, got: {storage.ops}"
+        keys = [key for _, key, _ in storage.ops]
+        assert keys == ["table_metadata", "manifest_list", "table_metadata"], (
+            f"ML+ mode: TM_read + ML_read + TM_write, got: {storage.ops}"
         )
 
     def test_fa_retry_no_overlap_skips_per_attempt(self):
@@ -274,23 +289,20 @@ class TestTightLatencyBounds:
     """Replace loose latency assertions with bounds that catch ±1 operation."""
 
     def test_fa_instant_commit_latency_exact(self):
-        """InstantStorage FA: commit_latency = ML_read(1) + ML_write(1) + CAS(1) = 3ms."""
+        """InstantStorage FA, non-inlined: commit_latency = per_attempt(4) + CAS(1) = 5ms."""
         catalog = make_catalog(latency_ms=1.0)
         storage = InstantStorageProvider(rng=np.random.RandomState(42), latency_ms=1.0)
         txn = make_fa()
 
         result = drive(txn.execute(catalog, storage, NeverRealDetector()))
 
-        # Exact: per_attempt(2ms) + CAS(1ms) = 3ms commit latency
-        assert result.commit_latency_ms == pytest.approx(3.0), (
-            f"Expected 3.0ms commit latency, got {result.commit_latency_ms}"
+        # Exact: TM_r(1) + ML_r(1) + ML_w(1) + TM_w(1) + CAS(1) = 5ms
+        assert result.commit_latency_ms == pytest.approx(5.0), (
+            f"Expected 5.0ms commit latency, got {result.commit_latency_ms}"
         )
 
     def test_fa_s3_commit_latency_bounded(self):
-        """S3 FA: commit_latency in [50, 300]ms (2 ML ops + 1ms CAS).
-
-        Old bug (3 ML ops) would push this to [100, 400]ms.
-        """
+        """S3 FA, non-inlined: commit_latency in [100, 500]ms (4 ops + CAS)."""
         results = []
         for seed in range(20):
             catalog = make_catalog(latency_ms=1.0)
@@ -300,10 +312,9 @@ class TestTightLatencyBounds:
             results.append(r.commit_latency_ms)
 
         median = sorted(results)[len(results) // 2]
-        # 2 ops × ~43ms + 1ms CAS ≈ 87ms median
-        # Allow [50, 150]ms for the median across 20 seeds
-        assert 50.0 < median < 150.0, (
-            f"S3 FA median commit_latency = {median:.1f}ms, expected [50, 150]ms"
+        # 4 ops × ~43ms + 1ms CAS ≈ 173ms median
+        assert 100.0 < median < 300.0, (
+            f"S3 FA median commit_latency = {median:.1f}ms, expected [100, 300]ms"
         )
 
     def test_fa_s3x_faster_than_s3(self):
@@ -358,8 +369,8 @@ class TestCrossProviderConsistency:
         txn2 = make_fa(txn_id=2)
         r2 = drive(txn2.execute(cat2, stor2, detector))
 
-        assert r1.per_attempt_io_ms == pytest.approx(2.0)
-        assert r2.per_attempt_io_ms == pytest.approx(20.0)
+        assert r1.per_attempt_io_ms == pytest.approx(4.0)
+        assert r2.per_attempt_io_ms == pytest.approx(40.0)
 
     def test_catalog_latency_independent_of_storage(self):
         """Changing catalog latency shouldn't affect per_attempt_io_ms."""
@@ -495,7 +506,7 @@ class TestNoManifestFileOps:
         drive(t1.execute(catalog, storage, detector))
         drive(gen)
 
-        allowed_keys = {"manifest_list", "catalog_metadata", "metadata"}
+        allowed_keys = {"manifest_list", "table_metadata", "catalog_metadata", "metadata"}
         actual_keys = {key for _, key, _ in storage.ops}
         unexpected = actual_keys - allowed_keys
         assert not unexpected, (

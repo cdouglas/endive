@@ -81,6 +81,8 @@ _ARROW_SCHEMA = pa.schema([
     ("status", pa.string()),
     ("operation_type", pa.string()),
     ("abort_reason", pa.string()),
+    ("table_metadata_reads", pa.int32()),
+    ("table_metadata_writes", pa.int32()),
     ("manifest_list_reads", pa.int32()),
     ("manifest_list_writes", pa.int32()),
     ("catalog_read_ms", pa.float32()),
@@ -112,6 +114,8 @@ def _result_to_row(r: TransactionResult) -> dict:
         "status": "committed" if is_committed else "aborted",
         "operation_type": r.operation_type,
         "abort_reason": r.abort_reason,
+        "table_metadata_reads": r.table_metadata_reads,
+        "table_metadata_writes": r.table_metadata_writes,
         "manifest_list_reads": r.manifest_list_reads,
         "manifest_list_writes": r.manifest_list_writes,
         "catalog_read_ms": round(r.catalog_read_ms, 2),
@@ -168,6 +172,8 @@ class Statistics:
         self.validation_exceptions: int = 0
 
         # I/O counters
+        self.table_metadata_reads: int = 0
+        self.table_metadata_writes: int = 0
         self.manifest_list_reads: int = 0
         self.manifest_list_writes: int = 0
 
@@ -182,6 +188,8 @@ class Statistics:
                 self.validation_exceptions += 1
 
         self.total_retries += result.total_retries
+        self.table_metadata_reads += result.table_metadata_reads
+        self.table_metadata_writes += result.table_metadata_writes
         self.manifest_list_reads += result.manifest_list_reads
         self.manifest_list_writes += result.manifest_list_writes
 
@@ -478,6 +486,7 @@ class Simulation:
             self._config.conflict_detector,
             self._config.max_retries,
             self._config.ml_append_mode,
+            self._config.metadata_inlined,
         )
 
         try:
