@@ -894,8 +894,8 @@ class TestCrossTableRetry:
 
         result = drive_generator(gen)
         assert result.status == TransactionStatus.COMMITTED
-        # Initial read (5ms) + failure-path read (5ms) = 10ms
-        assert result.catalog_read_ms == pytest.approx(10.0)
+        # Initial read (5ms) + failure-path read (5ms) + failure-path TM read (1ms) = 11ms
+        assert result.catalog_read_ms == pytest.approx(11.0)
 
     def test_mixed_retries(self):
         """3-table. T2→table2. T1a→table0 (cross), T1b→table2 (same).

@@ -465,8 +465,11 @@ class Transaction(ABC):
         for attempt in range(max_retries + 1):
             writes = self._compute_writes(last_snapshot)
 
-            # Per-attempt I/O scaled by partitions needing manifest work
-            # 0 when the prior CAS failure was cross-table/disjoint (no overlap)
+            # Per-attempt I/O scaled by partitions needing manifest work.
+            # When per_attempt_n == 0 (disjoint retry), the retry is free:
+            # no partitions overlap, so no ML or TM work is needed.
+            # Each partition has its own entry in the catalog, so disjoint
+            # writes don't interact.
             if per_attempt_n > 0:
                 before = self._elapsed
                 per_attempt = self.get_per_attempt_cost(
@@ -497,6 +500,15 @@ class Transaction(ABC):
             current_snapshot = yield from self._yield_from(
                 catalog.read(self.submit_time + self._elapsed)
             )
+            # Non-inlined: reading the catalog only gets a pointer to the
+            # table metadata file. A separate TM read is needed to get
+            # partition versions for overlap detection.
+            if not metadata_inlined:
+                yield from self._yield_from(
+                    storage.read(key="table_metadata",
+                                 expected_size_bytes=10240)
+                )
+                self._tm_reads += 1
             self._catalog_read_ms += self._elapsed - before
 
             # Compute structured overlap with intervening commits

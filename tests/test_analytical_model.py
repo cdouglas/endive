@@ -172,11 +172,11 @@ class TestYieldCount:
         assert len(yields) == 8
 
     def test_fast_append_retry_no_overlap_yield_count(self):
-        """FA retry, cross-table (no overlap) → no per-attempt I/O on retry.
+        """FA retry, cross-table (no overlap), non-inlined.
 
         Attempt 0: per-attempt(4) + CAS(2) → fail
-        catalog_read(1) → no overlap
-        Attempt 1: CAS(2) → succeed (no per-attempt, per_attempt_n=0)
+        failure_path: catalog_read(1) + TM_read(1) → no overlap
+        Attempt 1: CAS(2) → succeed (disjoint = free, per-partition entries)
         """
         catalog = make_catalog(num_tables=2, partitions=(1, 1))
         storage = InstantStorageProvider(rng=np.random.RandomState(42))
@@ -195,17 +195,18 @@ class TestYieldCount:
         yields, result = collect_yields(gen)
         assert result.status == TransactionStatus.COMMITTED
         assert result.total_retries == 1
-        # attempt0: per_attempt(4) + cas(2) + catalog_read(1) = 7
-        # attempt1: cas(2) only
-        assert len(yields) == 9, (
-            f"Expected 9 yields for cross-table retry, got {len(yields)}"
+        # attempt0: per_attempt(4) + cas(2) = 6
+        # fail: catalog_read(1) + tm_read(1) = 2
+        # attempt1: cas(2) = 2 (disjoint = free)
+        assert len(yields) == 10, (
+            f"Expected 10 yields for cross-table retry, got {len(yields)}"
         )
 
     def test_fast_append_retry_with_overlap_yield_count(self):
-        """FA retry, same-table overlap → per-attempt I/O paid again on retry.
+        """FA retry, same-table overlap, non-inlined.
 
         Attempt 0: per-attempt(4) + CAS(2) → fail
-        catalog_read(1) → overlap
+        failure_path: catalog_read(1) + TM_read(1) → overlap
         Attempt 1: per-attempt(4) + CAS(2) → succeed
         """
         catalog = make_catalog()
@@ -223,17 +224,18 @@ class TestYieldCount:
         yields, result = collect_yields(gen)
         assert result.status == TransactionStatus.COMMITTED
         assert result.total_retries == 1
-        # attempt0: per_attempt(4) + cas(2) + catalog_read(1) = 7
+        # attempt0: per_attempt(4) + cas(2) = 6
+        # fail: catalog_read(1) + tm_read(1) = 2
         # attempt1: per_attempt(4) + cas(2) = 6
-        assert len(yields) == 13, (
-            f"Expected 13 yields for same-table retry, got {len(yields)}"
+        assert len(yields) == 14, (
+            f"Expected 14 yields for same-table retry, got {len(yields)}"
         )
 
     def test_vo_retry_with_overlap_convoy_yield_count(self):
-        """VO retry with 2 versions behind → historical ML reads (convoy).
+        """VO retry with 2 versions behind, non-inlined.
 
         Attempt 0: per-attempt(4) + CAS(2) → fail
-        catalog_read(1) + convoy(1) = 2
+        failure_path: catalog_read(1) + TM_read(1) + convoy(1) = 3
         Attempt 1: per-attempt(4) + CAS(2) → succeed
         """
         catalog = make_catalog()
@@ -253,10 +255,10 @@ class TestYieldCount:
         assert result.status == TransactionStatus.COMMITTED
         assert result.total_retries == 1
         # attempt0: per_attempt(4) + cas(2) = 6
-        # fail: catalog_read(1) + convoy(1) = 2
+        # fail: catalog_read(1) + tm_read(1) + convoy(1) = 3
         # attempt1: per_attempt(4) + cas(2) = 6
-        assert len(yields) == 14, (
-            f"Expected 14 yields for VO convoy retry, got {len(yields)}"
+        assert len(yields) == 15, (
+            f"Expected 15 yields for VO convoy retry, got {len(yields)}"
         )
 
 
@@ -466,7 +468,7 @@ class TestRetryCostDecomposition:
         assert result.table_metadata_writes == 0
 
     def test_cross_table_retry_no_conflict_io(self):
-        """Cross-table retry: conflict_io = 0, extra catalog_read only."""
+        """Cross-table retry, non-inlined: disjoint = free retry."""
         catalog = make_catalog(num_tables=2, partitions=(1, 1), latency_ms=1.0)
         storage = InstantStorageProvider(rng=np.random.RandomState(42), latency_ms=1.0)
         detector = NeverRealDetector()
@@ -486,13 +488,18 @@ class TestRetryCostDecomposition:
         assert result.total_retries == 1
         assert result.catalog_conflicts == 1
         assert result.conflict_io_ms == pytest.approx(0.0)
-        # per_attempt: only first attempt (retry skips per-attempt for no-overlap)
+        # per_attempt: first attempt only (disjoint retry is free)
         assert result.per_attempt_io_ms == pytest.approx(4.0)
-        assert result.catalog_read_ms == pytest.approx(2.0)
+        # catalog_read: initial(1) + failure-path(1 + TM_read(1)) = 3ms
+        assert result.catalog_read_ms == pytest.approx(3.0)
         assert result.catalog_commit_ms == pytest.approx(2.0)
+        # TM reads: 1 (first attempt per-attempt) + 1 (failure-path) = 2
+        assert result.table_metadata_reads == 2
+        # TM writes: 1 (first attempt per-attempt only, disjoint retry skips)
+        assert result.table_metadata_writes == 1
 
     def test_same_table_retry_per_attempt_doubles(self):
-        """Same-table retry: per-attempt paid twice."""
+        """Same-table retry, non-inlined: per-attempt paid twice + failure-path TM read."""
         catalog = make_catalog(latency_ms=1.0)
         storage = InstantStorageProvider(rng=np.random.RandomState(42), latency_ms=1.0)
         detector = NeverRealDetector()
@@ -513,11 +520,12 @@ class TestRetryCostDecomposition:
         assert result.conflict_io_ms == pytest.approx(0.0)
         assert result.manifest_list_reads == 2
         assert result.manifest_list_writes == 2
-        assert result.table_metadata_reads == 2
+        # TM reads: 2 (per-attempt) + 1 (failure-path) = 3
+        assert result.table_metadata_reads == 3
         assert result.table_metadata_writes == 2
 
     def test_vo_convoy_cost_decomposition(self):
-        """VO convoy: historical ML reads appear in conflict_io_ms."""
+        """VO convoy, non-inlined: failure-path includes TM read."""
         catalog = make_catalog(latency_ms=1.0)
         storage = InstantStorageProvider(rng=np.random.RandomState(42), latency_ms=1.0)
         detector = NeverRealDetector()
@@ -539,9 +547,11 @@ class TestRetryCostDecomposition:
         assert result.per_attempt_io_ms == pytest.approx(8.0)
         # ML reads: 2 (per-attempt) + 2 (convoy) = 4
         assert result.manifest_list_reads == 4
+        # catalog_read: initial(1) + failure-path(1 + TM_read(1)) = 3ms
+        assert result.catalog_read_ms == pytest.approx(3.0)
 
     def test_vo_convoy_multi_partition_scales(self):
-        """VO convoy with 3-partition overlap: historical reads × 3."""
+        """VO convoy with 3-partition overlap, non-inlined."""
         catalog = make_catalog(num_tables=1, partitions=(3,), latency_ms=1.0)
         storage = InstantStorageProvider(rng=np.random.RandomState(42), latency_ms=1.0)
         detector = NeverRealDetector()
@@ -565,8 +575,8 @@ class TestRetryCostDecomposition:
         # ML reads: 6 (per-attempt: 2 × 3) + 3 (convoy) = 9
         assert result.manifest_list_reads == 9
 
-    def test_io_counters_match_yield_count(self):
-        """I/O counters in result must match actual yields counted."""
+    def test_io_counters_match_yield_count_clean(self):
+        """Clean commit: I/O counters match yields exactly."""
         catalog = make_catalog(latency_ms=1.0)
         storage = InstantStorageProvider(rng=np.random.RandomState(42), latency_ms=1.0)
         txn = make_fa()

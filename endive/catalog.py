@@ -240,6 +240,7 @@ class CASCatalog(Catalog):
         metadata_inlined: bool = False,
         initial_partition_size_bytes: int = 2048,
         commit_growth_bytes: int = 100,
+        max_catalog_size_bytes: int = 0,
     ):
         if not storage.supports_cas:
             raise ValueError("CASCatalog requires storage with CAS support")
@@ -258,6 +259,7 @@ class CASCatalog(Catalog):
         # Inlined metadata tracking
         self._metadata_inlined = metadata_inlined
         self._commit_growth_bytes = commit_growth_bytes
+        self._max_catalog_size_bytes = max_catalog_size_bytes
         if metadata_inlined:
             total_partitions = sum(partitions_per_table)
             self._catalog_size_bytes = total_partitions * initial_partition_size_bytes
@@ -320,7 +322,10 @@ class CASCatalog(Catalog):
                         self._tables[table_id].partition_versions[pid] += 1
             self._seq += 1
             if self._metadata_inlined:
-                self._catalog_size_bytes += self._commit_growth_bytes
+                new_size = self._catalog_size_bytes + self._commit_growth_bytes
+                if self._max_catalog_size_bytes > 0:
+                    new_size = min(new_size, self._max_catalog_size_bytes)
+                self._catalog_size_bytes = new_size
 
         # Response travels back (remaining half RTT)
         yield latency - latency / 2.0
@@ -484,6 +489,7 @@ class InstantCatalog(Catalog):
         metadata_inlined: bool = False,
         initial_partition_size_bytes: int = 2048,
         commit_growth_bytes: int = 100,
+        max_catalog_size_bytes: int = 0,
         latency_per_kib_ms: float = 0.0,
     ):
         if len(partitions_per_table) != num_tables:
@@ -501,6 +507,7 @@ class InstantCatalog(Catalog):
         # Inlined metadata tracking
         self._metadata_inlined = metadata_inlined
         self._commit_growth_bytes = commit_growth_bytes
+        self._max_catalog_size_bytes = max_catalog_size_bytes
         self._latency_per_kib_ms = latency_per_kib_ms
         if metadata_inlined:
             total_partitions = sum(partitions_per_table)
@@ -559,7 +566,10 @@ class InstantCatalog(Catalog):
                         self._tables[table_id].partition_versions[pid] += 1
             self._seq += 1
             if self._metadata_inlined:
-                self._catalog_size_bytes += self._commit_growth_bytes
+                new_size = self._catalog_size_bytes + self._commit_growth_bytes
+                if self._max_catalog_size_bytes > 0:
+                    new_size = min(new_size, self._max_catalog_size_bytes)
+                self._catalog_size_bytes = new_size
 
         # Response travels back (remaining half RTT)
         yield latency - half

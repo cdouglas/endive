@@ -174,6 +174,7 @@ def _build_catalog(
     metadata_inlined = catalog_cfg.get("table_metadata_inlined", False)
     initial_partition_size = catalog_cfg.get("initial_partition_size_bytes", 2048)
     commit_growth = catalog_cfg.get("commit_growth_bytes", 100)
+    max_catalog_size = catalog_cfg.get("max_catalog_size_bytes", 0)
 
     # Handle catalog.backend = "service" with [catalog.service] section
     if backend == "service":
@@ -189,6 +190,7 @@ def _build_catalog(
                 metadata_inlined=metadata_inlined,
                 initial_partition_size_bytes=initial_partition_size,
                 commit_growth_bytes=commit_growth,
+            max_catalog_size_bytes=max_catalog_size,
                 latency_per_kib_ms=latency_per_kib,
             )
         # Service backend with non-instant provider — use CAS with storage
@@ -199,6 +201,7 @@ def _build_catalog(
             metadata_inlined=metadata_inlined,
             initial_partition_size_bytes=initial_partition_size,
             commit_growth_bytes=commit_growth,
+            max_catalog_size_bytes=max_catalog_size,
         )
 
     if mode == "cas" and catalog_cfg.get("provider", "") == "instant":
@@ -211,6 +214,7 @@ def _build_catalog(
             metadata_inlined=metadata_inlined,
             initial_partition_size_bytes=initial_partition_size,
             commit_growth_bytes=commit_growth,
+            max_catalog_size_bytes=max_catalog_size,
         )
 
     # Check if storage provider is instant → use InstantCatalog
@@ -224,6 +228,7 @@ def _build_catalog(
             metadata_inlined=metadata_inlined,
             initial_partition_size_bytes=initial_partition_size,
             commit_growth_bytes=commit_growth,
+            max_catalog_size_bytes=max_catalog_size,
         )
 
     # Default: CASCatalog with storage provider
