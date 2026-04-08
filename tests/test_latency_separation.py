@@ -65,8 +65,8 @@ class TestLatencySeparation:
     def test_s3_storage_with_instant_catalog_commit_includes_storage_io(self):
         """With S3 storage and instant catalog, commit latency > 50ms.
 
-        Per-attempt I/O is ML read + MF write + ML write on S3 (~43ms each),
-        plus 1ms catalog CAS. Total per attempt: ~130ms minimum.
+        Per-attempt I/O is ML read + ML write on S3 (~43ms each),
+        plus 1ms catalog CAS. Total per attempt: ~87ms minimum.
         """
         rng = np.random.RandomState(42)
         catalog = InstantCatalog(
@@ -81,8 +81,8 @@ class TestLatencySeparation:
         result = _drive(txn.execute(catalog, storage, detector))
 
         assert result.status == TransactionStatus.COMMITTED
-        # S3 storage I/O: 3 operations × ~43ms each ≈ 129ms minimum
-        # Plus 1ms catalog CAS = ~130ms
+        # S3 storage I/O: 2 operations × ~43ms each ≈ 86ms minimum
+        # Plus 1ms catalog CAS = ~87ms
         assert result.commit_latency_ms > 50.0, (
             f"commit_latency_ms={result.commit_latency_ms:.1f}ms is too low — "
             f"S3 storage I/O should dominate"
@@ -91,7 +91,7 @@ class TestLatencySeparation:
     def test_instant_storage_with_instant_catalog_commit_is_fast(self):
         """With both instant, commit latency < 10ms.
 
-        Per-attempt I/O: 3 × 1ms + 1ms CAS = 4ms.
+        Per-attempt I/O: 2 × 1ms + 1ms CAS = 3ms.
         """
         rng = np.random.RandomState(42)
         catalog = InstantCatalog(
