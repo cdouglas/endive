@@ -153,7 +153,6 @@ class TestLatencySeparation:
         assert result.total_retries == 0
         # Per-attempt cost must be visible even on first attempt
         assert result.manifest_list_reads >= 1, "Must read ML before CAS"
-        assert result.manifest_file_writes >= 1, "Must write MF before CAS"
         assert result.manifest_list_writes >= 1, "Must write ML before CAS"
 
 

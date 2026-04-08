@@ -18,6 +18,7 @@ from collections import Counter
 
 from endive.storage import FixedLatency, LognormalLatency
 from endive.transaction import (
+    ConflictCost,
     FastAppendTransaction,
     MergeAppendTransaction,
     ValidatedOverwriteTransaction,
@@ -589,7 +590,6 @@ class TestMergeAppendParameter:
         workload = Workload(config, seed=42)
         _, txn = next(workload.generate())
         assert isinstance(txn, MergeAppendTransaction)
-        # Verify the parameter was passed by checking conflict cost
+        # MergeAppend conflict cost is now zero (MF I/O removed)
         cost = txn.get_conflict_cost(n_snapshots_behind=2, ml_append_mode=False)
-        # int(2 * 2.5) = 5
-        assert cost.manifest_file_reads == 5
+        assert cost == ConflictCost()

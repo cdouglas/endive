@@ -1,34 +1,35 @@
-# Experiment 5a: Partition-Aware Multi-Table Transactions (100% FastAppend)
+# Experiment 5a: Partition-Aware Single Table (100% FastAppend, Uniform)
 #
-# Goal: Show that table partitioning reduces false-positive conflicts when
-# multiple tables share a single-file catalog.
+# Goal: Show that partitioning a table reduces commit conflict costs.
 #
-# With N partitions per table, concurrent writers to different partitions
-# don't conflict at the partition level, even though they contend on the
-# shared catalog seq. This reduces retry cost because cross-partition CAS
-# failures skip manifest I/O on retry (free retry).
+# With 32 partitions per table and uniform selection, concurrent writers
+# targeting disjoint partitions retry for free (catalog re-read + CAS only).
+# As partitions_per_txn increases, overlap probability grows and free retries
+# become rarer.
 #
-# Multi-table transactions (tables_per_txn > 1) increase the probability of
-# overlapping with concurrent transactions but partitions mitigate this.
+# Since the catalog is a file, atomic multi-partition commits are free.
+# Partitioning a table is isomorphic to splitting into sub-tables: each
+# partition has its own manifest list, and disjoint writes skip ML I/O
+# on retry.
 #
-# Sweep: num_tables x partitions_per_table x tables_per_txn x catalog_latency x arrival_rate (5D)
-#   num_tables:          [10, 50]
-#   partitions_per_table: [1, 10, 100]
-#   tables_per_txn:      [1, 3]
-#   catalog_latency:     [1, 50] ms
-#   arrival_rate:        LOAD_SWEEP
+# Sweep: arrival_rate x partitions_per_txn (2D)
+#   arrival_rate:       LOAD_SWEEP
+#   partitions_per_txn: [1, 2, 4, 8, 16]
 #
-# Operation types: 100% FastAppend (isolates partition effect)
+# Fixed: num_tables=1, partitions_per_table=32, S3 catalog CAS
+# Operation types: 100% FastAppend
+# Partition selection: uniform random
 #
 # Expected patterns:
-#   - More partitions -> fewer partition-level conflicts -> higher throughput
-#   - tables_per_txn > 1 increases overlap probability but partitions mitigate
-#   - partitions_per_table=1 should match exp4a results at same num_tables
+#   - partitions_per_txn=1: throughput approaches catalog-limited ceiling
+#     (similar to distributing load across 32 tables in exp4)
+#   - partitions_per_txn=16: converges to single-partition behavior (exp1)
+#   - Smooth degradation between these extremes
 #
 # Validation:
 #   - All operation_type values should be "fast_append"
-#   - No validation_exception aborts
-#   - partitions_per_table=1, tables_per_txn=1 cross-validates against exp4a
+#   - catalog_conflicts should dominate at low partitions_per_txn
+#   - tblptn_conflicts should dominate at high partitions_per_txn
 
 [simulation]
 duration_ms = 3600000  # 1 hour
@@ -38,21 +39,15 @@ output_path = "results.parquet"
 label = "exp5a_partition_fa"
 
 [catalog]
-num_tables = 10          # Swept: [10, 50]
-num_groups = 1           # Single-file catalog: all tables share one seq
+num_tables = 1
+num_groups = 1
 table_metadata_inlined = false
-backend = "service"
 
 [catalog.partition]
-num_partitions = 10      # Swept: [1, 10, 100]
-
-[catalog.service]
-provider = "instant"
-latency_ms = 1.0         # Swept: [1, 50]
+num_partitions = 32
 
 [transaction]
 retry = 10
-tables_per_txn = 1       # Swept: [1, 3]
 runtime.min = 30000
 runtime.mean = 180000
 runtime.sigma = 1.5
@@ -73,10 +68,10 @@ manifest_list_mode = "rewrite"
 
 [partition]
 enabled = true
-partitions_per_txn = 1   # Each txn writes 1 partition per table
+partitions_per_txn = 1   # Swept: [1, 2, 4, 8, 16]
 
 [storage]
-provider = "s3"  # Fixed S3 storage (catalog latency swept separately)
+provider = "s3"
 max_parallel = 4
 
 [plots]
@@ -86,61 +81,11 @@ output_dir = "plots/exp5a_partition_fa"
 type = "commit_rate_over_time"
 
 [[plots.graphs]]
-type = "heatmap"
-x_param = "inter_arrival_scale"
-y_param = "partitions_per_table"
-metrics = ["success_rate", "throughput", "mean_latency", "p99_latency"]
-filters = ["catalog_service_latency_ms==1.0", "tables_per_txn==1", "num_tables==10"]
-title_suffix = " (CAS=1ms, tpt=1, T=10)"
-output_suffix = "cas_1ms_tpt1_t10"
+type = "latency_vs_throughput"
+group_by = "partitions_per_txn"
 
 [[plots.graphs]]
 type = "heatmap"
 x_param = "inter_arrival_scale"
-y_param = "partitions_per_table"
+y_param = "partitions_per_txn"
 metrics = ["success_rate", "throughput", "mean_latency", "p99_latency"]
-filters = ["catalog_service_latency_ms==50.0", "tables_per_txn==1", "num_tables==10"]
-title_suffix = " (CAS=50ms, tpt=1, T=10)"
-output_suffix = "cas_50ms_tpt1_t10"
-
-[[plots.graphs]]
-type = "heatmap"
-x_param = "inter_arrival_scale"
-y_param = "partitions_per_table"
-metrics = ["success_rate", "throughput", "mean_latency", "p99_latency"]
-filters = ["catalog_service_latency_ms==1.0", "tables_per_txn==3", "num_tables==10"]
-title_suffix = " (CAS=1ms, tpt=3, T=10)"
-output_suffix = "cas_1ms_tpt3_t10"
-
-[[plots.graphs]]
-type = "heatmap"
-x_param = "inter_arrival_scale"
-y_param = "partitions_per_table"
-metrics = ["success_rate", "throughput", "mean_latency", "p99_latency"]
-filters = ["catalog_service_latency_ms==50.0", "tables_per_txn==3", "num_tables==10"]
-title_suffix = " (CAS=50ms, tpt=3, T=10)"
-output_suffix = "cas_50ms_tpt3_t10"
-
-[[plots.graphs]]
-type = "latency_vs_throughput"
-group_by = "partitions_per_table"
-filters = ["catalog_service_latency_ms==1.0", "tables_per_txn==1", "num_tables==10"]
-output_suffix = "cas_1ms_tpt1_t10"
-
-[[plots.graphs]]
-type = "latency_vs_throughput"
-group_by = "partitions_per_table"
-filters = ["catalog_service_latency_ms==50.0", "tables_per_txn==1", "num_tables==10"]
-output_suffix = "cas_50ms_tpt1_t10"
-
-[[plots.graphs]]
-type = "latency_vs_throughput"
-group_by = "tables_per_txn"
-filters = ["catalog_service_latency_ms==1.0", "partitions_per_table==10", "num_tables==10"]
-output_suffix = "cas_1ms_ppt10_t10"
-
-[[plots.graphs]]
-type = "latency_vs_throughput"
-group_by = "tables_per_txn"
-filters = ["catalog_service_latency_ms==50.0", "partitions_per_table==10", "num_tables==10"]
-output_suffix = "cas_50ms_ppt10_t10"

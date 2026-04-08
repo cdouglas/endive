@@ -251,7 +251,7 @@ class TestConflictRetry:
         assert catalog.seq == 2
 
     def test_fast_append_per_attempt_io_on_clean_commit(self):
-        """Clean commit pays per-attempt I/O: 1 ML read + 1 MF write + 1 ML write."""
+        """Clean commit pays per-attempt I/O: 1 ML read + 1 ML write."""
         catalog = make_instant_catalog()
         storage = InstantStorageProvider(rng=np.random.RandomState(42))
         detector = NeverRealConflictDetector()
@@ -259,9 +259,7 @@ class TestConflictRetry:
 
         result = drive_generator(txn.execute(catalog, storage, detector))
         assert result.manifest_list_reads == 1   # Read current ML
-        assert result.manifest_file_writes == 1  # Write new MF
         assert result.manifest_list_writes == 1  # Write new ML
-        assert result.manifest_file_reads == 0   # No MF reads needed
 
     def test_fast_append_io_counters_on_retry(self):
         """Retry I/O: per-attempt cost on each of 2 attempts, no extra retry cost."""
@@ -282,10 +280,9 @@ class TestConflictRetry:
         # T2 retries
         result = drive_generator(gen)
         assert result.total_retries == 1
-        # 2 attempts × per-attempt cost (1 ML read + 1 MF write + 1 ML write each)
+        # 2 attempts × per-attempt cost (1 ML read + 1 ML write each)
         # FastAppend has no additional retry cost
         assert result.manifest_list_reads == 2
-        assert result.manifest_file_writes == 2
         assert result.manifest_list_writes == 2
 
 
@@ -398,8 +395,6 @@ class TestValidatedOverwriteAbort:
         assert result.manifest_list_reads == 3
         # 2 attempts × per-attempt (1 ML write each) = 2 ML writes
         assert result.manifest_list_writes == 2
-        # 2 attempts × per-attempt (1 MF write each) = 2 MF writes
-        assert result.manifest_file_writes == 2
 
 
 # ---------------------------------------------------------------------------
@@ -407,8 +402,8 @@ class TestValidatedOverwriteAbort:
 # ---------------------------------------------------------------------------
 
 class TestMergeAppendRetry:
-    def test_retry_with_manifest_file_io(self):
-        """MergeAppend produces manifest file I/O on retry."""
+    def test_retry_with_overlap(self):
+        """MergeAppend retries on same-table overlap (conflict cost is zero post MF removal)."""
         catalog = make_instant_catalog()
         storage = InstantStorageProvider(rng=np.random.RandomState(42))
         detector = NeverRealConflictDetector()
@@ -429,14 +424,10 @@ class TestMergeAppendRetry:
         t1 = make_fast_append(txn_id=1)
         drive_generator(t1.execute(catalog, storage, detector))
 
-        # T2 retries: n_behind=1, manifests = int(1 * 2.0) = 2
+        # T2 retries
         result = drive_generator(gen)
         assert result.status == TransactionStatus.COMMITTED
         assert result.total_retries == 1
-        # MF reads: 2 (re-merge only, from retry cost)
-        assert result.manifest_file_reads == 2
-        # MF writes: 2 (per-attempt) + 2 (re-merge) = 4
-        assert result.manifest_file_writes == 4
         # ML reads: 2 (per-attempt, one per attempt)
         assert result.manifest_list_reads == 2
         # ML writes: 2 (per-attempt, one per attempt)
@@ -559,10 +550,10 @@ class TestTimingTracking:
 
         result = drive_generator(txn.execute(catalog, storage, detector))
         # Read: 2.0ms, Runtime: 50.0ms
-        # Per-attempt I/O: 3 × 1.0ms (ML read + MF write + ML write, all 1ms instant)
+        # Per-attempt I/O: 2 × 1.0ms (ML read + ML write, all 1ms instant)
         # CAS: 2.0ms (catalog commit)
-        assert result.total_latency_ms == pytest.approx(57.0)
-        assert result.commit_latency_ms == pytest.approx(5.0)
+        assert result.total_latency_ms == pytest.approx(56.0)
+        assert result.commit_latency_ms == pytest.approx(4.0)
 
     def test_commit_time_is_absolute(self):
         """commit_time_ms = submit_time + total_latency."""
@@ -578,8 +569,8 @@ class TestTimingTracking:
             partitions_written={0: frozenset({0})},
         )
         result = drive_generator(txn.execute(catalog, storage, detector))
-        # submit=1000, read=1, runtime=100, per-attempt=3×1, commit=1 → total_latency=105
-        assert result.commit_time_ms == pytest.approx(1105.0)
+        # submit=1000, read=1, runtime=100, per-attempt=2×1, commit=1 → total_latency=104
+        assert result.commit_time_ms == pytest.approx(1104.0)
 
     def test_yields_are_latencies(self):
         """The generator yields latency floats."""
@@ -697,8 +688,6 @@ class TestUniformInterface:
         assert isinstance(result.total_latency_ms, float)
         assert isinstance(result.manifest_list_reads, int)
         assert isinstance(result.manifest_list_writes, int)
-        assert isinstance(result.manifest_file_reads, int)
-        assert isinstance(result.manifest_file_writes, int)
 
 
 # ---------------------------------------------------------------------------
@@ -770,7 +759,6 @@ class TestCrossTableRetry:
         assert result.total_retries == 1
         # Only 1 per-attempt cycle (first attempt). Retry skips per-attempt I/O.
         assert result.manifest_list_reads == 1
-        assert result.manifest_file_writes == 1
         assert result.manifest_list_writes == 1
 
     def test_fast_append_same_table_pays_per_attempt_io(self):
@@ -790,9 +778,8 @@ class TestCrossTableRetry:
         result = drive_generator(gen)
         assert result.status == TransactionStatus.COMMITTED
         assert result.total_retries == 1
-        # 2 attempts × per-attempt (1 ML read + 1 MF write + 1 ML write each)
+        # 2 attempts × per-attempt (1 ML read + 1 ML write each)
         assert result.manifest_list_reads == 2
-        assert result.manifest_file_writes == 2
         assert result.manifest_list_writes == 2
 
     def test_vo_cross_table_no_convoy(self):
@@ -956,9 +943,6 @@ class TestCrossTableRetry:
         result = drive_generator(gen)
         assert result.status == TransactionStatus.COMMITTED
         assert result.total_retries == 1
-        # Re-merge: 2 same-table commits × 1.0 manifests_per_commit = 2 MF reads + 2 MF writes
-        # (not 11 × 1.0 = 11)
-        assert result.manifest_file_reads == 2
 
     def test_disjoint_partitions_skips_io(self):
         """1-table 4 partitions. T1→p0, T2→p1. T2 skips per-attempt I/O on retry."""
@@ -987,7 +971,6 @@ class TestCrossTableRetry:
         assert result.total_retries == 1
         # Only first attempt pays per-attempt I/O
         assert result.manifest_list_reads == 1
-        assert result.manifest_file_writes == 1
         assert result.manifest_list_writes == 1
 
     def test_catalog_read_on_failure(self):
@@ -1032,7 +1015,6 @@ class TestCrossTableRetry:
         result = drive_generator(gen)
         assert result.status == TransactionStatus.COMMITTED
         assert result.total_retries == 1
-        assert result.manifest_file_reads == 0  # No re-merge needed
 
     def test_merge_append_same_table_remerges(self):
         """Same table MA. T2 pays re-merge I/O."""
@@ -1056,8 +1038,6 @@ class TestCrossTableRetry:
         result = drive_generator(gen)
         assert result.status == TransactionStatus.COMMITTED
         assert result.total_retries == 1
-        # Re-merge: int(1 * 2.0) = 2 manifest file reads
-        assert result.manifest_file_reads >= 1
 
     def test_mixed_retries(self):
         """3-table. T2→table2. T1a→table0 (cross), T1b→table2 (same).
@@ -1107,7 +1087,7 @@ class TestCrossTableRetry:
         assert result.total_retries == 1
         # Both attempts pay per-attempt I/O (overlap was True)
         assert result.manifest_list_reads == 2
-        assert result.manifest_file_writes == 2
+        assert result.manifest_list_writes == 2
 
 
 # ---------------------------------------------------------------------------
@@ -1118,7 +1098,7 @@ class TestOverlapScaling:
     """Tests that I/O costs scale by number of overlapping partitions."""
 
     def test_multi_partition_first_attempt_scales(self):
-        """txn writes 3 partitions → first attempt costs 3 ML reads, 3 MF writes, 3 ML writes."""
+        """txn writes 3 partitions → first attempt costs 3 ML reads, 3 ML writes."""
         catalog = make_instant_catalog(num_tables=1, partitions=(3,))
         storage = InstantStorageProvider(rng=np.random.RandomState(42))
         detector = NeverRealConflictDetector()
@@ -1133,7 +1113,6 @@ class TestOverlapScaling:
         assert result.total_retries == 0
         # 3 partitions × per-attempt cost
         assert result.manifest_list_reads == 3
-        assert result.manifest_file_writes == 3
         assert result.manifest_list_writes == 3
 
     def test_partial_overlap_scales_retry_per_attempt(self):
@@ -1168,7 +1147,6 @@ class TestOverlapScaling:
         # Retry: 1 partition (B.0 overlap)
         # Total ML reads: 3 + 1 = 4
         assert result.manifest_list_reads == 4
-        assert result.manifest_file_writes == 4
         assert result.manifest_list_writes == 4
 
     def test_multi_partition_merge_append_scales_conflict_cost(self):
@@ -1198,10 +1176,9 @@ class TestOverlapScaling:
         result = drive_generator(gen)
         assert result.status == TransactionStatus.COMMITTED
         assert result.total_retries == 1
-        # Conflict cost: int(1 * 2.0) * 3 = 6 MF reads/writes
-        assert result.manifest_file_reads == 6
-        # Per-attempt MF writes: 3 (first) + 3 (retry) = 6, plus conflict: 6 → 12
-        assert result.manifest_file_writes == 12
+        # MergeAppend conflict cost is now zero (no MF operations)
+        # ML reads: 3 (first attempt) + 3 (retry, same-table overlap on all 3 partitions) = 6
+        assert result.manifest_list_reads == 6
 
     def test_multi_partition_validated_overwrite_scales_convoy(self):
         """ValidatedOverwrite with 2-partition overlap → historical ML reads × 2."""
@@ -1253,7 +1230,6 @@ class TestOverlapScaling:
         assert result.total_retries == 1
         # 2 attempts × 1 partition each = 2 of each
         assert result.manifest_list_reads == 2
-        assert result.manifest_file_writes == 2
         assert result.manifest_list_writes == 2
 
 

@@ -53,8 +53,6 @@ def make_result(
     runtime_ms=100.0,
     ml_reads=0,
     ml_writes=0,
-    mf_reads=0,
-    mf_writes=0,
 ):
     return TransactionResult(
         status=status,
@@ -69,8 +67,6 @@ def make_result(
         runtime_ms=runtime_ms,
         manifest_list_reads=ml_reads,
         manifest_list_writes=ml_writes,
-        manifest_file_reads=mf_reads,
-        manifest_file_writes=mf_writes,
     )
 
 
@@ -239,10 +235,9 @@ class TestStatistics:
         """I/O counters accumulate across transactions."""
         stats = Statistics()
         stats.record_transaction(make_result(ml_reads=3, ml_writes=1))
-        stats.record_transaction(make_result(ml_reads=2, mf_reads=5))
+        stats.record_transaction(make_result(ml_reads=2))
         assert stats.manifest_list_reads == 5
         assert stats.manifest_list_writes == 1
-        assert stats.manifest_file_reads == 5
 
     def test_retry_counter(self):
         """Total retries are accumulated."""
@@ -266,7 +261,6 @@ class TestStatistics:
             "txn_id", "t_submit", "t_commit", "commit_latency",
             "total_latency", "n_retries", "status", "abort_reason",
             "manifest_list_reads", "manifest_list_writes",
-            "manifest_file_reads", "manifest_file_writes",
         }
         assert expected.issubset(set(df.columns))
 

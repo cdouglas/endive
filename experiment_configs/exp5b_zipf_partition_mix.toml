@@ -1,37 +1,30 @@
-# Experiment 6b: Inlined Table Manifest (90/10 FA/VO, Uniform)
+# Experiment 5b-zipf: Partition-Aware Single Table (90/10 FA/VO, Zipf)
 #
-# Goal: Show how inlining interacts with VO retry cost.
+# Goal: Show VO cost under skewed partition selection.
 #
-# Same sweep as exp5b, but with inlined metadata. Inlining eliminates ML
-# reads and writes from per-attempt cost (2 fewer S3 ops per partition per
-# attempt). The VO I/O convoy (historical ML reads) is NOT eliminated —
-# historical MLs must still be read to validate the read set.
-#
-# Compared to exp5b: each retry attempt is cheaper (j MF writes vs 3j ops),
-# but the convoy cost remains.
+# Same sweep as exp5b but with Zipf(alpha=1.5) partition selection.
+# Hot partitions amplify VO I/O convoy costs because the overlap probability
+# on the hottest partition is high regardless of partitions_per_txn.
 #
 # Sweep: arrival_rate x partitions_per_txn (2D)
 #   arrival_rate:       LOAD_SWEEP
 #   partitions_per_txn: [1, 2, 4, 8, 16]
 #
 # Expected patterns:
-#   - Per-attempt cost lower than exp5b (ML I/O eliminated)
-#   - VO convoy cost remains (historical ML reads still needed)
-#   - Throughput degrades over time (CAS payload growth)
+#   - VO success rate much worse than exp5b (uniform) at same parameters
+#   - Zipf concentrates conflicts on hot partitions even at k=1
 
 [simulation]
 duration_ms = 3600000
 output_path = "results.parquet"
 
 [experiment]
-label = "exp6b_inlined_mix"
+label = "exp5b_zipf_partition_mix"
 
 [catalog]
 num_tables = 1
 num_groups = 1
-table_metadata_inlined = true
-initial_partition_size_bytes = 2048
-commit_growth_bytes = 100
+table_metadata_inlined = false
 
 [catalog.partition]
 num_partitions = 32
@@ -58,13 +51,15 @@ manifest_list_mode = "rewrite"
 [partition]
 enabled = true
 partitions_per_txn = 1   # Swept: [1, 2, 4, 8, 16]
+selection.distribution = "zipf"
+selection.zipf_alpha = 1.5
 
 [storage]
 provider = "s3"
 max_parallel = 4
 
 [plots]
-output_dir = "plots/exp6b_inlined_mix"
+output_dir = "plots/exp5b_zipf_partition_mix"
 
 [[plots.graphs]]
 type = "commit_rate_over_time"

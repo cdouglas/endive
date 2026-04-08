@@ -90,8 +90,6 @@ _ARROW_SCHEMA = pa.schema([
     ("abort_reason", pa.string()),
     ("manifest_list_reads", pa.int32()),
     ("manifest_list_writes", pa.int32()),
-    ("manifest_file_reads", pa.int32()),
-    ("manifest_file_writes", pa.int32()),
     ("catalog_read_ms", pa.float32()),
     ("per_attempt_io_ms", pa.float32()),
     ("conflict_io_ms", pa.float32()),
@@ -123,8 +121,6 @@ def _result_to_row(r: TransactionResult) -> dict:
         "abort_reason": r.abort_reason,
         "manifest_list_reads": r.manifest_list_reads,
         "manifest_list_writes": r.manifest_list_writes,
-        "manifest_file_reads": r.manifest_file_reads,
-        "manifest_file_writes": r.manifest_file_writes,
         "catalog_read_ms": round(r.catalog_read_ms, 2),
         "per_attempt_io_ms": round(r.per_attempt_io_ms, 2),
         "conflict_io_ms": round(r.conflict_io_ms, 2),
@@ -181,8 +177,6 @@ class Statistics:
         # I/O counters
         self.manifest_list_reads: int = 0
         self.manifest_list_writes: int = 0
-        self.manifest_file_reads: int = 0
-        self.manifest_file_writes: int = 0
 
     def record_transaction(self, result: TransactionResult) -> None:
         """Record completed transaction result."""
@@ -197,8 +191,6 @@ class Statistics:
         self.total_retries += result.total_retries
         self.manifest_list_reads += result.manifest_list_reads
         self.manifest_list_writes += result.manifest_list_writes
-        self.manifest_file_reads += result.manifest_file_reads
-        self.manifest_file_writes += result.manifest_file_writes
 
         if self._output_path:
             # Streaming: buffer row dict, flush when full
@@ -493,7 +485,6 @@ class Simulation:
             self._config.conflict_detector,
             self._config.max_retries,
             self._config.ml_append_mode,
-            self._config.metadata_inlined,
         )
 
         try:

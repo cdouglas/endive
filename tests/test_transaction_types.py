@@ -79,8 +79,6 @@ class TestConflictCost:
         assert cost.manifest_list_reads == 0
         assert cost.manifest_list_writes == 0
         assert cost.historical_ml_reads == 0
-        assert cost.manifest_file_reads == 0
-        assert cost.manifest_file_writes == 0
 
     def test_custom_values(self):
         cost = ConflictCost(
@@ -88,15 +86,11 @@ class TestConflictCost:
             manifest_list_reads=2,
             manifest_list_writes=3,
             historical_ml_reads=4,
-            manifest_file_reads=5,
-            manifest_file_writes=6,
         )
         assert cost.metadata_reads == 1
         assert cost.manifest_list_reads == 2
         assert cost.manifest_list_writes == 3
         assert cost.historical_ml_reads == 4
-        assert cost.manifest_file_reads == 5
-        assert cost.manifest_file_writes == 6
 
     def test_equality(self):
         a = ConflictCost(metadata_reads=1, manifest_list_reads=1)
@@ -128,8 +122,6 @@ class TestTransactionResult:
             runtime_ms=100.0,
             manifest_list_reads=0,
             manifest_list_writes=0,
-            manifest_file_reads=0,
-            manifest_file_writes=0,
         )
         with pytest.raises(AttributeError):
             result.status = TransactionStatus.ABORTED
@@ -148,8 +140,6 @@ class TestTransactionResult:
             runtime_ms=100.0,
             manifest_list_reads=3,
             manifest_list_writes=1,
-            manifest_file_reads=0,
-            manifest_file_writes=0,
         )
         assert result.status == TransactionStatus.COMMITTED
         assert result.txn_id == 42
@@ -172,8 +162,6 @@ class TestTransactionResult:
             runtime_ms=100.0,
             manifest_list_reads=2,
             manifest_list_writes=0,
-            manifest_file_reads=0,
-            manifest_file_writes=0,
         )
         assert result.status == TransactionStatus.ABORTED
         assert result.commit_time_ms == -1.0
@@ -268,47 +256,34 @@ class TestMergeAppendTransaction:
         assert txn.should_abort_on_real_conflict() is False
 
     def test_conflict_cost_standard_mode(self):
-        """MergeAppend retry cost is only re-merge manifests (per-attempt is separate)."""
+        """MergeAppend now returns empty ConflictCost (MF-based cost removed)."""
         txn = make_txn(MergeAppendTransaction)
         cost = txn.get_conflict_cost(n_snapshots_behind=2, ml_append_mode=False)
-        assert cost.metadata_reads == 0    # Moved to per-attempt
-        assert cost.manifest_list_reads == 0  # Moved to per-attempt
-        assert cost.manifest_list_writes == 0  # Moved to per-attempt
-        assert cost.historical_ml_reads == 0
-        # Re-merge: int(2 * 1.5) = 3 manifests
-        assert cost.manifest_file_reads == 3
-        assert cost.manifest_file_writes == 3
+        assert cost == ConflictCost()
 
     def test_conflict_cost_ml_append_mode(self):
         txn = make_txn(MergeAppendTransaction)
         cost = txn.get_conflict_cost(n_snapshots_behind=2, ml_append_mode=True)
-        assert cost.manifest_list_writes == 0  # ML+ doesn't affect retry cost
+        assert cost == ConflictCost()
 
     def test_manifest_file_io_scales_with_n_behind(self):
-        """MergeAppend manifest file I/O scales with snapshots behind."""
+        """MergeAppend now returns empty cost regardless of n_behind."""
         txn = make_txn(MergeAppendTransaction, manifests_per_concurrent_commit=1.5)
         cost_1 = txn.get_conflict_cost(n_snapshots_behind=1, ml_append_mode=False)
         cost_4 = txn.get_conflict_cost(n_snapshots_behind=4, ml_append_mode=False)
-        # n_behind=1: int(1 * 1.5) = 1 manifest
-        assert cost_1.manifest_file_reads == 1
-        assert cost_1.manifest_file_writes == 1
-        # n_behind=4: int(4 * 1.5) = 6 manifests
-        assert cost_4.manifest_file_reads == 6
-        assert cost_4.manifest_file_writes == 6
+        assert cost_1 == ConflictCost()
+        assert cost_4 == ConflictCost()
 
     def test_manifest_per_commit_parameter(self):
-        """Custom manifests_per_concurrent_commit parameter."""
+        """MergeAppend returns empty cost regardless of manifests_per_concurrent_commit."""
         txn = make_txn(MergeAppendTransaction, manifests_per_concurrent_commit=2.0)
         cost = txn.get_conflict_cost(n_snapshots_behind=3, ml_append_mode=False)
-        # int(3 * 2.0) = 6
-        assert cost.manifest_file_reads == 6
-        assert cost.manifest_file_writes == 6
+        assert cost == ConflictCost()
 
     def test_zero_manifests_when_zero_behind(self):
         txn = make_txn(MergeAppendTransaction)
         cost = txn.get_conflict_cost(n_snapshots_behind=0, ml_append_mode=False)
-        assert cost.manifest_file_reads == 0
-        assert cost.manifest_file_writes == 0
+        assert cost == ConflictCost()
 
     def test_no_historical_ml_reads(self):
         """MergeAppend never reads historical manifest lists."""
@@ -317,11 +292,10 @@ class TestMergeAppendTransaction:
         assert cost.historical_ml_reads == 0
 
     def test_default_manifests_per_commit(self):
-        """Default is 1.5 manifests per concurrent commit."""
+        """MergeAppend returns empty cost."""
         txn = make_txn(MergeAppendTransaction)
         cost = txn.get_conflict_cost(n_snapshots_behind=2, ml_append_mode=False)
-        # int(2 * 1.5) = 3
-        assert cost.manifest_file_reads == 3
+        assert cost == ConflictCost()
 
 
 # ---------------------------------------------------------------------------
@@ -345,8 +319,6 @@ class TestValidatedOverwriteTransaction:
         assert cost.manifest_list_reads == 0  # Moved to per-attempt
         assert cost.manifest_list_writes == 0  # Moved to per-attempt
         assert cost.historical_ml_reads == 2  # I/O convoy: 3-1 (per-attempt reads current)
-        assert cost.manifest_file_reads == 0
-        assert cost.manifest_file_writes == 0
 
     def test_conflict_cost_ml_append_mode(self):
         txn = make_txn(ValidatedOverwriteTransaction)
@@ -364,13 +336,6 @@ class TestValidatedOverwriteTransaction:
         txn = make_txn(ValidatedOverwriteTransaction)
         cost = txn.get_conflict_cost(n_snapshots_behind=0, ml_append_mode=False)
         assert cost.historical_ml_reads == 0
-
-    def test_no_manifest_file_io(self):
-        """ValidatedOverwrite doesn't re-merge manifests (it aborts instead)."""
-        txn = make_txn(ValidatedOverwriteTransaction)
-        cost = txn.get_conflict_cost(n_snapshots_behind=5, ml_append_mode=False)
-        assert cost.manifest_file_reads == 0
-        assert cost.manifest_file_writes == 0
 
 
 # ---------------------------------------------------------------------------
@@ -662,21 +627,18 @@ class TestScaledPerAttemptCost:
         txn = make_txn(FastAppendTransaction)
         cost = txn.get_per_attempt_cost(ml_append_mode=False)
         assert cost.manifest_list_reads == 1
-        assert cost.manifest_file_writes == 1
         assert cost.manifest_list_writes == 1
 
     def test_n_partitions_scales_all_fields(self):
         txn = make_txn(FastAppendTransaction)
         cost = txn.get_per_attempt_cost(ml_append_mode=False, n_partitions=3)
         assert cost.manifest_list_reads == 3
-        assert cost.manifest_file_writes == 3
         assert cost.manifest_list_writes == 3
 
     def test_ml_append_mode_with_n_partitions(self):
         txn = make_txn(FastAppendTransaction)
         cost = txn.get_per_attempt_cost(ml_append_mode=True, n_partitions=5)
         assert cost.manifest_list_reads == 5
-        assert cost.manifest_file_writes == 5
         assert cost.manifest_list_writes == 0  # ML+ suppresses ML writes
 
 
@@ -692,12 +654,10 @@ class TestScaledConflictCost:
         assert cost == ConflictCost()
 
     def test_merge_append_scales_by_n_partitions(self):
-        """MergeAppend: n_manifests = int(n_behind * manifests_per) * n_partitions."""
+        """MergeAppend now returns empty ConflictCost regardless of n_partitions."""
         txn = make_txn(MergeAppendTransaction, manifests_per_concurrent_commit=2.0)
         cost = txn.get_conflict_cost(n_snapshots_behind=2, ml_append_mode=False, n_partitions=3)
-        # int(2 * 2.0) * 3 = 12
-        assert cost.manifest_file_reads == 12
-        assert cost.manifest_file_writes == 12
+        assert cost == ConflictCost()
 
     def test_validated_overwrite_scales_by_n_partitions(self):
         """ValidatedOverwrite: historical_ml_reads = (n_behind - 1) * n_partitions."""
@@ -708,9 +668,7 @@ class TestScaledConflictCost:
     def test_default_n_partitions_unchanged_merge_append(self):
         txn = make_txn(MergeAppendTransaction, manifests_per_concurrent_commit=2.0)
         cost = txn.get_conflict_cost(n_snapshots_behind=2, ml_append_mode=False)
-        # int(2 * 2.0) * 1 = 4
-        assert cost.manifest_file_reads == 4
-        assert cost.manifest_file_writes == 4
+        assert cost == ConflictCost()
 
     def test_default_n_partitions_unchanged_validated_overwrite(self):
         txn = make_txn(ValidatedOverwriteTransaction)
@@ -718,87 +676,3 @@ class TestScaledConflictCost:
         assert cost.historical_ml_reads == 2  # 3-1, per-attempt reads current
 
 
-# ---------------------------------------------------------------------------
-# Inlined metadata cost elimination
-# ---------------------------------------------------------------------------
-
-class TestInlinedMetadataCosts:
-    """Verify metadata_inlined=True eliminates ML I/O from per-attempt and conflict costs."""
-
-    def test_per_attempt_eliminates_ml_reads(self):
-        txn = make_txn(FastAppendTransaction)
-        cost = txn.get_per_attempt_cost(ml_append_mode=False, metadata_inlined=True)
-        assert cost.manifest_list_reads == 0
-
-    def test_per_attempt_eliminates_ml_writes(self):
-        txn = make_txn(FastAppendTransaction)
-        cost = txn.get_per_attempt_cost(ml_append_mode=False, metadata_inlined=True)
-        assert cost.manifest_list_writes == 0
-
-    def test_per_attempt_keeps_mf_writes(self):
-        txn = make_txn(FastAppendTransaction)
-        cost = txn.get_per_attempt_cost(ml_append_mode=False, metadata_inlined=True)
-        assert cost.manifest_file_writes == 1
-
-    def test_per_attempt_inlined_scales_mf_with_partitions(self):
-        txn = make_txn(FastAppendTransaction)
-        cost = txn.get_per_attempt_cost(
-            ml_append_mode=False, n_partitions=4, metadata_inlined=True,
-        )
-        assert cost.manifest_file_writes == 4
-        assert cost.manifest_list_reads == 0
-        assert cost.manifest_list_writes == 0
-
-    def test_per_attempt_non_inlined_has_ml_io(self):
-        """Baseline: non-inlined has ML reads and writes."""
-        txn = make_txn(FastAppendTransaction)
-        cost = txn.get_per_attempt_cost(ml_append_mode=False, metadata_inlined=False)
-        assert cost.manifest_list_reads == 1
-        assert cost.manifest_list_writes == 1
-
-    def test_vo_conflict_cost_zero_when_inlined(self):
-        """Inlining eliminates the I/O convoy for ValidatedOverwrite."""
-        txn = make_txn(ValidatedOverwriteTransaction)
-        cost = txn.get_conflict_cost(
-            n_snapshots_behind=5, ml_append_mode=False, metadata_inlined=True,
-        )
-        assert cost == ConflictCost()
-
-    def test_vo_conflict_cost_nonzero_when_not_inlined(self):
-        """Baseline: non-inlined VO has historical ML reads."""
-        txn = make_txn(ValidatedOverwriteTransaction)
-        cost = txn.get_conflict_cost(
-            n_snapshots_behind=5, ml_append_mode=False, metadata_inlined=False,
-        )
-        assert cost.historical_ml_reads == 4  # 5 - 1
-
-    def test_vo_conflict_cost_inlined_ignores_partitions(self):
-        """When inlined, n_partitions doesn't matter — cost is zero."""
-        txn = make_txn(ValidatedOverwriteTransaction)
-        cost = txn.get_conflict_cost(
-            n_snapshots_behind=5, ml_append_mode=False,
-            n_partitions=10, metadata_inlined=True,
-        )
-        assert cost == ConflictCost()
-
-    def test_fa_conflict_cost_unaffected_by_inlining(self):
-        """FastAppend has zero conflict cost regardless of inlining."""
-        txn = make_txn(FastAppendTransaction)
-        cost_inlined = txn.get_conflict_cost(
-            n_snapshots_behind=5, ml_append_mode=False, metadata_inlined=True,
-        )
-        cost_normal = txn.get_conflict_cost(
-            n_snapshots_behind=5, ml_append_mode=False, metadata_inlined=False,
-        )
-        assert cost_inlined == cost_normal == ConflictCost()
-
-    def test_ma_conflict_cost_unaffected_by_inlining(self):
-        """MergeAppend conflict cost (re-merge) is not affected by inlining."""
-        txn = make_txn(MergeAppendTransaction, manifests_per_concurrent_commit=2.0)
-        cost_inlined = txn.get_conflict_cost(
-            n_snapshots_behind=3, ml_append_mode=False, metadata_inlined=True,
-        )
-        cost_normal = txn.get_conflict_cost(
-            n_snapshots_behind=3, ml_append_mode=False, metadata_inlined=False,
-        )
-        assert cost_inlined == cost_normal

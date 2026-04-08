@@ -78,8 +78,6 @@ class ConflictCost:
     manifest_list_reads: int = 0
     manifest_list_writes: int = 0
     historical_ml_reads: int = 0   # For validation history (I/O convoy)
-    manifest_file_reads: int = 0
-    manifest_file_writes: int = 0
 
 
 @dataclass(frozen=True)
@@ -99,8 +97,6 @@ class TransactionResult:
     # Detailed I/O tracking
     manifest_list_reads: int
     manifest_list_writes: int
-    manifest_file_reads: int
-    manifest_file_writes: int
 
     # Timing decomposition (ms) — audit telemetry
     catalog_read_ms: float = 0.0       # Time to read initial catalog snapshot
@@ -184,8 +180,6 @@ class Transaction(ABC):
         # I/O counters
         self._ml_reads = 0
         self._ml_writes = 0
-        self._mf_reads = 0
-        self._mf_writes = 0
 
         # Timing decomposition accumulators (ms)
         self._catalog_read_ms = 0.0
@@ -211,31 +205,19 @@ class Transaction(ABC):
         self,
         ml_append_mode: bool,
         n_partitions: int = 1,
-        metadata_inlined: bool = False,
     ) -> ConflictCost:
         """I/O cost paid on every commit attempt (before CAS).
 
         Every attempt must, per partition:
         - Read the current manifest list (1 ML read)
-        - Write a new manifest file (1 MF write)
         - Write a new manifest list (1 ML write) unless in ML+ mode
-
-        When metadata_inlined=True, ML reads/writes are eliminated because
-        the table manifest is inlined in the catalog CAS object. Only
-        manifest file writes remain.
 
         Args:
             ml_append_mode: If True, skip manifest list writes.
             n_partitions: Number of partitions needing manifest work.
-            metadata_inlined: If True, eliminate ML I/O (inlined in catalog).
         """
-        if metadata_inlined:
-            return ConflictCost(
-                manifest_file_writes=n_partitions,
-            )
         return ConflictCost(
             manifest_list_reads=n_partitions,
-            manifest_file_writes=n_partitions,
             manifest_list_writes=0 if ml_append_mode else n_partitions,
         )
 
@@ -245,22 +227,17 @@ class Transaction(ABC):
         n_snapshots_behind: int,
         ml_append_mode: bool,
         n_partitions: int = 1,
-        metadata_inlined: bool = False,
     ) -> ConflictCost:
         """Calculate additional I/O cost for conflict resolution on retry.
 
         This returns only the retry-specific cost (e.g., re-merge, I/O convoy).
-        Per-attempt cost (ML read, MF write, ML write) is handled separately
+        Per-attempt cost (ML read, ML write) is handled separately
         by get_per_attempt_cost().
-
-        When metadata_inlined=True, historical ML reads are eliminated
-        (table manifests are inlined in the catalog CAS object).
 
         Args:
             n_snapshots_behind: Number of catalog versions behind.
             ml_append_mode: If True, ML+ mode is active.
             n_partitions: Number of overlapping partitions (scales I/O cost).
-            metadata_inlined: If True, eliminate ML I/O (inlined in catalog).
         """
         ...
 
@@ -347,7 +324,6 @@ class Transaction(ABC):
         conflict_detector: ConflictDetector,
         max_retries: int = 10,
         ml_append_mode: bool = False,
-        metadata_inlined: bool = False,
     ) -> Generator[float, None, TransactionResult]:
         """Execute transaction through commit protocol.
 
@@ -358,11 +334,6 @@ class Transaction(ABC):
         4. Returns TransactionResult
 
         All I/O operations yield latency timeouts (floats).
-
-        Args:
-            metadata_inlined: If True, table manifests are inlined in the
-                catalog CAS object. Eliminates ML reads/writes from
-                per-attempt cost and historical ML reads from conflict cost.
         """
         # Phase 1: Read catalog snapshot
         before = self._elapsed
@@ -382,7 +353,7 @@ class Transaction(ABC):
 
         result = yield from self._commit_loop(
             catalog, storage, conflict_detector, max_retries,
-            ml_append_mode, metadata_inlined,
+            ml_append_mode,
         )
         return result
 
@@ -436,8 +407,6 @@ class Transaction(ABC):
             runtime_ms=self.runtime,
             manifest_list_reads=self._ml_reads,
             manifest_list_writes=self._ml_writes,
-            manifest_file_reads=self._mf_reads,
-            manifest_file_writes=self._mf_writes,
             catalog_read_ms=self._catalog_read_ms,
             per_attempt_io_ms=self._per_attempt_io_ms,
             conflict_io_ms=self._conflict_io_ms,
@@ -456,7 +425,6 @@ class Transaction(ABC):
         conflict_detector: ConflictDetector,
         max_retries: int,
         ml_append_mode: bool,
-        metadata_inlined: bool = False,
     ) -> Generator[float, None, TransactionResult]:
         """Execute commit loop with retries.
 
@@ -481,7 +449,6 @@ class Transaction(ABC):
                 before = self._elapsed
                 per_attempt = self.get_per_attempt_cost(
                     ml_append_mode, n_partitions=per_attempt_n,
-                    metadata_inlined=metadata_inlined,
                 )
                 yield from self._pay_conflict_cost(per_attempt, storage)
                 self._per_attempt_io_ms += self._elapsed - before
@@ -528,7 +495,6 @@ class Transaction(ABC):
                 cost = self.get_conflict_cost(
                     n_table_versions_behind, ml_append_mode,
                     n_partitions=overlap.n_partitions,
-                    metadata_inlined=metadata_inlined,
                 )
                 yield from self._pay_conflict_cost(cost, storage)
                 self._conflict_io_ms += self._elapsed - before
@@ -592,20 +558,6 @@ class Transaction(ABC):
             )
             self._ml_reads += 1
 
-        # Manifest file reads
-        for _ in range(cost.manifest_file_reads):
-            yield from self._yield_from(
-                storage.read(key="manifest_file", expected_size_bytes=102400)
-            )
-            self._mf_reads += 1
-
-        # Manifest file writes
-        for _ in range(cost.manifest_file_writes):
-            yield from self._yield_from(
-                storage.write(key="manifest_file", size_bytes=102400)
-            )
-            self._mf_writes += 1
-
         # ML writes
         for _ in range(cost.manifest_list_writes):
             yield from self._yield_from(
@@ -648,7 +600,6 @@ class FastAppendTransaction(Transaction):
         n_snapshots_behind: int,
         ml_append_mode: bool,
         n_partitions: int = 1,
-        metadata_inlined: bool = False,
     ) -> ConflictCost:
         # No additional retry cost — per-attempt cost covers everything
         return ConflictCost()
@@ -695,14 +646,10 @@ class MergeAppendTransaction(Transaction):
         n_snapshots_behind: int,
         ml_append_mode: bool,
         n_partitions: int = 1,
-        metadata_inlined: bool = False,
     ) -> ConflictCost:
-        # Only re-merge cost — per-attempt cost (ML read/MF write/ML write) is separate
-        n_manifests = int(n_snapshots_behind * self._manifests_per_commit) * n_partitions
-        return ConflictCost(
-            manifest_file_reads=n_manifests,
-            manifest_file_writes=n_manifests,
-        )
+        # MergeAppend conflict cost was entirely manifest-file based;
+        # with MF I/O removed, there is no additional retry cost.
+        return ConflictCost()
 
 
 class ValidatedOverwriteTransaction(Transaction):
@@ -736,14 +683,14 @@ class ValidatedOverwriteTransaction(Transaction):
         n_snapshots_behind: int,
         ml_append_mode: bool,
         n_partitions: int = 1,
-        metadata_inlined: bool = False,
     ) -> ConflictCost:
-        if metadata_inlined:
-            # Historical ML reads eliminated — table manifests inlined in catalog
-            return ConflictCost()
         # I/O convoy: read historical MLs at versions K+1..K+N to validate.
         # The per-attempt cost already reads the ML at version K+N, so only
         # K+1..K+N-1 need additional reads (N-1, not N).
+        #
+        # Inlining the table manifest does NOT eliminate the convoy. The
+        # current ML state is free (from the catalog read), but historical
+        # ML states must still be read to validate the read set.
         n_historical = max(0, n_snapshots_behind - 1) * n_partitions
         return ConflictCost(
             historical_ml_reads=n_historical,

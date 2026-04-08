@@ -1,39 +1,27 @@
-# Experiment 6a: Inlined Table Manifest (100% FastAppend, Uniform)
+# Experiment 6a-zipf: Inlined Table Manifest (100% FastAppend, Zipf)
 #
-# Goal: Show the tradeoff of inlining the table manifest in the catalog CAS.
+# Goal: Inlined metadata with skewed partition selection.
 #
-# Same sweep as exp5a, but with table_metadata_inlined=true. The catalog CAS
-# payload includes the table manifest, eliminating ML reads and writes on each
-# attempt. All ML I/O is absorbed into the (growing) CAS operation.
-#
-# Tradeoff: early commits are faster (no ML round-trips), but the CAS payload
-# grows with each successful commit, increasing CAS latency over time.
+# Same sweep as exp5a-zipf, but with inlined metadata. Combines CAS growth
+# penalty with hot-partition contention.
 #
 # Sweep: arrival_rate x partitions_per_txn (2D)
 #   arrival_rate:       LOAD_SWEEP
 #   partitions_per_txn: [1, 2, 4, 8, 16]
-#
-# Fixed: num_tables=1, partitions_per_table=32, S3 catalog CAS (growing)
-# Inlining: initial_partition_size_bytes=2048, commit_growth_bytes=100
-#
-# Expected patterns:
-#   - Throughput degrades over time as CAS payload grows
-#   - Initially faster than exp5a (no ML I/O), later slower (CAS growth)
-#   - commit_rate_over_time should show downward curve (vs exp5a flat)
 
 [simulation]
 duration_ms = 3600000
 output_path = "results.parquet"
 
 [experiment]
-label = "exp6a_inlined_fa"
+label = "exp6a_zipf_inlined_fa"
 
 [catalog]
 num_tables = 1
 num_groups = 1
 table_metadata_inlined = true
-initial_partition_size_bytes = 2048  # 32 partitions * 2 KiB = 64 KiB initial
-commit_growth_bytes = 100            # Each successful commit adds 100 bytes
+initial_partition_size_bytes = 2048
+commit_growth_bytes = 100
 
 [catalog.partition]
 num_partitions = 32
@@ -60,13 +48,15 @@ manifest_list_mode = "rewrite"
 [partition]
 enabled = true
 partitions_per_txn = 1   # Swept: [1, 2, 4, 8, 16]
+selection.distribution = "zipf"
+selection.zipf_alpha = 1.5
 
 [storage]
 provider = "s3"
 max_parallel = 4
 
 [plots]
-output_dir = "plots/exp6a_inlined_fa"
+output_dir = "plots/exp6a_zipf_inlined_fa"
 
 [[plots.graphs]]
 type = "commit_rate_over_time"

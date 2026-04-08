@@ -2359,7 +2359,8 @@ def _extract_param_value(cfg: dict, param_name: str):
         return param_map[param_name]()
 
     # Fallback: try direct lookup in common sections
-    for section in [txn, catalog, cfg.get("storage", {}), cfg.get("simulation", {})]:
+    for section in [txn, catalog, cfg.get("storage", {}), cfg.get("simulation", {}),
+                    cfg.get("partition", {})]:
         if param_name in section:
             return section[param_name]
 
