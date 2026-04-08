@@ -64,13 +64,6 @@ class SimulationConfig:
     ml_append_mode: bool = False
     metadata_inlined: bool = False
 
-    # Backoff configuration
-    backoff_enabled: bool = False
-    backoff_base_ms: float = 10.0
-    backoff_multiplier: float = 2.0
-    backoff_max_ms: float = 5000.0
-    backoff_jitter: float = 0.1
-
 
 # ---------------------------------------------------------------------------
 # Statistics

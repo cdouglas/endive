@@ -172,12 +172,6 @@ class TestSimulationConfig:
         )
         assert config.max_retries == 10
 
-    def test_backoff_defaults(self):
-        """Backoff defaults are sensible."""
-        config = make_simulation_config()
-        assert config.backoff_enabled is False
-        assert config.backoff_base_ms == 10.0
-        assert config.backoff_multiplier == 2.0
 
 
 # ---------------------------------------------------------------------------

@@ -302,7 +302,11 @@ class CASCatalog(Catalog):
         )
         latency = next(cas_gen)
 
-        # Request travels to server (half RTT)
+        # CAS split-yield: the latency is split into two yields to model
+        # server-side evaluation at the half-RTT point. The version check
+        # and state mutation happen between the two yields, allowing
+        # concurrent transactions in SimPy to interleave realistically.
+        # Total yielded time = latency (no rounding error: a - a/2 = a/2).
         yield latency / 2.0
 
         # Server evaluates version condition and applies writes

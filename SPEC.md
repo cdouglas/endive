@@ -55,7 +55,7 @@ Endive is a discrete-event simulator for Apache Iceberg's optimistic concurrency
 endive/
 ├── storage.py           # StorageProvider ABC, latency distributions, concrete providers
 ├── catalog.py           # Catalog ABC, CASCatalog, AppendCatalog, InstantCatalog
-├── transaction.py       # Transaction ABC, FastAppend, MergeAppend, ValidatedOverwrite
+├── transaction.py       # Transaction ABC, FastAppend, ValidatedOverwrite
 ├── conflict_detector.py # Probabilistic and PartitionOverlap conflict detectors
 ├── workload.py          # Workload, WorkloadConfig, table/partition selectors
 ├── simulation.py        # Simulation runner, SimulationConfig, Statistics
@@ -332,8 +332,6 @@ class ConflictCost:
     manifest_list_reads: int = 0
     manifest_list_writes: int = 0
     historical_ml_reads: int = 0   # I/O convoy for validation
-    manifest_file_reads: int = 0
-    manifest_file_writes: int = 0
 
 @dataclass(frozen=True)
 class TransactionResult:
@@ -345,14 +343,12 @@ class TransactionResult:
     total_retries: int
     commit_latency_ms: float           # Time in commit protocol
     total_latency_ms: float            # End-to-end time
-    operation_type: str                # "fast_append", "merge_append", "validated_overwrite"
+    operation_type: str                # "fast_append", "validated_overwrite"
     runtime_ms: float
 
     # I/O tracking
     manifest_list_reads: int
     manifest_list_writes: int
-    manifest_file_reads: int
-    manifest_file_writes: int
 
     # Timing decomposition (ms)
     catalog_read_ms: float
@@ -434,9 +430,9 @@ def has_write_overlap(self, old_snapshot, new_snapshot) -> bool:
 
 `partitions_written` is always a `Dict[int, FrozenSet[int]]` (never None). The Workload models unpartitioned tables as single-partition (`{tid: frozenset({0})}`) so partition-level overlap detection always applies.
 
-**No overlap** means: every intervening commit was either to a different table entirely, or to the same table but disjoint partitions. The transaction's manifest file and manifest list from the previous attempt are still valid — it just needs to retry the CAS with the updated seq.
+**No overlap** means: every intervening commit was either to a different table entirely, or to the same table but disjoint partitions. The transaction just needs to retry the CAS with the updated seq — no per-attempt I/O is needed.
 
-**Overlap** means: at least one intervening commit modified the same table AND the same partition(s). The transaction must redo its manifest work (re-read ML, re-write MF, re-write ML) and perform type-specific conflict resolution.
+**Overlap** means: at least one intervening commit modified the same table AND the same partition(s). The transaction must redo its manifest work (re-read ML, re-write ML) and perform type-specific conflict resolution.
 
 ### 3.4 Concrete Transaction Types
 
@@ -452,31 +448,19 @@ class FastAppendTransaction(Transaction):
     get_conflict_cost() -> ConflictCost()  # No additional retry cost
 ```
 
-**MergeAppendTransaction**: Must re-merge manifests on conflict. No real conflicts. Always retries. Additional retry cost (with overlap): N manifest file reads + N writes, where N = `n_behind * manifests_per_concurrent_commit`.
-
-```python
-class MergeAppendTransaction(Transaction):
-    operation_type = "merge_append"
-    def __init__(self, *args, manifests_per_concurrent_commit: float = 1.5, **kwargs): ...
-    can_have_real_conflict() -> False
-    should_abort_on_real_conflict() -> False
-    get_conflict_cost(n_behind, ml_append_mode) -> ConflictCost(
-        manifest_file_reads=n_behind * manifests_per_commit,
-        manifest_file_writes=n_behind * manifests_per_commit,
-    )
-```
-
-**ValidatedOverwriteTransaction**: Full validation via `validationHistory()`. Can have real conflicts (data overlap). Aborts with `"validation_exception"` on real conflict. Additional retry cost (with overlap): N historical ML reads (I/O convoy).
+**ValidatedOverwriteTransaction**: Full validation via `validationHistory()`. Can have real conflicts (data overlap). Aborts with `"validation_exception"` on real conflict. Additional retry cost (with overlap): N-1 historical ML reads (I/O convoy), where N is the per-table version delta for overlapping tables. The per-attempt cost already reads the current ML, so only versions K+1..K+N-1 need additional reads.
 
 ```python
 class ValidatedOverwriteTransaction(Transaction):
     operation_type = "validated_overwrite"
     can_have_real_conflict() -> True
     should_abort_on_real_conflict() -> True
-    get_conflict_cost(n_behind, ml_append_mode) -> ConflictCost(
-        historical_ml_reads=n_behind,  # I/O convoy
+    get_conflict_cost(n_table_versions_behind, ml_append_mode, n_partitions) -> ConflictCost(
+        historical_ml_reads=max(0, n_table_versions_behind - 1) * n_partitions,
     )
 ```
+
+Note: `n_table_versions_behind` is the sum of per-table version deltas for overlapping tables, NOT the catalog sequence delta. This correctly counts only commits to the conflicting tables.
 
 ### 3.5 ML+ Manifest List Protocol
 
@@ -505,7 +489,7 @@ class ConflictDetector(ABC):
 
 ### Implementations (in `conflict_detector.py`)
 
-**ProbabilisticConflictDetector**: Returns real conflict with configured probability. Respects `txn.can_have_real_conflict()` (FastAppend and MergeAppend always return False). Uses seeded RNG for determinism.
+**ProbabilisticConflictDetector**: Returns real conflict with configured probability. Respects `txn.can_have_real_conflict()` (FastAppend always returns False). Uses seeded RNG for determinism.
 
 ```python
 class ProbabilisticConflictDetector(ConflictDetector):
@@ -562,15 +546,12 @@ class WorkloadConfig:
     partitions_per_table: Tuple[int, ...]
 
     fast_append_weight: float = 0.7
-    merge_append_weight: float = 0.2
-    validated_overwrite_weight: float = 0.1
+    validated_overwrite_weight: float = 0.3
 
     tables_per_txn: int = 1
     table_selector: Optional[TableSelector] = None       # None = uniform
     partitions_per_txn: Optional[int] = None
     partition_selector: Optional[PartitionSelector] = None  # None = uniform
-
-    manifests_per_concurrent_commit: float = 1.5
 ```
 
 ### 5.3 Workload
@@ -608,12 +589,6 @@ class SimulationConfig:
 
     max_retries: int = 10
     ml_append_mode: bool = False
-
-    backoff_enabled: bool = False
-    backoff_base_ms: float = 10.0
-    backoff_multiplier: float = 2.0
-    backoff_max_ms: float = 5000.0
-    backoff_jitter: float = 0.1
 ```
 
 ### 6.2 Statistics
@@ -630,15 +605,13 @@ class Statistics:
     validation_exceptions: int
     manifest_list_reads: int
     manifest_list_writes: int
-    manifest_file_reads: int
-    manifest_file_writes: int
 
     def record_transaction(self, result: TransactionResult) -> None: ...
     def to_dataframe(self) -> pd.DataFrame: ...
     def export_parquet(self, path: str) -> None: ...
 ```
 
-Output DataFrame columns: `txn_id`, `t_submit`, `t_runtime`, `t_commit`, `commit_latency`, `total_latency`, `n_retries`, `status`, `operation_type`, `abort_reason`, `manifest_list_reads`, `manifest_list_writes`, `manifest_file_reads`, `manifest_file_writes`, `catalog_read_ms`, `per_attempt_io_ms`, `conflict_io_ms`, `catalog_commit_ms`, `event_count`.
+Output DataFrame columns: `txn_id`, `t_submit`, `t_runtime`, `t_commit`, `commit_latency`, `total_latency`, `n_retries`, `status`, `operation_type`, `abort_reason`, `manifest_list_reads`, `manifest_list_writes`, `catalog_read_ms`, `per_attempt_io_ms`, `conflict_io_ms`, `catalog_commit_ms`, `event_count`.
 
 For streaming export (lower memory), pass `output_path` to the `Statistics` constructor or to `Simulation`. Results are written incrementally to parquet in batches, avoiding accumulation in memory.
 
@@ -758,15 +731,7 @@ manifest_list_mode = "rewrite"         # "rewrite" or "append" (ML+ mode)
 
 [transaction.operation_types]
 fast_append = 0.7
-merge_append = 0.2
-validated_overwrite = 0.1
-
-[transaction.retry_backoff]
-enabled = true
-base_ms = 10.0
-multiplier = 2.0
-max_ms = 5000.0
-jitter = 0.1
+validated_overwrite = 0.3
 ```
 
 ### 7.3 Experiment Hash

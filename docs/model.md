@@ -42,11 +42,11 @@ This document describes simplifications made in the Endive discrete-event simula
 - **Reality**: Query execution time depends on data volume, parallelism, resource contention, and query complexity.
 
 ### Operation Types
-- **Simplification**: Three types (`FastAppend`, `MergeAppend`, `ValidatedOverwrite`) with probabilistic mix via `WorkloadConfig` weights. Each type has fixed conflict cost formulas.
+- **Simplification**: Two types (`FastAppend`, `ValidatedOverwrite`) with probabilistic mix via `WorkloadConfig` weights. Each type has fixed conflict cost formulas.
 - **Reality**: Operation type is determined by the query, and conflict cost depends on actual manifest and data file sizes.
 
 ### Retry Behavior
-- **Simplification**: Failed transactions retry with optional exponential backoff. Per-attempt and conflict I/O costs modeled via `ConflictCost` dataclass.
+- **Simplification**: Failed transactions retry immediately. Per-attempt and conflict I/O costs modeled via `ConflictCost` dataclass.
 - **Reality**: Real systems may have circuit breakers, queue management, and priority scheduling.
 
 ## Append Operations (ML+ Mode)
