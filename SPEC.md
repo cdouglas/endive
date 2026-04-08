@@ -1,7 +1,7 @@
 # Endive Simulator Specification
 
-**Version**: 2.1
-**Date**: 2026-03-01
+**Version**: 3.0
+**Date**: 2026-04-08
 
 ## Executive Summary
 
@@ -315,7 +315,118 @@ Catalog                                 Storage
 
 Transactions encapsulate the commit protocol and conflict handling. Each type has different conflict resolution behavior, but all use the same `catalog.commit()` interface.
 
-### 3.1 Core Types
+### 3.1 Iceberg Metadata Model
+
+A catalog commit involves three levels of metadata:
+
+1. **Catalog file**: Global pointer to the current table metadata. Updated via CAS.
+2. **Table metadata file**: Per-table state including partition versions and manifest list pointers. One file per table, stored in object storage.
+3. **Manifest list**: Per-partition list of manifest files. Stored in object storage.
+
+When `metadata_inlined=True`, the table metadata is stored inside the catalog CAS object. The table metadata file no longer exists as a separate object, eliminating its read/write cost. The manifest list is NOT inlined — it remains a separate storage object.
+
+Each partition maintains its own entry in the catalog. Disjoint partitions do not interact: a CAS failure caused by a commit to a different partition is a free retry (catalog re-read + CAS only).
+
+### 3.2 Per-Attempt I/O Cost Model
+
+Every commit attempt pays storage I/O before the CAS. The cost depends on whether table metadata is inlined and how many partitions are written.
+
+**Non-inlined (`metadata_inlined=False`, exp1–5):**
+
+| Step | Operation | Count | Key |
+|------|-----------|-------|-----|
+| 1 | Read table metadata | 1 | `table_metadata` |
+| 2 | Read manifest list | N | `manifest_list` |
+| 3 | Write manifest list | N | `manifest_list` |
+| 4 | Write table metadata | 1 | `table_metadata` |
+
+N = number of partitions written (first attempt) or overlapping partitions (retry).
+
+**Inlined (`metadata_inlined=True`, exp6):**
+
+| Step | Operation | Count | Key |
+|------|-----------|-------|-----|
+| 1 | Read manifest list | N | `manifest_list` |
+| 2 | Write manifest list | N | `manifest_list` |
+
+Table metadata reads/writes are eliminated — the state is in the catalog CAS object.
+
+**In ML+ mode** (`ml_append_mode=True`): ML writes are eliminated (the append replaces the rewrite). TM reads/writes are still paid (if non-inlined).
+
+```python
+def get_per_attempt_cost(self, ml_append_mode, n_partitions=1, metadata_inlined=False):
+    return ConflictCost(
+        table_metadata_reads=0 if metadata_inlined else 1,
+        table_metadata_writes=0 if metadata_inlined else 1,
+        manifest_list_reads=n_partitions,
+        manifest_list_writes=0 if ml_append_mode else n_partitions,
+    )
+```
+
+### 3.3 Commit Protocol — Full Pseudocode
+
+```python
+def execute(catalog, storage, conflict_detector, max_retries, ml_append_mode, metadata_inlined):
+    # Phase 1: Read catalog snapshot
+    start_snapshot = yield from catalog.read()
+
+    # Phase 2: Execute transaction work
+    yield runtime_ms
+
+    # Phase 3: Commit loop
+    last_snapshot = start_snapshot
+    per_attempt_n = count(partitions_written)        # All written partitions on first attempt
+
+    for attempt in range(max_retries + 1):
+
+        # --- Per-attempt I/O (skipped on disjoint retry where per_attempt_n=0) ---
+        if per_attempt_n > 0:
+            cost = get_per_attempt_cost(ml_append_mode, per_attempt_n, metadata_inlined)
+            yield from pay_io(cost, storage)         # TM read, ML reads, ML writes, TM write
+
+        # --- CAS ---
+        result = yield from catalog.commit(last_snapshot.seq, writes)
+        if result.success:
+            return COMMITTED
+
+        # --- CAS failed: read catalog to determine overlap ---
+        current_snapshot = yield from catalog.read()
+
+        # Non-inlined: separate TM read needed to get partition versions
+        if not metadata_inlined:
+            yield from storage.read("table_metadata")
+
+        overlap = compute_write_overlap(last_snapshot, current_snapshot)
+
+        # --- Conflict resolution (only when partitions overlap) ---
+        if overlap.has_overlap:
+            conflict_cost = get_conflict_cost(n_table_versions_behind, ...)
+            yield from pay_io(conflict_cost, storage)  # VO: historical ML reads
+
+            if can_have_real_conflict():
+                if conflict_detector.is_real_conflict(...) and should_abort():
+                    return ABORTED("validation_exception")
+
+        # --- Prepare for retry ---
+        last_snapshot = current_snapshot
+        per_attempt_n = overlap.n_partitions          # 0 = free retry next iteration
+
+    return ABORTED("max_retries_exceeded")
+```
+
+### 3.4 I/O Cost Summary Table
+
+| Path | Non-inlined storage ops | Inlined storage ops |
+|------|------------------------|---------------------|
+| **First attempt** | TM_r(1) + ML_r(N) + ML_w(N) + TM_w(1) + CAS | ML_r(N) + ML_w(N) + CAS |
+| **Failure path** | catalog_read + TM_r(1) → overlap check | catalog_read → overlap check |
+| **Retry, disjoint** | CAS only (free) | CAS only (free) |
+| **Retry, overlap (FA)** | TM_r(1) + ML_r(M) + ML_w(M) + TM_w(1) + CAS | ML_r(M) + ML_w(M) + CAS |
+| **Retry, overlap (VO)** | above + (V-1)×M historical ML reads | above + (V-1)×M historical ML reads |
+
+N = partitions written, M = overlapping partitions, V = per-table version delta.
+
+### 3.5 Core Types
 
 ```python
 class TransactionStatus(Enum):
@@ -327,11 +438,12 @@ class TransactionStatus(Enum):
 
 @dataclass(frozen=True)
 class ConflictCost:
-    """I/O operations required to resolve a conflict."""
-    metadata_reads: int = 0
-    manifest_list_reads: int = 0
-    manifest_list_writes: int = 0
-    historical_ml_reads: int = 0   # I/O convoy for validation
+    """I/O operations for one phase of the commit protocol."""
+    table_metadata_reads: int = 0   # TM file reads (non-inlined only)
+    table_metadata_writes: int = 0  # TM file writes (non-inlined only)
+    manifest_list_reads: int = 0    # ML reads (per partition)
+    manifest_list_writes: int = 0   # ML writes (per partition)
+    historical_ml_reads: int = 0    # I/O convoy for validation (VO only)
 
 @dataclass(frozen=True)
 class TransactionResult:
@@ -347,131 +459,105 @@ class TransactionResult:
     runtime_ms: float
 
     # I/O tracking
+    table_metadata_reads: int
+    table_metadata_writes: int
     manifest_list_reads: int
     manifest_list_writes: int
 
     # Timing decomposition (ms)
-    catalog_read_ms: float
+    catalog_read_ms: float             # Catalog reads + failure-path TM reads
     per_attempt_io_ms: float           # Total time in per-attempt storage I/O
-    conflict_io_ms: float              # Total time in retry-specific I/O
+    conflict_io_ms: float              # Total time in retry-specific I/O (convoy)
     catalog_commit_ms: float           # Total time in catalog.commit() calls
 
-    # DES engine profiling
-    event_count: int = 0               # Number of SimPy events processed by this txn
+    # Retry characterization
+    catalog_conflicts: int = 0         # CAS failures with no write overlap (free retries)
+    tblptn_conflicts: int = 0          # CAS failures with write overlap
+    max_snapshots_behind: int = 0      # Max (new_seq - old_seq) across retries
 ```
 
-### 3.2 Transaction ABC
+### 3.6 Transaction ABC
 
 ```python
 class Transaction(ABC):
-    def __init__(self, txn_id: int, submit_time_ms: float, runtime_ms: float,
+    def __init__(self, txn_id, submit_time_ms, runtime_ms,
                  tables_written: FrozenSet[int],
-                 partitions_written: Optional[Dict[int, FrozenSet[int]]] = None): ...
+                 partitions_written: Dict[int, FrozenSet[int]]): ...
 
-    def execute(self, catalog: Catalog, storage: StorageProvider,
-                conflict_detector: ConflictDetector, max_retries: int = 10,
-                ml_append_mode: bool = False) -> Generator[float, None, TransactionResult]: ...
+    def execute(self, catalog, storage, conflict_detector,
+                max_retries=10, ml_append_mode=False,
+                metadata_inlined=False) -> Generator[float, None, TransactionResult]: ...
 
-    @abstractmethod
-    def can_have_real_conflict(self) -> bool: ...
-    @abstractmethod
-    def should_abort_on_real_conflict(self) -> bool: ...
-
-    def get_per_attempt_cost(self, ml_append_mode: bool) -> ConflictCost:
-        """I/O cost paid on first attempt and on retries with write overlap.
-        Cost: 1 ML read + 1 MF write + 1 ML write (0 ML write in ML+ mode).
-        Skipped on retry when intervening commits have no write overlap."""
+    def get_per_attempt_cost(self, ml_append_mode, n_partitions=1,
+                             metadata_inlined=False) -> ConflictCost: ...
 
     @abstractmethod
-    def get_conflict_cost(self, n_snapshots_behind: int, ml_append_mode: bool) -> ConflictCost:
-        """Additional retry-specific I/O cost. Only paid when write overlap exists."""
+    def get_conflict_cost(self, n_snapshots_behind, ml_append_mode,
+                          n_partitions=1) -> ConflictCost: ...
 
-    def has_write_overlap(self, old_snapshot: CatalogSnapshot,
-                          new_snapshot: CatalogSnapshot) -> bool:
-        """Check if intervening commits overlap with this transaction's writes.
-        Returns False if all intervening commits were to different tables or
-        disjoint partitions of the same table. Returns True if any intervening
-        commit modified the same table AND overlapping partitions (or if
-        partition tracking is disabled, any same-table modification)."""
+    def compute_write_overlap(self, old_snapshot, new_snapshot) -> WriteOverlap: ...
 ```
 
-The `execute()` method drives the transaction lifecycle:
-
-1. **Read** catalog snapshot (`catalog.read()`)
-2. **Execute** transaction work (yield `runtime_ms`)
-3. **Commit loop** (up to `max_retries + 1` attempts):
-   - a. Pay per-attempt I/O cost (ML read, MF write, ML write) — **skipped when no write overlap** (see below)
-   - b. Call `catalog.commit()`
-   - c. On success: return COMMITTED
-   - d. On failure: read catalog (`catalog.read()`) to learn current state
-   - e. Check **write overlap** (`has_write_overlap()`): did any intervening commit modify the same table AND overlapping partitions?
-   - f. If **no overlap** (cross-table or disjoint partitions): skip to step 3b on next iteration (no manifest I/O)
-   - g. If **overlap**: pay type-specific conflict cost, check for real conflict (may abort), go to step 3a on next iteration
-
-The `_yield_from()` helper tracks elapsed time across sub-generators. The `_pay_conflict_cost()` method executes storage operations for each `ConflictCost` field.
-
-### 3.3 Write Overlap Check
-
-After a CAS failure, the transaction compares its `tables_written` and `partitions_written` against what changed between the old and new catalog snapshots:
+### 3.7 Write Overlap Detection
 
 ```python
-def has_write_overlap(self, old_snapshot, new_snapshot) -> bool:
+def compute_write_overlap(self, old_snapshot, new_snapshot) -> WriteOverlap:
+    overlapping = {}
     for table_id in self.tables_written:
         old_table = old_snapshot.get_table(table_id)
         new_table = new_snapshot.get_table(table_id)
         if old_table.version == new_table.version:
-            continue  # This table was not modified by intervening commits
-        # Same table was modified — check partition overlap
-        for pid in self.partitions_written.get(table_id, ()):
-            if old_table.partition_versions[pid] != new_table.partition_versions[pid]:
-                return True  # Overlapping partition
-    return False
+            continue  # Table not modified by intervening commits
+        overlap_pids = frozenset(
+            pid for pid in self.partitions_written.get(table_id, ())
+            if old_table.partition_versions[pid] != new_table.partition_versions[pid]
+        )
+        if overlap_pids:
+            overlapping[table_id] = overlap_pids
+    return WriteOverlap(overlapping) if overlapping else NO_OVERLAP
 ```
 
-`partitions_written` is always a `Dict[int, FrozenSet[int]]` (never None). The Workload models unpartitioned tables as single-partition (`{tid: frozenset({0})}`) so partition-level overlap detection always applies.
+### 3.8 Concrete Transaction Types
 
-**No overlap** means: every intervening commit was either to a different table entirely, or to the same table but disjoint partitions. The transaction just needs to retry the CAS with the updated seq — no per-attempt I/O is needed.
-
-**Overlap** means: at least one intervening commit modified the same table AND the same partition(s). The transaction must redo its manifest work (re-read ML, re-write ML) and perform type-specific conflict resolution.
-
-### 3.4 Concrete Transaction Types
-
-All per-attempt I/O costs and conflict costs below are paid **only when `has_write_overlap()` returns True**. Cross-table and disjoint-partition retries pay only the catalog read + CAS round-trip.
-
-**FastAppendTransaction**: Append-only, no validation, no real conflicts possible. Always retries on conflict. No additional retry cost beyond per-attempt I/O.
+**FastAppendTransaction**: Append-only, no validation, no real conflicts possible. Always retries. No additional I/O beyond per-attempt cost.
 
 ```python
 class FastAppendTransaction(Transaction):
     operation_type = "fast_append"
     can_have_real_conflict() -> False
-    should_abort_on_real_conflict() -> False
-    get_conflict_cost() -> ConflictCost()  # No additional retry cost
+    get_conflict_cost(...) -> ConflictCost()  # No additional retry cost
 ```
 
-**ValidatedOverwriteTransaction**: Full validation via `validationHistory()`. Can have real conflicts (data overlap). Aborts with `"validation_exception"` on real conflict. Additional retry cost (with overlap): N-1 historical ML reads (I/O convoy), where N is the per-table version delta for overlapping tables. The per-attempt cost already reads the current ML, so only versions K+1..K+N-1 need additional reads.
+**ValidatedOverwriteTransaction**: Full validation. Can have real conflicts. Aborts on real conflict. Additional retry cost: historical ML reads (I/O convoy).
 
 ```python
 class ValidatedOverwriteTransaction(Transaction):
     operation_type = "validated_overwrite"
     can_have_real_conflict() -> True
     should_abort_on_real_conflict() -> True
-    get_conflict_cost(n_table_versions_behind, ml_append_mode, n_partitions) -> ConflictCost(
-        historical_ml_reads=max(0, n_table_versions_behind - 1) * n_partitions,
-    )
+    get_conflict_cost(n_table_versions_behind, ml_append_mode, n_partitions):
+        # Read historical MLs at versions K+1..K+N-1 to validate read set.
+        # The per-attempt cost reads the ML at version K+N, so N-1 additional.
+        return ConflictCost(
+            historical_ml_reads=max(0, n_table_versions_behind - 1) * n_partitions,
+        )
 ```
 
-Note: `n_table_versions_behind` is the sum of per-table version deltas for overlapping tables, NOT the catalog sequence delta. This correctly counts only commits to the conflicting tables.
+`n_table_versions_behind` is the sum of per-table version deltas for overlapping tables, NOT the catalog sequence delta. Only commits to conflicting tables are counted.
 
-### 3.5 ML+ Manifest List Protocol
+### 3.9 ML+ Manifest List Protocol
 
-In ML+ mode (`ml_append_mode=True`), the manifest list is updated via append before the catalog commit. This is Transaction-level logic:
+In ML+ mode (`ml_append_mode=True`), ML writes are eliminated from the per-attempt cost (the append replaces the rewrite). TM reads/writes are still paid if non-inlined.
 
-1. Transaction appends ML entry (tentative)
-2. Transaction calls `catalog.commit()` (uniform interface)
-3. If committed: ML entry is valid
-4. If conflict: ML entry is orphaned (harmless); transaction must read ML containing all committed transactions before retry
+### 3.10 Inlined Table Metadata
 
-The per-attempt cost saves 1 ML write in ML+ mode (the append replaces the rewrite).
+When `metadata_inlined=True`:
+
+1. Table metadata is stored in the catalog CAS object — no separate file.
+2. Per-attempt cost eliminates TM read and TM write (2 fewer ops per attempt).
+3. Failure-path catalog read already contains partition versions — no extra TM read.
+4. CAS payload grows with each commit (`commit_growth_bytes`), capped at `max_catalog_size_bytes`. CAS latency scales with payload size via `SizeBasedLatency`.
+5. The VO I/O convoy is NOT eliminated — historical MLs must still be read to validate the read set.
 
 ---
 
@@ -589,6 +675,7 @@ class SimulationConfig:
 
     max_retries: int = 10
     ml_append_mode: bool = False
+    metadata_inlined: bool = False     # Passed to txn.execute()
 ```
 
 ### 6.2 Statistics
@@ -603,6 +690,8 @@ class Statistics:
     aborted: int
     total_retries: int
     validation_exceptions: int
+    table_metadata_reads: int
+    table_metadata_writes: int
     manifest_list_reads: int
     manifest_list_writes: int
 
@@ -611,7 +700,7 @@ class Statistics:
     def export_parquet(self, path: str) -> None: ...
 ```
 
-Output DataFrame columns: `txn_id`, `t_submit`, `t_runtime`, `t_commit`, `commit_latency`, `total_latency`, `n_retries`, `status`, `operation_type`, `abort_reason`, `manifest_list_reads`, `manifest_list_writes`, `catalog_read_ms`, `per_attempt_io_ms`, `conflict_io_ms`, `catalog_commit_ms`, `event_count`.
+Output DataFrame columns: `txn_id`, `t_submit`, `t_runtime`, `t_commit`, `commit_latency`, `total_latency`, `n_retries`, `status`, `operation_type`, `abort_reason`, `table_metadata_reads`, `table_metadata_writes`, `manifest_list_reads`, `manifest_list_writes`, `catalog_read_ms`, `per_attempt_io_ms`, `conflict_io_ms`, `catalog_commit_ms`, `event_count`.
 
 For streaming export (lower memory), pass `output_path` to the `Statistics` constructor or to `Simulation`. Results are written incrementally to parquet in batches, avoiding accumulation in memory.
 
@@ -760,9 +849,10 @@ experiments/
 - Transactions observe catalog state via immutable `CatalogSnapshot`
 - Changes are only visible after commit
 
-### 8.3 Manifest List Exactness
-- When N snapshots behind AND write overlap exists, read exactly N historical manifest lists (I/O convoy)
-- Not N-1, not N+1
+### 8.3 I/O Convoy Exactness (ValidatedOverwrite only)
+- When N table versions behind AND write overlap exists, read exactly (N-1) × M historical manifest lists
+- N = per-table version delta for overlapping tables; M = number of overlapping partitions
+- The per-attempt cost reads the ML at version K+N; only K+1..K+N-1 need additional reads
 - Skipped entirely when there is no write overlap (cross-table or disjoint partitions)
 
 ### 8.4 Conflict Type Distinction
@@ -807,11 +897,19 @@ experiments/
 - The Workload owns topology and configures Transactions accordingly
 - The Catalog does not expose topology queries
 
-### 8.12 Cross-Table Retry Cost
-- CAS failures caused by commits to a different table (or disjoint partitions of the same table) do not require manifest I/O
-- The retry cost is: 1 catalog read + 1 CAS round-trip
-- Per-attempt I/O and conflict resolution costs apply ONLY when `has_write_overlap()` returns True
-- This is critical for multi-table workloads: with N tables and uniform selection, ~(N-1)/N of CAS failures are cross-table and essentially free to retry
+### 8.12 Cross-Table / Disjoint Retry Cost
+- CAS failures caused by commits to a different table (or disjoint partitions of the same table) do not require manifest or table metadata I/O
+- Each partition has its own entry in the catalog; disjoint writes do not interact
+- The retry cost is: 1 catalog read (+ 1 TM read if non-inlined) + 1 CAS round-trip
+- Per-attempt I/O and conflict resolution costs apply ONLY when `compute_write_overlap()` returns overlap
+- Critical for multi-table workloads: with N tables and uniform selection, ~(N-1)/N of CAS failures are cross-table and essentially free to retry
+
+### 8.13 Table Metadata Inlining
+- When `metadata_inlined=True`, table metadata is stored in the catalog CAS object
+- Per-attempt cost eliminates TM read and TM write (2 fewer storage ops per attempt)
+- Failure-path catalog read includes partition versions (no extra TM read)
+- CAS payload grows by `commit_growth_bytes` per successful commit, capped at `max_catalog_size_bytes`
+- CAS latency scales with payload size via `SizeBasedLatency`
 
 ---
 
@@ -827,5 +925,7 @@ experiments/
 - **I/O Convoy**: Reading N historical manifest lists for N missed snapshots (only when write overlap exists)
 - **Snapshot Isolation**: Transaction sees consistent point-in-time state
 - **Validation Exception**: Abort due to real data overlap detection
-- **Per-attempt cost**: I/O paid on first attempt and on retries with write overlap (ML read, MF write, ML write)
-- **Conflict cost**: Additional I/O paid only on retry with write overlap (type-dependent)
+- **Table metadata (TM)**: Per-table metadata file stored in object storage (non-inlined) or in the catalog CAS object (inlined)
+- **Manifest list (ML)**: Per-partition list of manifest files, stored in object storage
+- **Per-attempt cost**: I/O paid on first attempt and on retries with write overlap: TM read + ML reads + ML writes + TM write (non-inlined) or ML reads + ML writes (inlined)
+- **Conflict cost**: Additional I/O paid only on retry with write overlap (type-dependent: zero for FA, historical ML reads for VO)
