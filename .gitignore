@@ -7,3 +7,8 @@ experiments/
 experiment_logs/
 plots/
 docs/review/
+
+# Beads / Dolt files (added by bd init)
+.dolt/
+*.db
+.beads-credential-key

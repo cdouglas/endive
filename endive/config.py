@@ -282,12 +282,7 @@ def _build_workload(
     # Operation type weights
     op_types = txn_cfg.get("operation_types", {})
     fa_weight = op_types.get("fast_append", 1.0)
-    ma_weight = op_types.get("merge_append", 0.0)
     vo_weight = op_types.get("validated_overwrite", 0.0)
-
-    # MergeAppend parameters
-    cm = txn_cfg.get("conflicting_manifests", {})
-    manifests_per_commit = cm.get("mean", 1.5)
 
     # Table selection
     tables_per_txn = txn_cfg.get("tables_per_txn", 1)
@@ -317,9 +312,7 @@ def _build_workload(
         num_tables=num_tables,
         partitions_per_table=partitions_per_table,
         fast_append_weight=fa_weight,
-        merge_append_weight=ma_weight,
         validated_overwrite_weight=vo_weight,
-        manifests_per_concurrent_commit=manifests_per_commit,
         tables_per_txn=tables_per_txn,
         table_selector=table_selector,
         partitions_per_txn=partitions_per_txn,
@@ -516,7 +509,7 @@ def validate_config(config: dict) -> tuple[list[str], list[str]]:
     # Operation type weights validation
     op_types = txn.get('operation_types', {})
     if op_types:
-        valid_op_types = {'fast_append', 'merge_append', 'validated_overwrite'}
+        valid_op_types = {'fast_append', 'validated_overwrite'}
         for op_name in op_types.keys():
             if op_name not in valid_op_types:
                 errors.append(f"Unknown operation type: '{op_name}'. Valid types: {valid_op_types}")

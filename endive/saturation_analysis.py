@@ -3634,9 +3634,7 @@ def generate_workload_knee_table(base_dir: str, pattern: str, output_dir: str,
 
     # Pivot op-type metrics for easy lookup
     fa_data = agg[agg["operation_type"] == "fast_append"].copy()
-    vo_data = agg[agg["operation_type"].isin(
-        ["validated_overwrite", "merge_append"]
-    )].copy()
+    vo_data = agg[agg["operation_type"] == "validated_overwrite"].copy()
 
     # Find knee for each (provider, num_tables, fa_ratio)
     knee_records = []

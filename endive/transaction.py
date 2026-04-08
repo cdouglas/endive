@@ -4,7 +4,6 @@ Transactions encapsulate the commit protocol and conflict handling.
 Each type has different conflict resolution behavior:
 
 - FastAppendTransaction: No validation, cheap retry (~160ms)
-- MergeAppendTransaction: Re-merge manifests on retry
 - ValidatedOverwriteTransaction: Full validation, aborts on real conflict
 
 All transactions use catalog.commit() (uniform interface). They never
@@ -91,7 +90,7 @@ class TransactionResult:
     total_retries: int
     commit_latency_ms: float       # Time in commit protocol only
     total_latency_ms: float        # End-to-end time
-    operation_type: str            # "fast_append", "merge_append", "validated_overwrite"
+    operation_type: str            # "fast_append", "validated_overwrite"
     runtime_ms: float              # Transaction runtime (execution phase)
 
     # Detailed I/O tracking
@@ -152,7 +151,6 @@ class Transaction(ABC):
 
     Subclasses implement different Iceberg operation semantics:
     - FastAppendTransaction: Additive, no conflicts possible
-    - MergeAppendTransaction: Must re-merge manifests on conflict
     - ValidatedOverwriteTransaction: Full validation, real conflicts abort
     """
 
@@ -605,52 +603,6 @@ class FastAppendTransaction(Transaction):
         return ConflictCost()
 
 
-class MergeAppendTransaction(Transaction):
-    """Merge operation that must re-merge manifests on conflict.
-
-    Semantics:
-    - Merges data from multiple manifest files
-    - No validation against existing data
-    - On conflict: must re-merge with concurrent commits
-    - Never aborts; always retries
-
-    Per-attempt cost (paid every attempt):
-    - 1 ML read + 1 MF write + 1 ML write (0 in ML+ mode)
-
-    Additional retry cost:
-    - N manifest file reads + N manifest file writes (re-merge)
-    - N = n_behind * manifests_per_concurrent_commit
-    """
-
-    @property
-    def operation_type(self) -> str:
-        return "merge_append"
-
-    def __init__(
-        self,
-        *args,
-        manifests_per_concurrent_commit: float = 1.5,
-        **kwargs,
-    ):
-        super().__init__(*args, **kwargs)
-        self._manifests_per_commit = manifests_per_concurrent_commit
-
-    def can_have_real_conflict(self) -> bool:
-        return False
-
-    def should_abort_on_real_conflict(self) -> bool:
-        return False
-
-    def get_conflict_cost(
-        self,
-        n_snapshots_behind: int,
-        ml_append_mode: bool,
-        n_partitions: int = 1,
-    ) -> ConflictCost:
-        # MergeAppend conflict cost was entirely manifest-file based;
-        # with MF I/O removed, there is no additional retry cost.
-        return ConflictCost()
-
 
 class ValidatedOverwriteTransaction(Transaction):
     """Overwrite operation with full validation.
@@ -662,10 +614,10 @@ class ValidatedOverwriteTransaction(Transaction):
     - Aborts with ValidationException on real conflict
 
     Per-attempt cost (paid every attempt):
-    - 1 ML read + 1 MF write + 1 ML write (0 in ML+ mode)
+    - 1 ML read + 1 ML write (0 in ML+ mode)
 
     Additional retry cost (I/O Convoy):
-    - N historical manifest list reads (one per missed snapshot)
+    - N-1 historical manifest list reads (one per missed snapshot)
     """
 
     @property

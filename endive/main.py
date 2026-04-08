@@ -182,7 +182,7 @@ def print_configuration(config: dict) -> None:
     op_types = txn.get("operation_types", {})
     if op_types:
         parts = []
-        for name in ["fast_append", "merge_append", "validated_overwrite"]:
+        for name in ["fast_append", "validated_overwrite"]:
             w = op_types.get(name, 0)
             if w > 0:
                 parts.append(f"{name}={w:.0%}")

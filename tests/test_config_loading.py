@@ -76,8 +76,7 @@ inter_arrival.scale = 200.0
 runtime.mean = 100000
 runtime.sigma = 1.2
 operation_types.fast_append = 0.5
-operation_types.merge_append = 0.3
-operation_types.validated_overwrite = 0.2
+operation_types.validated_overwrite = 0.5
 real_conflict_probability = 0.3
 
 [storage]
@@ -424,7 +423,7 @@ class TestValidateConfig:
             "transaction": {
                 "operation_types": {
                     "fast_append": 0.5,
-                    "merge_append": 0.3,
+                    "validated_overwrite": 0.3,
                 },
             },
         }

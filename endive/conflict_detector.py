@@ -11,8 +11,8 @@ Implementations:
   changes between start and current snapshots. Real conflict if a written
   partition was modified by a concurrent transaction.
 
-Both respect txn.can_have_real_conflict(): FastAppend and MergeAppend
-always return False (they cannot detect conflicts).
+Both respect txn.can_have_real_conflict(): FastAppend always returns
+False (it cannot detect conflicts).
 """
 
 from __future__ import annotations
@@ -32,8 +32,8 @@ class ProbabilisticConflictDetector(ConflictDetector):
     """Probabilistic conflict detection.
 
     Returns real conflict with configured probability for transactions
-    that can_have_real_conflict(). FastAppend and MergeAppend always
-    return False regardless of probability.
+    that can_have_real_conflict(). FastAppend always returns False
+    regardless of probability.
 
     Uses a seeded RNG for deterministic simulation results.
     """

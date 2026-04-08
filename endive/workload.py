@@ -22,7 +22,6 @@ import numpy as np
 from endive.storage import LatencyDistribution
 from endive.transaction import (
     FastAppendTransaction,
-    MergeAppendTransaction,
     Transaction,
     ValidatedOverwriteTransaction,
 )
@@ -216,8 +215,7 @@ class WorkloadConfig:
 
     # Operation type weights (normalized internally)
     fast_append_weight: float = 0.7
-    merge_append_weight: float = 0.2
-    validated_overwrite_weight: float = 0.1
+    validated_overwrite_weight: float = 0.3
 
     # Table selection
     tables_per_txn: int = 1
@@ -226,9 +224,6 @@ class WorkloadConfig:
     # Partition selection (None = no partition tracking)
     partitions_per_txn: Optional[int] = None
     partition_selector: Optional[PartitionSelector] = None  # None = uniform
-
-    # MergeAppend parameter
-    manifests_per_concurrent_commit: float = 1.5
 
 
 # ---------------------------------------------------------------------------
@@ -262,7 +257,6 @@ class Workload:
         # Normalize operation type weights
         weights = np.array([
             config.fast_append_weight,
-            config.merge_append_weight,
             config.validated_overwrite_weight,
         ])
         total = weights.sum()
@@ -337,17 +331,12 @@ class Workload:
 
         if op_type == 'fast_append':
             return FastAppendTransaction(**common)
-        elif op_type == 'merge_append':
-            return MergeAppendTransaction(
-                **common,
-                manifests_per_concurrent_commit=self._config.manifests_per_concurrent_commit,
-            )
         else:
             return ValidatedOverwriteTransaction(**common)
 
     def _sample_operation_type(self) -> str:
         """Sample operation type from configured weights."""
         return str(self._rng.choice(
-            ['fast_append', 'merge_append', 'validated_overwrite'],
+            ['fast_append', 'validated_overwrite'],
             p=self._op_weights,
         ))

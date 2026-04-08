@@ -26,7 +26,6 @@ from endive.conflict_detector import (
 from endive.transaction import (
     ConflictDetector,
     FastAppendTransaction,
-    MergeAppendTransaction,
     ValidatedOverwriteTransaction,
 )
 
@@ -78,17 +77,6 @@ def make_fast_append(**kwargs):
     return FastAppendTransaction(**defaults)
 
 
-def make_merge_append(**kwargs):
-    defaults = dict(
-        txn_id=1,
-        submit_time_ms=0.0,
-        runtime_ms=100.0,
-        tables_written=frozenset({0}),
-    )
-    defaults.update(kwargs)
-    return MergeAppendTransaction(**defaults)
-
-
 def make_validated_overwrite(**kwargs):
     defaults = dict(
         txn_id=1,
@@ -132,15 +120,6 @@ class TestProbabilisticConflictDetector:
         current = make_snapshot(seq=1)
 
         txn = make_fast_append()
-        assert detector.is_real_conflict(txn, current, start) is False
-
-    def test_merge_append_immune(self):
-        """MergeAppend never returns real conflict regardless of probability."""
-        detector = ProbabilisticConflictDetector(1.0, rng=np.random.RandomState(42))
-        start = make_snapshot(seq=0)
-        current = make_snapshot(seq=1)
-
-        txn = make_merge_append()
         assert detector.is_real_conflict(txn, current, start) is False
 
     def test_deterministic_with_seed(self):
@@ -265,17 +244,6 @@ class TestPartitionOverlapConflictDetector:
         """FastAppend never returns real even with partition overlap."""
         detector = PartitionOverlapConflictDetector()
         txn = make_fast_append(
-            partitions_written={0: frozenset({0})},
-        )
-        start = make_snapshot(seq=0, partition_versions={0: (0, 0, 0, 0)})
-        current = make_snapshot(seq=1, partition_versions={0: (1, 0, 0, 0)})
-
-        assert detector.is_real_conflict(txn, current, start) is False
-
-    def test_merge_append_immune(self):
-        """MergeAppend never returns real even with partition overlap."""
-        detector = PartitionOverlapConflictDetector()
-        txn = make_merge_append(
             partitions_written={0: frozenset({0})},
         )
         start = make_snapshot(seq=0, partition_versions={0: (0, 0, 0, 0)})

@@ -18,7 +18,6 @@ from endive.transaction import (
     ConflictCost,
     ConflictDetector,
     FastAppendTransaction,
-    MergeAppendTransaction,
     Transaction,
     TransactionResult,
     TransactionStatus,
@@ -397,66 +396,6 @@ class TestValidatedOverwriteAbort:
         assert result.manifest_list_writes == 2
 
 
-# ---------------------------------------------------------------------------
-# MergeAppend retry with manifest I/O
-# ---------------------------------------------------------------------------
-
-class TestMergeAppendRetry:
-    def test_retry_with_overlap(self):
-        """MergeAppend retries on same-table overlap (conflict cost is zero post MF removal)."""
-        catalog = make_instant_catalog()
-        storage = InstantStorageProvider(rng=np.random.RandomState(42))
-        detector = NeverRealConflictDetector()
-
-        txn = MergeAppendTransaction(
-            txn_id=2,
-            submit_time_ms=0.0,
-            runtime_ms=100.0,
-            tables_written=frozenset({0}),
-            partitions_written={0: frozenset({0})},
-            manifests_per_concurrent_commit=2.0,
-        )
-        gen = txn.execute(catalog, storage, detector)
-        next(gen)  # Catalog read
-        gen.send(None)  # Runtime
-
-        # T1 commits (same table, same partition → overlap)
-        t1 = make_fast_append(txn_id=1)
-        drive_generator(t1.execute(catalog, storage, detector))
-
-        # T2 retries
-        result = drive_generator(gen)
-        assert result.status == TransactionStatus.COMMITTED
-        assert result.total_retries == 1
-        # ML reads: 2 (per-attempt, one per attempt)
-        assert result.manifest_list_reads == 2
-        # ML writes: 2 (per-attempt, one per attempt)
-        assert result.manifest_list_writes == 2
-
-    def test_merge_append_never_aborts(self):
-        """MergeAppend always retries, never aborts on conflict."""
-        catalog = make_instant_catalog()
-        storage = InstantStorageProvider(rng=np.random.RandomState(42))
-        # Even with "always real" detector, MergeAppend shouldn't abort
-        detector = AlwaysRealConflictDetector()
-
-        txn = MergeAppendTransaction(
-            txn_id=2,
-            submit_time_ms=0.0,
-            runtime_ms=100.0,
-            tables_written=frozenset({0}),
-            partitions_written={0: frozenset({0})},
-        )
-        gen = txn.execute(catalog, storage, detector)
-        next(gen)
-        gen.send(None)
-
-        t1 = make_fast_append(txn_id=1)
-        drive_generator(t1.execute(catalog, storage, NeverRealConflictDetector()))
-
-        result = drive_generator(gen)
-        assert result.status == TransactionStatus.COMMITTED
-
 
 # ---------------------------------------------------------------------------
 # Max retries exceeded
@@ -659,7 +598,6 @@ class TestUniformInterface:
 
     @pytest.mark.parametrize("cls,kwargs", [
         (FastAppendTransaction, {}),
-        (MergeAppendTransaction, {"manifests_per_concurrent_commit": 1.0}),
         (ValidatedOverwriteTransaction, {}),
     ])
     def test_same_result_shape(self, cls, kwargs):
@@ -911,39 +849,6 @@ class TestCrossTableRetry:
         assert result.manifest_list_reads == 2 + 1
         assert result.conflict_io_ms > 0
 
-    def test_merge_append_remerge_uses_table_version(self):
-        """10-table catalog. MergeAppend writes table 0. 9 commits to other
-        tables, 2 to table 0. Re-merge cost should scale with 2 (same-table),
-        not 11 (catalog seq delta)."""
-        catalog = make_instant_catalog(num_tables=10,
-                                       partitions=(1,)*10)
-        storage = InstantStorageProvider(rng=np.random.RandomState(42))
-        detector = NeverRealConflictDetector()
-
-        ma = MergeAppendTransaction(
-            txn_id=100, submit_time_ms=0.0, runtime_ms=100.0,
-            tables_written=frozenset({0}),
-            partitions_written={0: frozenset({0})},
-            manifests_per_concurrent_commit=1.0,
-        )
-        gen = ma.execute(catalog, storage, detector)
-        next(gen)
-        gen.send(None)
-
-        # 9 other-table + 2 same-table commits
-        for i in range(1, 10):
-            fa = make_fast_append(txn_id=i, tables_written=frozenset({i}),
-                                  partitions_written={i: frozenset({0})})
-            drive_generator(fa.execute(catalog, storage, detector))
-        for i in range(10, 12):
-            fa = make_fast_append(txn_id=i, tables_written=frozenset({0}),
-                                  partitions_written={0: frozenset({0})})
-            drive_generator(fa.execute(catalog, storage, detector))
-
-        result = drive_generator(gen)
-        assert result.status == TransactionStatus.COMMITTED
-        assert result.total_retries == 1
-
     def test_disjoint_partitions_skips_io(self):
         """1-table 4 partitions. T1→p0, T2→p1. T2 skips per-attempt I/O on retry."""
         catalog = make_instant_catalog(num_tables=1, partitions=(4,))
@@ -991,53 +896,6 @@ class TestCrossTableRetry:
         assert result.status == TransactionStatus.COMMITTED
         # Initial read (5ms) + failure-path read (5ms) = 10ms
         assert result.catalog_read_ms == pytest.approx(10.0)
-
-    def test_merge_append_cross_table_no_remerge(self):
-        """T2→table1(MA). Cross-table: no manifest file reads (no re-merge)."""
-        catalog = make_instant_catalog(num_tables=2, partitions=(1, 1))
-        storage = InstantStorageProvider(rng=np.random.RandomState(42))
-        detector = NeverRealConflictDetector()
-
-        t2 = MergeAppendTransaction(
-            txn_id=2, submit_time_ms=0.0, runtime_ms=100.0,
-            tables_written=frozenset({1}),
-            partitions_written={1: frozenset({0})},
-            manifests_per_concurrent_commit=2.0,
-        )
-        gen = t2.execute(catalog, storage, detector)
-        next(gen)
-        gen.send(None)
-
-        t1 = make_fast_append(txn_id=1, tables_written=frozenset({0}),
-                              partitions_written={0: frozenset({0})})
-        drive_generator(t1.execute(catalog, storage, detector))
-
-        result = drive_generator(gen)
-        assert result.status == TransactionStatus.COMMITTED
-        assert result.total_retries == 1
-
-    def test_merge_append_same_table_remerges(self):
-        """Same table MA. T2 pays re-merge I/O."""
-        catalog = make_instant_catalog()
-        storage = InstantStorageProvider(rng=np.random.RandomState(42))
-        detector = NeverRealConflictDetector()
-
-        t2 = MergeAppendTransaction(
-            txn_id=2, submit_time_ms=0.0, runtime_ms=100.0,
-            tables_written=frozenset({0}),
-            partitions_written={0: frozenset({0})},
-            manifests_per_concurrent_commit=2.0,
-        )
-        gen = t2.execute(catalog, storage, detector)
-        next(gen)
-        gen.send(None)
-
-        t1 = make_fast_append(txn_id=1)
-        drive_generator(t1.execute(catalog, storage, detector))
-
-        result = drive_generator(gen)
-        assert result.status == TransactionStatus.COMMITTED
-        assert result.total_retries == 1
 
     def test_mixed_retries(self):
         """3-table. T2→table2. T1a→table0 (cross), T1b→table2 (same).
@@ -1148,37 +1006,6 @@ class TestOverlapScaling:
         # Total ML reads: 3 + 1 = 4
         assert result.manifest_list_reads == 4
         assert result.manifest_list_writes == 4
-
-    def test_multi_partition_merge_append_scales_conflict_cost(self):
-        """MergeAppend with 3-partition overlap → conflict cost × 3."""
-        catalog = make_instant_catalog(num_tables=1, partitions=(3,))
-        storage = InstantStorageProvider(rng=np.random.RandomState(42))
-        detector = NeverRealConflictDetector()
-
-        t2 = MergeAppendTransaction(
-            txn_id=2, submit_time_ms=0.0, runtime_ms=100.0,
-            tables_written=frozenset({0}),
-            partitions_written={0: frozenset({0, 1, 2})},
-            manifests_per_concurrent_commit=2.0,
-        )
-        gen = t2.execute(catalog, storage, detector)
-        next(gen)  # Catalog read
-        gen.send(None)  # Runtime
-
-        # T1 commits modifying all 3 partitions
-        t1 = FastAppendTransaction(
-            txn_id=1, submit_time_ms=0.0, runtime_ms=100.0,
-            tables_written=frozenset({0}),
-            partitions_written={0: frozenset({0, 1, 2})},
-        )
-        drive_generator(t1.execute(catalog, storage, detector))
-
-        result = drive_generator(gen)
-        assert result.status == TransactionStatus.COMMITTED
-        assert result.total_retries == 1
-        # MergeAppend conflict cost is now zero (no MF operations)
-        # ML reads: 3 (first attempt) + 3 (retry, same-table overlap on all 3 partitions) = 6
-        assert result.manifest_list_reads == 6
 
     def test_multi_partition_validated_overwrite_scales_convoy(self):
         """ValidatedOverwrite with 2-partition overlap → historical ML reads × 2."""

@@ -18,9 +18,7 @@ from collections import Counter
 
 from endive.storage import FixedLatency, LognormalLatency
 from endive.transaction import (
-    ConflictCost,
     FastAppendTransaction,
-    MergeAppendTransaction,
     ValidatedOverwriteTransaction,
 )
 from endive.workload import (
@@ -80,13 +78,11 @@ class TestWorkloadConfig:
     def test_default_weights(self):
         config = make_config()
         assert config.fast_append_weight == 0.7
-        assert config.merge_append_weight == 0.2
-        assert config.validated_overwrite_weight == 0.1
+        assert config.validated_overwrite_weight == 0.3
 
     def test_custom_weights(self):
         config = make_config(
             fast_append_weight=1.0,
-            merge_append_weight=0.0,
             validated_overwrite_weight=0.0,
         )
         assert config.fast_append_weight == 1.0
@@ -290,7 +286,6 @@ class TestWorkloadGeneration:
         for delay, txn in results:
             assert isinstance(txn, (
                 FastAppendTransaction,
-                MergeAppendTransaction,
                 ValidatedOverwriteTransaction,
             ))
 
@@ -337,7 +332,6 @@ class TestOperationTypeDistribution:
     def test_100_percent_fast_append(self):
         config = make_config(
             fast_append_weight=1.0,
-            merge_append_weight=0.0,
             validated_overwrite_weight=0.0,
         )
         workload = Workload(config, seed=42)
@@ -345,21 +339,9 @@ class TestOperationTypeDistribution:
         for _, txn in results:
             assert isinstance(txn, FastAppendTransaction)
 
-    def test_100_percent_merge_append(self):
-        config = make_config(
-            fast_append_weight=0.0,
-            merge_append_weight=1.0,
-            validated_overwrite_weight=0.0,
-        )
-        workload = Workload(config, seed=42)
-        results = generate_n(workload, 100)
-        for _, txn in results:
-            assert isinstance(txn, MergeAppendTransaction)
-
     def test_100_percent_validated_overwrite(self):
         config = make_config(
             fast_append_weight=0.0,
-            merge_append_weight=0.0,
             validated_overwrite_weight=1.0,
         )
         workload = Workload(config, seed=42)
@@ -371,8 +353,7 @@ class TestOperationTypeDistribution:
         """Chi-squared test: observed distribution matches expected weights."""
         config = make_config(
             fast_append_weight=0.7,
-            merge_append_weight=0.2,
-            validated_overwrite_weight=0.1,
+            validated_overwrite_weight=0.3,
         )
         workload = Workload(config, seed=42)
         results = generate_n(workload, 10000)
@@ -384,13 +365,11 @@ class TestOperationTypeDistribution:
         n = len(results)
         expected = {
             'FastAppendTransaction': 0.7 * n,
-            'MergeAppendTransaction': 0.2 * n,
-            'ValidatedOverwriteTransaction': 0.1 * n,
+            'ValidatedOverwriteTransaction': 0.3 * n,
         }
 
         for name, exp in expected.items():
             obs = counts[name]
-            # Within 10% of expected (allows for statistical variation)
             assert abs(obs - exp) / exp < 0.10, (
                 f"{name}: expected ~{exp:.0f}, got {obs}"
             )
@@ -399,18 +378,16 @@ class TestOperationTypeDistribution:
         """Weights don't need to sum to 1.0; they're normalized."""
         config = make_config(
             fast_append_weight=7.0,
-            merge_append_weight=2.0,
-            validated_overwrite_weight=1.0,
+            validated_overwrite_weight=3.0,
         )
         workload = Workload(config, seed=42)
         results = generate_n(workload, 1000)
         types = Counter(type(txn).__name__ for _, txn in results)
-        assert types['FastAppendTransaction'] > types['MergeAppendTransaction']
+        assert types['FastAppendTransaction'] > types['ValidatedOverwriteTransaction']
 
     def test_zero_total_weight_raises(self):
         config = make_config(
             fast_append_weight=0.0,
-            merge_append_weight=0.0,
             validated_overwrite_weight=0.0,
         )
         with pytest.raises(ValueError):
@@ -575,21 +552,3 @@ class TestTopologyOwnership:
                     assert 0 <= p < max_part
 
 
-# ---------------------------------------------------------------------------
-# MergeAppend parameter
-# ---------------------------------------------------------------------------
-
-class TestMergeAppendParameter:
-    def test_manifests_per_commit_passed(self):
-        config = make_config(
-            fast_append_weight=0.0,
-            merge_append_weight=1.0,
-            validated_overwrite_weight=0.0,
-            manifests_per_concurrent_commit=2.5,
-        )
-        workload = Workload(config, seed=42)
-        _, txn = next(workload.generate())
-        assert isinstance(txn, MergeAppendTransaction)
-        # MergeAppend conflict cost is now zero (MF I/O removed)
-        cost = txn.get_conflict_cost(n_snapshots_behind=2, ml_append_mode=False)
-        assert cost == ConflictCost()

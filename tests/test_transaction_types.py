@@ -5,7 +5,6 @@ Tests:
 - ConflictCost frozen dataclass with correct defaults
 - TransactionResult frozen dataclass
 - FastAppendTransaction: no real conflicts, cheap retry cost
-- MergeAppendTransaction: no real conflicts, manifest re-merge cost scales
 - ValidatedOverwriteTransaction: real conflicts abort, I/O convoy cost
 - ML+ mode: ml_writes=0 for all types
 """
@@ -16,7 +15,6 @@ from endive.transaction import (
     ConflictCost,
     ConflictDetector,
     FastAppendTransaction,
-    MergeAppendTransaction,
     NO_OVERLAP,
     Transaction,
     TransactionResult,
@@ -242,61 +240,6 @@ class TestFastAppendTransaction:
             assert cost.historical_ml_reads == 0
 
 
-# ---------------------------------------------------------------------------
-# MergeAppendTransaction
-# ---------------------------------------------------------------------------
-
-class TestMergeAppendTransaction:
-    def test_cannot_have_real_conflict(self):
-        txn = make_txn(MergeAppendTransaction)
-        assert txn.can_have_real_conflict() is False
-
-    def test_should_not_abort_on_real_conflict(self):
-        txn = make_txn(MergeAppendTransaction)
-        assert txn.should_abort_on_real_conflict() is False
-
-    def test_conflict_cost_standard_mode(self):
-        """MergeAppend now returns empty ConflictCost (MF-based cost removed)."""
-        txn = make_txn(MergeAppendTransaction)
-        cost = txn.get_conflict_cost(n_snapshots_behind=2, ml_append_mode=False)
-        assert cost == ConflictCost()
-
-    def test_conflict_cost_ml_append_mode(self):
-        txn = make_txn(MergeAppendTransaction)
-        cost = txn.get_conflict_cost(n_snapshots_behind=2, ml_append_mode=True)
-        assert cost == ConflictCost()
-
-    def test_manifest_file_io_scales_with_n_behind(self):
-        """MergeAppend now returns empty cost regardless of n_behind."""
-        txn = make_txn(MergeAppendTransaction, manifests_per_concurrent_commit=1.5)
-        cost_1 = txn.get_conflict_cost(n_snapshots_behind=1, ml_append_mode=False)
-        cost_4 = txn.get_conflict_cost(n_snapshots_behind=4, ml_append_mode=False)
-        assert cost_1 == ConflictCost()
-        assert cost_4 == ConflictCost()
-
-    def test_manifest_per_commit_parameter(self):
-        """MergeAppend returns empty cost regardless of manifests_per_concurrent_commit."""
-        txn = make_txn(MergeAppendTransaction, manifests_per_concurrent_commit=2.0)
-        cost = txn.get_conflict_cost(n_snapshots_behind=3, ml_append_mode=False)
-        assert cost == ConflictCost()
-
-    def test_zero_manifests_when_zero_behind(self):
-        txn = make_txn(MergeAppendTransaction)
-        cost = txn.get_conflict_cost(n_snapshots_behind=0, ml_append_mode=False)
-        assert cost == ConflictCost()
-
-    def test_no_historical_ml_reads(self):
-        """MergeAppend never reads historical manifest lists."""
-        txn = make_txn(MergeAppendTransaction)
-        cost = txn.get_conflict_cost(n_snapshots_behind=10, ml_append_mode=False)
-        assert cost.historical_ml_reads == 0
-
-    def test_default_manifests_per_commit(self):
-        """MergeAppend returns empty cost."""
-        txn = make_txn(MergeAppendTransaction)
-        cost = txn.get_conflict_cost(n_snapshots_behind=2, ml_append_mode=False)
-        assert cost == ConflictCost()
-
 
 # ---------------------------------------------------------------------------
 # ValidatedOverwriteTransaction
@@ -347,7 +290,6 @@ class TestMLAppendMode:
 
     @pytest.mark.parametrize("cls", [
         FastAppendTransaction,
-        MergeAppendTransaction,
         ValidatedOverwriteTransaction,
     ])
     def test_ml_append_mode_no_ml_writes(self, cls):
@@ -358,7 +300,6 @@ class TestMLAppendMode:
 
     @pytest.mark.parametrize("cls", [
         FastAppendTransaction,
-        MergeAppendTransaction,
         ValidatedOverwriteTransaction,
     ])
     def test_standard_mode_per_attempt_has_ml_writes(self, cls):
@@ -653,22 +594,11 @@ class TestScaledConflictCost:
         cost = txn.get_conflict_cost(n_snapshots_behind=3, ml_append_mode=False, n_partitions=10)
         assert cost == ConflictCost()
 
-    def test_merge_append_scales_by_n_partitions(self):
-        """MergeAppend now returns empty ConflictCost regardless of n_partitions."""
-        txn = make_txn(MergeAppendTransaction, manifests_per_concurrent_commit=2.0)
-        cost = txn.get_conflict_cost(n_snapshots_behind=2, ml_append_mode=False, n_partitions=3)
-        assert cost == ConflictCost()
-
     def test_validated_overwrite_scales_by_n_partitions(self):
         """ValidatedOverwrite: historical_ml_reads = (n_behind - 1) * n_partitions."""
         txn = make_txn(ValidatedOverwriteTransaction)
         cost = txn.get_conflict_cost(n_snapshots_behind=3, ml_append_mode=False, n_partitions=5)
         assert cost.historical_ml_reads == 10  # (3-1) * 5
-
-    def test_default_n_partitions_unchanged_merge_append(self):
-        txn = make_txn(MergeAppendTransaction, manifests_per_concurrent_commit=2.0)
-        cost = txn.get_conflict_cost(n_snapshots_behind=2, ml_append_mode=False)
-        assert cost == ConflictCost()
 
     def test_default_n_partitions_unchanged_validated_overwrite(self):
         txn = make_txn(ValidatedOverwriteTransaction)

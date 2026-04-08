@@ -29,7 +29,6 @@ def make_config(duration_ms=120_000, seed=42, inter_arrival_scale=200.0):
         num_tables=1,
         partitions_per_table=(1,),
         fast_append_weight=1.0,
-        merge_append_weight=0.0,
         validated_overwrite_weight=0.0,
     )
     return SimulationConfig(

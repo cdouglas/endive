@@ -84,7 +84,6 @@ def make_workload_config(
     inter_arrival_scale=100.0,
     runtime_mean=50.0,
     fast_append_weight=1.0,
-    merge_append_weight=0.0,
     validated_overwrite_weight=0.0,
 ):
     """Create a WorkloadConfig for testing."""
@@ -98,7 +97,6 @@ def make_workload_config(
         num_tables=num_tables,
         partitions_per_table=tuple([1] * num_tables),
         fast_append_weight=fast_append_weight,
-        merge_append_weight=merge_append_weight,
         validated_overwrite_weight=validated_overwrite_weight,
     )
 
@@ -122,7 +120,6 @@ def make_simulation_config(
     max_retries=3,
     conflict_prob=0.0,
     fast_append_weight=1.0,
-    merge_append_weight=0.0,
     validated_overwrite_weight=0.0,
 ):
     """Create a SimulationConfig with sensible defaults for testing."""
@@ -131,7 +128,6 @@ def make_simulation_config(
         inter_arrival_scale=inter_arrival_scale,
         runtime_mean=runtime_mean,
         fast_append_weight=fast_append_weight,
-        merge_append_weight=merge_append_weight,
         validated_overwrite_weight=validated_overwrite_weight,
     )
     return SimulationConfig(
@@ -634,8 +630,7 @@ class TestSimulationIntegration:
         config = make_simulation_config(
             duration_ms=3000.0,
             fast_append_weight=0.5,
-            merge_append_weight=0.3,
-            validated_overwrite_weight=0.2,
+            validated_overwrite_weight=0.5,
         )
         stats = Simulation(config).run()
         assert stats.total > 0
