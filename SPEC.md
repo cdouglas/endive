@@ -545,6 +545,8 @@ class ValidatedOverwriteTransaction(Transaction):
 
 `n_table_versions_behind` is the sum of per-table version deltas for overlapping tables, NOT the catalog sequence delta. Only commits to conflicting tables are counted.
 
+**Known approximation**: For multi-table VO transactions, summing per-table version deltas overcounts the convoy. Two tables each 3 versions behind gives V=6, yielding 5M historical reads instead of the correct 2×M_A + 2×M_B. All current experiments use `tables_per_txn=1`, so this does not affect results. A per-table decomposition would be needed for multi-table VO experiments.
+
 ### 3.9 ML+ Manifest List Protocol
 
 In ML+ mode (`ml_append_mode=True`), ML writes are eliminated from the per-attempt cost (the append replaces the rewrite). TM reads/writes are still paid if non-inlined.
