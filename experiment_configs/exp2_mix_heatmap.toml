@@ -55,10 +55,6 @@ operation_types.validated_overwrite = 0.5
 # No real conflicts — isolates operation-type cost (FA retry vs VO I/O convoy)
 real_conflict_probability = 0.0
 
-conflicting_manifests.distribution = "exponential"
-conflicting_manifests.mean = 3.0
-conflicting_manifests.min = 1
-conflicting_manifests.max = 10
 manifest_list_mode = "rewrite"
 
 [storage]

@@ -517,21 +517,24 @@ class Transaction(ABC):
             self._max_snapshots_behind = max(self._max_snapshots_behind, n_behind)
 
             if overlap.has_overlap:
-                # Same-table/partition conflict: pay scaled validation I/O
-                # Use per-table version deltas (not catalog seq delta) to
-                # determine I/O cost.  Only commits to overlapping tables
-                # require manifest list / manifest file work.
-                n_table_versions_behind = sum(
-                    current_snapshot.get_table(tid).version
-                    - last_snapshot.get_table(tid).version
-                    for tid in overlap.overlapping
-                )
+                # Conflict cost is computed per-table so each table's
+                # version delta is paired with that table's overlapping
+                # partition count.  This matters for multi-table VO:
+                # two tables each 3 versions behind with M_A and M_B
+                # overlapping partitions should yield 2*M_A + 2*M_B
+                # historical reads, not (6-1)*(M_A+M_B).
                 before = self._elapsed
-                cost = self.get_conflict_cost(
-                    n_table_versions_behind, ml_append_mode,
-                    n_partitions=overlap.n_partitions,
-                )
-                yield from self._pay_conflict_cost(cost, storage)
+                for tid in overlap.overlapping:
+                    n_behind = (
+                        current_snapshot.get_table(tid).version
+                        - last_snapshot.get_table(tid).version
+                    )
+                    n_parts = len(overlap.overlapping[tid])
+                    cost = self.get_conflict_cost(
+                        n_behind, ml_append_mode,
+                        n_partitions=n_parts,
+                    )
+                    yield from self._pay_conflict_cost(cost, storage)
                 self._conflict_io_ms += self._elapsed - before
 
                 # Check for real conflict (only matters for validated ops)

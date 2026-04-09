@@ -54,10 +54,6 @@ inter_arrival.scale = 100.0  # Swept: LOAD_SWEEP
 
 real_conflict_probability = 0.0
 
-conflicting_manifests.distribution = "exponential"
-conflicting_manifests.mean = 3.0
-conflicting_manifests.min = 1
-conflicting_manifests.max = 10
 manifest_list_mode = "rewrite"
 
 [transaction.operation_types]

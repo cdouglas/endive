@@ -44,10 +44,6 @@ operation_types.validated_overwrite = 0.0
 real_conflict_probability = 0.0  # Doesn't matter for FastAppend
 
 # No manifest file operations needed for false conflicts
-conflicting_manifests.distribution = "exponential"
-conflicting_manifests.mean = 3.0
-conflicting_manifests.min = 1
-conflicting_manifests.max = 10
 manifest_list_mode = "rewrite"
 
 [storage]

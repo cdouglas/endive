@@ -575,6 +575,44 @@ class TestRetryCostDecomposition:
         # ML reads: 6 (per-attempt: 2 × 3) + 3 (convoy) = 9
         assert result.manifest_list_reads == 9
 
+    def test_vo_convoy_multi_table_per_table_decomposition(self):
+        """Multi-table VO: convoy computed per-table, not summed.
+
+        Table 0: 3 versions behind, 1 overlapping partition → (3-1)×1 = 2 reads
+        Table 1: 2 versions behind, 1 overlapping partition → (2-1)×1 = 1 read
+        Correct total: 3 historical ML reads.
+
+        Old bug (summed): V=5, M=2 → (5-1)×2 = 8 reads (overcounts).
+        """
+        catalog = make_catalog(num_tables=2, partitions=(1, 1), latency_ms=1.0)
+        storage = InstantStorageProvider(rng=np.random.RandomState(42), latency_ms=1.0)
+        detector = NeverRealDetector()
+
+        # VO writes to both tables
+        txn = make_vo(txn_id=100, tables=frozenset({0, 1}),
+                      partitions={0: frozenset({0}), 1: frozenset({0})})
+        gen = txn.execute(catalog, storage, detector)
+        next(gen)  # catalog read
+        gen.send(None)  # runtime
+
+        # 3 commits to table 0
+        for i in range(3):
+            t = make_fa(txn_id=i + 1, tables=frozenset({0}),
+                        partitions={0: frozenset({0})})
+            drive(t.execute(catalog, storage, detector))
+
+        # 2 commits to table 1
+        for i in range(3, 5):
+            t = make_fa(txn_id=i + 1, tables=frozenset({1}),
+                        partitions={1: frozenset({0})})
+            drive(t.execute(catalog, storage, detector))
+
+        result = drive(gen)
+        assert result.status == TransactionStatus.COMMITTED
+        assert result.total_retries == 1
+        # Convoy: (3-1)×1 + (2-1)×1 = 3 historical ML reads
+        assert result.conflict_io_ms == pytest.approx(3.0)
+
     def test_io_counters_match_yield_count_clean(self):
         """Clean commit: I/O counters match yields exactly."""
         catalog = make_catalog(latency_ms=1.0)

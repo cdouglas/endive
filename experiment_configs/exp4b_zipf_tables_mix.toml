@@ -57,10 +57,6 @@ operation_types.validated_overwrite = 0.1
 # No real conflicts — isolates catalog latency + operation-type cost
 real_conflict_probability = 0.0
 
-conflicting_manifests.distribution = "exponential"
-conflicting_manifests.mean = 3.0
-conflicting_manifests.min = 1
-conflicting_manifests.max = 10
 manifest_list_mode = "rewrite"
 
 [transaction.table_selection]

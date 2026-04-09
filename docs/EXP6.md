@@ -4,17 +4,22 @@
 
 ### Goal
 
-Evaluate the tradeoff of inlining the table manifest in the catalog CAS
-object. With inlining, the ML content for each partition is stored in the
-CAS payload. This eliminates all separate ML I/O (reads and writes are
-absorbed into the CAS operation), but the CAS payload grows with each
-successful commit, increasing CAS latency over time.
+Evaluate the tradeoff of inlining table metadata in the catalog CAS object.
+With inlining, the table metadata file no longer exists as a separate storage
+object — its state is read and written as part of the catalog CAS. This
+eliminates 2 storage operations per commit attempt (TM read + TM write), but
+the CAS payload grows with each successful commit, increasing CAS latency
+over time.
+
+The manifest list is NOT inlined — it remains a separate storage object.
+Per-attempt cost is still ML read(N) + ML write(N), but without the TM
+overhead.
 
 The experiment repeats exp5's sweep with `table_metadata_inlined = true`,
 enabling direct comparison. Early in the simulation, inlined commits are
-faster (no ML round-trips). Late in the simulation, the growing CAS payload
-degrades performance. The crossover point depends on load, partition count
-per transaction, and partition selection distribution.
+faster (2 fewer ops per attempt). Late in the simulation, the growing CAS
+payload degrades performance. The crossover point depends on load, partition
+count per transaction, and partition selection distribution.
 
 ### Variants
 
@@ -65,8 +70,8 @@ proportionally to payload size.
   crossover depends on throughput (more commits = faster growth).
 - **VO benefits from inlining per-attempt savings (exp6b vs exp5b).** The
   I/O convoy (historical ML reads) is NOT eliminated — VO must still read
-  historical MLs to validate the read set. But each retry attempt is
-  cheaper (j MF writes vs 3j ops), which reduces total retry latency.
+  historical MLs to validate the read set. But each retry attempt saves
+  2 ops (no TM read/write), reducing total retry latency.
 - **Zipf variants degrade faster.** Hot partitions drive higher commit rates
   early, which accelerates CAS growth.
 
@@ -83,7 +88,7 @@ proportionally to payload size.
    partition overlap should be nonzero (historical ML reads remain).
    On disjoint retries, `conflict_io_ms` should be 0 (same as exp5).
 4. **Reduced per-attempt I/O:** `per_attempt_io_ms` should be lower than
-   exp5 at matching parameters early in the simulation.
+   exp5 at matching parameters (2 fewer ops: no TM read/write).
 5. **Catalog size growth:** `catalog.catalog_size_bytes` at end of
    simulation should match `initial_size + committed * 100`.
 
@@ -101,37 +106,49 @@ Same structure as exp5. Key comparison: overlay exp5 and exp6
 The only config difference is `table_metadata_inlined = true` plus
 `initial_partition_size_bytes` and `commit_growth_bytes`. The code paths:
 
-#### Per-Attempt Cost Elimination (`transaction.py:232-235`)
+#### Per-Attempt Cost Reduction (`transaction.py:get_per_attempt_cost`)
 
-When `metadata_inlined = True`:
+When `metadata_inlined=True`, the TM file does not exist. Per-attempt cost
+eliminates TM read and TM write:
 ```python
-return ConflictCost(manifest_file_writes=n_partitions)
+# Non-inlined: TM_r(1) + ML_r(N) + ML_w(N) + TM_w(1)  = 2 + 2N ops
+# Inlined:     ML_r(N) + ML_w(N)                        = 2N ops
 ```
 
-ML reads and ML writes eliminated. Only MF writes remain (per-partition
-storage work that exists regardless of inlining).
+#### Failure-Path Cost Reduction
 
-#### VO Conflict Cost Unchanged (`transaction.py:741-750`)
+After CAS failure, the non-inlined path reads the catalog + a separate TM
+read to get partition versions. Inlined absorbs this into the catalog read
+(the TM state is in the CAS object):
+```python
+# Non-inlined failure: catalog_read + TM_read → overlap check
+# Inlined failure:     catalog_read → overlap check
+```
+
+#### VO Conflict Cost Unchanged
 
 The I/O convoy is NOT eliminated by inlining. Historical ML reads are still
-required to validate the read set. Inlining the current table manifest gives
-the client the current partition state (from the catalog read), but not the
-history of intermediate changes. The convoy cost remains:
+required to validate the read set. Inlining gives the client the current
+partition state (from the catalog read), but not the history of intermediate
+changes. The convoy cost remains:
 ```
-historical_ml_reads = max(0, n_snapshots_behind - 1) * n_partitions
+historical_ml_reads = max(0, n_table_versions_behind - 1) * n_partitions
 ```
 
-#### CAS Size Growth (`catalog.py:318-319, 557-558`)
+#### CAS Size Growth
 
-On each successful commit:
+On each successful commit, the CAS payload grows by `commit_growth_bytes`,
+capped at `max_catalog_size_bytes` (modeling TM trimming and compression):
 ```python
 if self._metadata_inlined:
-    self._catalog_size_bytes += self._commit_growth_bytes
+    new_size = self._catalog_size_bytes + self._commit_growth_bytes
+    if self._max_catalog_size_bytes > 0:
+        new_size = min(new_size, self._max_catalog_size_bytes)
+    self._catalog_size_bytes = new_size
 ```
 
 `CASCatalog` passes `_catalog_size_bytes` to S3 storage's `read()` and
 `cas()` methods, which use `SizeBasedLatency` to scale latency with size.
-`InstantCatalog` uses `_effective_latency()` with `latency_per_kib_ms`.
 
 ### Test Coverage
 
@@ -139,7 +156,7 @@ if self._metadata_inlined:
 |-----------|-------|----------|
 | `_effective_latency()` formula | `TestInlinedMetadataLatency` (7 tests) | Formula, edge cases, commit latency |
 | Catalog size growth | `TestCatalogSizeGrowth` (5 tests) | Growth on success, no growth on failure, N-commit accumulation |
-| Inlined cost elimination | `TestInlinedMetadataCosts` (11 tests) | ML elimination, MF retention, partition scaling, VO convoy |
+| Inlined cost elimination | `TestYieldCount`, `TestRetryCostDecomposition` | TM elimination, ML retention, partition scaling, VO convoy |
 | Config loading | `TestComponentBuilding` (3 tests) | Inlined params, latency_per_kib_ms flow |
 | Full simulation | `TestEndToEnd::test_inlined_metadata_simulation` | Latency growth over time assertion |
 | Partition version tracking | `TestPartitionVersionTracking` (3 tests) | All catalog types |
@@ -149,9 +166,11 @@ if self._metadata_inlined:
 
 ### Known Approximation
 
-The VO conflict cost uses the table-level version delta (`n_table_versions_behind`)
-rather than per-partition version deltas. With one table, all commits to any
-partition increment the table version. If 10 commits landed but only 2
-touched the overlapping partition, the model charges for 10 historical ML
-reads when 2 would suffice. This is conservative (overstates VO cost) and
-only affects exp5b/exp6b at 10% VO. Noted for future refinement.
+The VO I/O convoy uses per-table version deltas. With one table, all commits
+to any partition increment the table version. If 10 commits landed but only 2
+touched the overlapping partition, the model charges for 9 historical ML reads
+(10-1) when 1 would suffice. This is conservative (overstates VO cost) and
+only affects exp5b/exp6b at 10% VO weight.
+
+For multi-table VO, the convoy is correctly computed per-table (not summed
+across tables). See SPEC.md §3.8.

@@ -152,14 +152,14 @@ runtime.min = 30000
 runtime.mean = 180000
 runtime.sigma = 1.5
 inter_arrival.scale = 100.0
-conflicting_manifests.mean = 3.0
+real_conflict_probability = 0.0
 """)
 
         variant_path = create_config_variant(
             base_config,
             params={
                 "inter_arrival.scale": 200.0,
-                "conflicting_manifests.mean": 5.0
+                "real_conflict_probability": 0.5
             },
             seed=1
         )
@@ -169,7 +169,7 @@ conflicting_manifests.mean = 3.0
 
             # Changed values
             assert "inter_arrival.scale = 200.0" in content
-            assert "conflicting_manifests.mean = 5.0" in content
+            assert "real_conflict_probability = 0.5" in content
 
             # Unchanged values
             assert "runtime.min = 30000" in content

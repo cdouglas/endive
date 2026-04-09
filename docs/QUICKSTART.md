@@ -228,10 +228,6 @@ inter_arrival.scale = 500.0  # Mean inter-arrival (ms)
 # Conflict types
 real_conflict_probability = 0.0  # 0.0=false, 1.0=real
 
-# For real conflicts
-conflicting_manifests.distribution = "exponential"
-conflicting_manifests.mean = 3.0
-
 [storage]
 max_parallel = 4             # Parallel manifest operations
 

@@ -56,9 +56,10 @@ The catalog is a single file containing per-partition manifest lists. This is
 **Design 1** from the design discussion: single table manifest with multiple
 manifest lists. Each commit atomically updates all partition state via CAS.
 
-Per-attempt I/O cost per partition: 1 ML read + 1 ML write. On disjoint
-retry: free (catalog re-read + CAS). On overlapping retry: ML read + ML
-write for each overlapping partition.
+Per-attempt I/O cost (non-inlined): TM read(1) + ML read(N) + ML write(N) +
+TM write(1), where N = partitions written. On disjoint retry: free (catalog
+re-read + CAS). On overlapping retry: same cost scaled to M overlapping
+partitions. See SPEC.md §3.4 for the full cost table.
 
 ### Overlap Probability
 
