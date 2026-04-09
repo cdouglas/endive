@@ -298,7 +298,12 @@ class S3StorageProvider(StorageProvider):
                              data_size_bytes=size_bytes)
 
     def cas(self, key: str, expected_version: int, size_bytes: int) -> Generator[float, None, StorageResult]:
-        latency = self._cas_latency.sample(self._rng)
+        # CAS = conditional PUT. Base CAS latency covers the round-trip and
+        # server-side condition check. For large payloads, the PUT data
+        # transfer cost dominates. Use the greater of the two.
+        base = self._cas_latency.sample(self._rng)
+        size_based = self._write_latency.with_size(size_bytes).sample(self._rng)
+        latency = max(base, size_based)
         yield latency
         return StorageResult(success=True, latency_ms=latency,
                              data_size_bytes=size_bytes)
@@ -366,7 +371,12 @@ class S3ExpressStorageProvider(StorageProvider):
                              data_size_bytes=size_bytes)
 
     def cas(self, key: str, expected_version: int, size_bytes: int) -> Generator[float, None, StorageResult]:
-        latency = self._cas_latency.sample(self._rng)
+        # CAS = conditional PUT. Base CAS latency covers the round-trip and
+        # server-side condition check. For large payloads, the PUT data
+        # transfer cost dominates. Use the greater of the two.
+        base = self._cas_latency.sample(self._rng)
+        size_based = self._write_latency.with_size(size_bytes).sample(self._rng)
+        latency = max(base, size_based)
         yield latency
         return StorageResult(success=True, latency_ms=latency,
                              data_size_bytes=size_bytes)
@@ -442,7 +452,12 @@ class AzureBlobStorageProvider(StorageProvider):
                              data_size_bytes=size_bytes)
 
     def cas(self, key: str, expected_version: int, size_bytes: int) -> Generator[float, None, StorageResult]:
-        latency = self._cas_latency.sample(self._rng)
+        # CAS = conditional PUT. Base CAS latency covers the round-trip and
+        # server-side condition check. For large payloads, the PUT data
+        # transfer cost dominates. Use the greater of the two.
+        base = self._cas_latency.sample(self._rng)
+        size_based = self._write_latency.with_size(size_bytes).sample(self._rng)
+        latency = max(base, size_based)
         yield latency
         return StorageResult(success=True, latency_ms=latency,
                              data_size_bytes=size_bytes)
@@ -514,7 +529,12 @@ class GCPStorageProvider(StorageProvider):
                              data_size_bytes=size_bytes)
 
     def cas(self, key: str, expected_version: int, size_bytes: int) -> Generator[float, None, StorageResult]:
-        latency = self._cas_latency.sample(self._rng)
+        # CAS = conditional PUT. Base CAS latency covers the round-trip and
+        # server-side condition check. For large payloads, the PUT data
+        # transfer cost dominates. Use the greater of the two.
+        base = self._cas_latency.sample(self._rng)
+        size_based = self._write_latency.with_size(size_bytes).sample(self._rng)
+        latency = max(base, size_based)
         yield latency
         return StorageResult(success=True, latency_ms=latency,
                              data_size_bytes=size_bytes)
