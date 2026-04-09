@@ -43,37 +43,36 @@ Same sweep as exp5, enabling direct comparison.
 
 Same as exp5, except:
 - Catalog: S3 CAS, **inlined** (`table_metadata_inlined = true`)
-- `initial_partition_size_bytes`: 2048 (32 partitions x 2 KiB = 64 KiB initial)
-- `commit_growth_bytes`: 100 (CAS payload grows 100 bytes per commit)
+- `initial_partition_size_bytes`: 16000 (32 partitions × ~16 KiB ≈ 500 KiB)
+- `commit_growth_bytes`: 0 (fixed size — trimming/compression at equilibrium)
 
-### Catalog Size Growth Model
+### Catalog Size Model
 
 ```
-initial_size = 32 * 2048 = 65,536 bytes (64 KiB)
-size(N)      = 65,536 + N * 100
+catalog_size = 32 * 16,000 = 512,000 bytes (~500 KiB)
 ```
 
-After 1000 commits: 164 KiB. After 10,000 commits: 1040 KiB.
+The CAS payload is fixed at ~500 KiB, modeling a table in steady state where
+snapshot expiration and metadata compression balance new commit growth. This
+avoids transient warmup effects in the 1-hour simulation (first and last 15
+minutes are discarded as warmup/cooldown).
 
-CAS latency grows with size through the S3 storage provider's
-`SizeBasedLatency` model. The CAS read and write operations pass
-`catalog_size_bytes` to the storage provider, which scales latency
-proportionally to payload size.
+CAS latency scales with payload size through the S3 storage provider's
+`SizeBasedLatency` model. At 500 KiB, the S3 PUT model adds
+`~0.5 MiB × 20 ms/MiB ≈ 10ms` to the base CAS latency.
 
 ### Expected Patterns
 
-- **Throughput degrades over time.** `commit_rate_over_time` shows a
-  downward curve (vs exp5's flat line).
-- **Initially faster than exp5.** No ML round-trips means lower per-attempt
-  cost. At low cumulative commits, inlined wins.
-- **Eventually slower than exp5.** CAS growth overtakes ML savings. The
-  crossover depends on throughput (more commits = faster growth).
+- **Flat throughput over time** (same as exp5). Fixed CAS size means no
+  degradation.
+- **Faster than exp5.** 2 fewer storage ops per attempt (no TM read/write).
+  The ~500 KiB CAS payload adds ~10ms latency, but saving 2 × ~43ms ops
+  is a net win of ~76ms per attempt on S3.
 - **VO benefits from inlining per-attempt savings (exp6b vs exp5b).** The
   I/O convoy (historical ML reads) is NOT eliminated — VO must still read
   historical MLs to validate the read set. But each retry attempt saves
   2 ops (no TM read/write), reducing total retry latency.
-- **Zipf variants degrade faster.** Hot partitions drive higher commit rates
-  early, which accelerates CAS growth.
+- **Zipf variants** show same relative benefit as uniform (fixed CAS size).
 
 ---
 
@@ -81,8 +80,8 @@ proportionally to payload size.
 
 ### Correctness Checks
 
-1. **Monotonic CAS latency increase.** Binning commits into time windows
-   should show increasing mean CAS latency.
+1. **Flat CAS latency.** With fixed-size catalog, CAS latency should be
+   constant across time windows (no growth).
 2. **Operation type invariant (6a):** All rows must be `fast_append`.
 3. **VO convoy persists (6b):** `conflict_io_ms` for VO retries with
    partition overlap should be nonzero (historical ML reads remain).
@@ -135,18 +134,10 @@ changes. The convoy cost remains:
 historical_ml_reads = max(0, n_table_versions_behind - 1) * n_partitions
 ```
 
-#### CAS Size Growth
+#### CAS Payload Size
 
-On each successful commit, the CAS payload grows by `commit_growth_bytes`,
-capped at `max_catalog_size_bytes` (modeling TM trimming and compression):
-```python
-if self._metadata_inlined:
-    new_size = self._catalog_size_bytes + self._commit_growth_bytes
-    if self._max_catalog_size_bytes > 0:
-        new_size = min(new_size, self._max_catalog_size_bytes)
-    self._catalog_size_bytes = new_size
-```
-
+With `commit_growth_bytes=0`, the CAS payload is fixed at
+`32 × initial_partition_size_bytes = 512,000 bytes` (~500 KiB).
 `CASCatalog` passes `_catalog_size_bytes` to S3 storage's `read()` and
 `cas()` methods, which use `SizeBasedLatency` to scale latency with size.
 

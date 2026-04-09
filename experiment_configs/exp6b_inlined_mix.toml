@@ -30,8 +30,8 @@ label = "exp6b_inlined_mix"
 num_tables = 1
 num_groups = 1
 table_metadata_inlined = true
-initial_partition_size_bytes = 2048
-commit_growth_bytes = 100
+initial_partition_size_bytes = 16000  # 32 partitions * ~16 KiB = ~500 KiB steady-state
+commit_growth_bytes = 0              # Fixed size (trimming/compression at equilibrium)
 
 [catalog.partition]
 num_partitions = 32

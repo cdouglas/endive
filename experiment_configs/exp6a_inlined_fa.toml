@@ -13,8 +13,8 @@
 #   arrival_rate:       LOAD_SWEEP
 #   partitions_per_txn: [1, 2, 4, 8, 16]
 #
-# Fixed: num_tables=1, partitions_per_table=32, S3 catalog CAS (growing)
-# Inlining: initial_partition_size_bytes=2048, commit_growth_bytes=100
+# Fixed: num_tables=1, partitions_per_table=32, S3 catalog CAS
+# Inlining: fixed 500 KiB catalog (32 partitions × ~16 KiB steady-state)
 #
 # Expected patterns:
 #   - Throughput degrades over time as CAS payload grows
@@ -32,8 +32,8 @@ label = "exp6a_inlined_fa"
 num_tables = 1
 num_groups = 1
 table_metadata_inlined = true
-initial_partition_size_bytes = 2048  # 32 partitions * 2 KiB = 64 KiB initial
-commit_growth_bytes = 100            # Each successful commit adds 100 bytes
+initial_partition_size_bytes = 16000  # 32 partitions * ~16 KiB = ~500 KiB steady-state
+commit_growth_bytes = 0              # Fixed size (trimming/compression at equilibrium)
 
 [catalog.partition]
 num_partitions = 32
