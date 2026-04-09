@@ -378,12 +378,12 @@ class ExperimentStore:
                 continue
             results.append(entry)
 
-        results.sort(key=lambda e: (e.group, e.label, e.exp_hash))
+        results.sort(key=lambda e: (e.label, e.exp_hash))
         return results
 
     @property
     def entries(self) -> list[ExperimentEntry]:
-        """All entries, sorted by (group, label, hash)."""
+        """All entries, sorted by (label, hash)."""
         return self.get_entries()
 
     def labels(self) -> dict[str, list[ExperimentEntry]]:
@@ -474,7 +474,7 @@ def _list_default(entries: list[ExperimentEntry]) -> None:
     total_configs = 0
     total_bytes = 0
 
-    for label in sorted(by_label, key=lambda l: (by_label[l][0].group, l)):
+    for label in sorted(by_label):
         label_entries = by_label[label]
         group = label_entries[0].group
         n_configs = len(label_entries)
