@@ -282,11 +282,18 @@ class CASCatalog(Catalog):
         )
 
     def read(self, timestamp_ms: float = 0.0) -> Generator[float, None, CatalogSnapshot]:
-        result = yield from self._storage.read(
+        # Split-yield read: the server evaluates the read at the half-RTT
+        # point, returning the state at that instant. A concurrent CAS that
+        # succeeds between the read's half-RTT and full-RTT is NOT visible.
+        read_gen = self._storage.read(
             key="catalog_metadata",
             expected_size_bytes=self._catalog_size_bytes,
         )
-        return self._create_snapshot(timestamp_ms)
+        latency = next(read_gen)
+        yield latency / 2.0
+        snapshot = self._create_snapshot(timestamp_ms)
+        yield latency - latency / 2.0
+        return snapshot
 
     def commit(
         self,
@@ -538,8 +545,12 @@ class InstantCatalog(Catalog):
         )
 
     def read(self, timestamp_ms: float = 0.0) -> Generator[float, None, CatalogSnapshot]:
-        yield self._effective_latency()
-        return self._create_snapshot(timestamp_ms)
+        # Split-yield: capture snapshot at half-RTT (server evaluation time)
+        latency = self._effective_latency()
+        yield latency / 2.0
+        snapshot = self._create_snapshot(timestamp_ms)
+        yield latency - latency / 2.0
+        return snapshot
 
     def commit(
         self,

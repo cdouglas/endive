@@ -373,8 +373,11 @@ class TestInstantCatalog:
     def test_read_latency(self):
         cat = InstantCatalog(1, (1,), latency_ms=2.5)
         gen = cat.read()
-        latency = next(gen)
-        assert latency == 2.5
+        # Split-yield: first yield is half-RTT
+        latency1 = next(gen)
+        assert latency1 == 1.25
+        latency2 = next(gen)
+        assert latency2 == 1.25
 
     def test_seq_increments(self):
         cat = InstantCatalog(1, (1,))
@@ -735,7 +738,7 @@ class TestInlinedMetadataLatency:
             metadata_inlined=False, latency_per_kib_ms=1.0,
         )
         gen = cat.read()
-        assert next(gen) == 5.0
+        assert next(gen) == 2.5  # half-RTT
 
     def test_inlined_zero_rate_returns_base_latency(self):
         """metadata_inlined=True but latency_per_kib_ms=0 → base latency only."""
@@ -744,7 +747,7 @@ class TestInlinedMetadataLatency:
             metadata_inlined=True, latency_per_kib_ms=0.0,
         )
         gen = cat.read()
-        assert next(gen) == 5.0
+        assert next(gen) == 2.5  # half-RTT
 
     def test_initial_size_from_partitions(self):
         """Initial catalog_size_bytes = total_partitions * initial_partition_size_bytes."""
@@ -770,9 +773,9 @@ class TestInlinedMetadataLatency:
             initial_partition_size_bytes=1024,  # 1 KiB
             latency_per_kib_ms=3.0,
         )
-        # Expected: 2.0 + (1024/1024) * 3.0 = 5.0
+        # Expected effective latency: 2.0 + (1024/1024) * 3.0 = 5.0. First yield = half.
         gen = cat.read()
-        assert next(gen) == pytest.approx(5.0)
+        assert next(gen) == pytest.approx(2.5)
 
     def test_effective_latency_larger_catalog(self):
         """Verify with multi-table, multi-partition initial size."""
@@ -782,9 +785,9 @@ class TestInlinedMetadataLatency:
             initial_partition_size_bytes=2048,  # 20 partitions * 2 KiB = 40 KiB
             latency_per_kib_ms=0.5,
         )
-        # Expected: 1.0 + 40.0 * 0.5 = 21.0
+        # Expected effective latency: 1.0 + 40.0 * 0.5 = 21.0. First yield = half.
         gen = cat.read()
-        assert next(gen) == pytest.approx(21.0)
+        assert next(gen) == pytest.approx(10.5)
 
     def test_commit_latency_matches_effective(self):
         """commit() uses _effective_latency for its total latency."""

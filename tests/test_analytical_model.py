@@ -99,7 +99,7 @@ class TestYieldCount:
         """FA, 1 partition, no retry, non-inlined.
 
         Per-attempt: TM_read(1) + ML_read(1) + ML_write(1) + TM_write(1) = 4
-        catalog_read(1) + runtime(1) + per_attempt(4) + cas(2) = 8
+        catalog_read(2) + runtime(1) + per_attempt(4) + cas(2) = 9
         """
         catalog = make_catalog()
         storage = InstantStorageProvider(rng=np.random.RandomState(42))
@@ -109,8 +109,8 @@ class TestYieldCount:
         )
         assert result.status == TransactionStatus.COMMITTED
         assert result.total_retries == 0
-        assert len(yields) == 8, (
-            f"Expected 8 yields for clean FA commit, got {len(yields)}. "
+        assert len(yields) == 9, (
+            f"Expected 9 yields for clean FA commit, got {len(yields)}. "
             f"Yields: {yields}"
         )
 
@@ -128,7 +128,7 @@ class TestYieldCount:
                         metadata_inlined=True)
         )
         assert result.status == TransactionStatus.COMMITTED
-        assert len(yields) == 6
+        assert len(yields) == 7
 
     def test_fast_append_3_partitions_yield_count(self):
         """FA, 3 partitions, no retry, non-inlined.
@@ -143,8 +143,8 @@ class TestYieldCount:
             txn.execute(catalog, storage, NeverRealDetector())
         )
         assert result.status == TransactionStatus.COMMITTED
-        assert len(yields) == 12, (
-            f"Expected 12 yields for 3-partition FA, got {len(yields)}"
+        assert len(yields) == 13, (
+            f"Expected 13 yields for 3-partition FA, got {len(yields)}"
         )
 
     def test_fast_append_ml_append_mode_yield_count(self):
@@ -157,8 +157,8 @@ class TestYieldCount:
                         ml_append_mode=True)
         )
         assert result.status == TransactionStatus.COMMITTED
-        # catalog_read(1) + runtime(1) + TM_read(1) + ML_read(1) + TM_write(1) + cas(2) = 7
-        assert len(yields) == 7
+        # catalog_read(2) + runtime(1) + TM_read(1) + ML_read(1) + TM_write(1) + cas(2) = 8
+        assert len(yields) == 8
 
     def test_validated_overwrite_clean_commit_yield_count(self):
         """VO, 1 partition, no retry, non-inlined → same as FA."""
@@ -169,7 +169,7 @@ class TestYieldCount:
             txn.execute(catalog, storage, NeverRealDetector())
         )
         assert result.status == TransactionStatus.COMMITTED
-        assert len(yields) == 8
+        assert len(yields) == 9
 
     def test_fast_append_retry_no_overlap_yield_count(self):
         """FA retry, cross-table (no overlap), non-inlined.
@@ -196,10 +196,10 @@ class TestYieldCount:
         assert result.status == TransactionStatus.COMMITTED
         assert result.total_retries == 1
         # attempt0: per_attempt(4) + cas(2) = 6
-        # fail: catalog_read(1) + tm_read(1) = 2
+        # fail: catalog_read(2) + tm_read(1) = 3
         # attempt1: cas(2) = 2 (disjoint = free)
-        assert len(yields) == 10, (
-            f"Expected 10 yields for cross-table retry, got {len(yields)}"
+        assert len(yields) == 12, (
+            f"Expected 12 yields for cross-table retry, got {len(yields)}"
         )
 
     def test_fast_append_retry_with_overlap_yield_count(self):
@@ -225,10 +225,10 @@ class TestYieldCount:
         assert result.status == TransactionStatus.COMMITTED
         assert result.total_retries == 1
         # attempt0: per_attempt(4) + cas(2) = 6
-        # fail: catalog_read(1) + tm_read(1) = 2
+        # fail: catalog_read(2) + tm_read(1) = 3
         # attempt1: per_attempt(4) + cas(2) = 6
-        assert len(yields) == 14, (
-            f"Expected 14 yields for same-table retry, got {len(yields)}"
+        assert len(yields) == 16, (
+            f"Expected 16 yields for same-table retry, got {len(yields)}"
         )
 
     def test_vo_retry_with_overlap_convoy_yield_count(self):
@@ -255,10 +255,10 @@ class TestYieldCount:
         assert result.status == TransactionStatus.COMMITTED
         assert result.total_retries == 1
         # attempt0: per_attempt(4) + cas(2) = 6
-        # fail: catalog_read(1) + tm_read(1) + convoy(1) = 3
+        # fail: catalog_read(2) + tm_read(1) + convoy(1) = 4
         # attempt1: per_attempt(4) + cas(2) = 6
-        assert len(yields) == 15, (
-            f"Expected 15 yields for VO convoy retry, got {len(yields)}"
+        assert len(yields) == 17, (
+            f"Expected 17 yields for VO convoy retry, got {len(yields)}"
         )
 
 
@@ -625,8 +625,8 @@ class TestRetryCostDecomposition:
 
         n_tm_ops = result.table_metadata_reads + result.table_metadata_writes
         n_ml_ops = result.manifest_list_reads + result.manifest_list_writes
-        # catalog_read(1) + runtime(1) + tm_ops + ml_ops + cas_yields(2)
-        expected_yields = 1 + 1 + n_tm_ops + n_ml_ops + 2
+        # catalog_read(2, split-yield) + runtime(1) + tm_ops + ml_ops + cas(2, split-yield)
+        expected_yields = 2 + 1 + n_tm_ops + n_ml_ops + 2
         assert len(yields) == expected_yields, (
             f"Yield count ({len(yields)}) != analytical prediction "
             f"({expected_yields}): 1 cat_read + 1 runtime + "

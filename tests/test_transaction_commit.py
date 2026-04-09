@@ -229,9 +229,10 @@ class TestConflictRetry:
         t2 = make_fast_append(txn_id=2)
         gen = t2.execute(catalog, storage, detector)
 
-        # Drive past catalog.read() yield (1.0ms from InstantCatalog)
+        # Drive past catalog.read() split-yield (2 × 0.5ms from InstantCatalog)
         latency = next(gen)
-        assert latency == 1.0  # Catalog read latency
+        assert latency == 0.5  # Catalog read half-RTT
+        gen.send(None)  # Second half of catalog read
 
         # Drive past runtime yield
         latency = gen.send(None)

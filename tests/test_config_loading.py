@@ -591,10 +591,10 @@ provider = "instant"
         try:
             config = load_simulation_config(path)
             cat = config.catalog
-            # Effective latency = 1.0 + (2048/1024) * 1.0 = 3.0
+            # Effective latency = 1.0 + (2048/1024) * 1.0 = 3.0. First yield = half.
             gen = cat.read()
             latency = next(gen)
-            assert latency == pytest.approx(3.0)
+            assert latency == pytest.approx(1.5)
         finally:
             os.unlink(path)
 
