@@ -41,6 +41,7 @@ GRAPH_REGISTRY = {
     "operation_types":             ("generate_operation_type_plots", "raw"),
     "per_table_breakdown":         ("generate_per_table_plots", "raw"),
     "workload_knee_table":         ("generate_workload_knee_table", "raw"),
+    "compare":                     (None, "compare"),
 }
 
 # Output filenames per graph type
@@ -132,7 +133,7 @@ def _process_single_graph(graph, graph_type, plotting_defaults, sa, input_dir,
     Factored out of process_config() to enable parallel dispatch.
     """
     func_name, pipeline = GRAPH_REGISTRY[graph_type]
-    func = getattr(sa, func_name)
+    func = getattr(sa, func_name) if func_name else None
 
     # Merge defaults: plotting.toml[graph_type] <- per-graph overrides
     defaults = dict(plotting_defaults.get(graph_type, {}))
@@ -205,6 +206,56 @@ def _process_single_graph(graph, graph_type, plotting_defaults, sa, input_dir,
             kwargs["experiments_cache"] = experiments_cache
             func(input_dir, pattern, graph_output_dir, **kwargs)
 
+        elif pipeline == "compare":
+            # Cross-experiment comparison: load two experiment patterns,
+            # label them, concatenate, and dispatch to an index-based plot.
+            import pandas as pd
+
+            base_type = merged.get("base_type", "latency_vs_throughput")
+            patterns = merged.get("patterns", [])
+            labels = merged.get("labels", patterns)
+            compare_group_by = merged.get("group_by")
+
+            if len(patterns) < 2:
+                raise ValueError("compare requires at least 2 patterns")
+
+            # Build index for each pattern and label
+            frames = []
+            for pat, label in zip(patterns, labels):
+                idx = sa.build_experiment_index(input_dir, pat + "*")
+                if len(idx) > 0:
+                    idx["experiment"] = label
+                    frames.append(idx)
+
+            if not frames:
+                raise ValueError(f"No data for compare patterns: {patterns}")
+
+            combined = pd.concat(frames, ignore_index=True)
+
+            # Composite group_by: "experiment" alone or "experiment × param"
+            if compare_group_by:
+                combined["_compare_group"] = (
+                    combined["experiment"] + " / "
+                    + combined[compare_group_by].astype(str)
+                )
+                effective_group_by = "_compare_group"
+            else:
+                effective_group_by = "experiment"
+
+            # Dispatch to the base plot function
+            base_func_name = GRAPH_REGISTRY[base_type][0]
+            base_func = getattr(sa, base_func_name)
+            output_file = merged.get("output_file",
+                                     f"compare_{base_type}.png")
+            output_path = os.path.join(graph_output_dir, output_file)
+
+            base_kwargs = {}
+            if "title" in merged:
+                base_kwargs["title"] = merged["title"]
+            base_kwargs["group_by"] = effective_group_by
+
+            base_func(combined, output_path, **base_kwargs)
+
         # Auto-emit companion .md table if registered
         if graph_type in TABLE_COMPANIONS:
             companion_func_name = TABLE_COMPANIONS[graph_type]
@@ -276,17 +327,26 @@ def process_config(config_path: Path, plotting_defaults: dict,
                 print(f"  [{graph_type}] -> {output_dir}/{md_file} (companion table)")
         return result
 
+    # Compare-only configs don't need their own experiments
+    has_compare_only = all(
+        g.get("type") == "compare" for g in graphs
+    )
+
     # Check experiments exist (on disk or in consolidated file)
     base_dir = Path(input_dir)
     matching = list(base_dir.glob(pattern))
     consolidated_path = base_dir / 'consolidated.parquet'
     consolidated_exists = consolidated_path.exists()
 
-    if not matching and not consolidated_exists:
+    if not matching and not consolidated_exists and not has_compare_only:
         return {"config": str(config_path), "label": label, "status": "skipped",
                 "reason": f"no experiments matching {pattern}"}
 
-    if not matching and consolidated_exists:
+    if has_compare_only:
+        print(f"\n{'='*60}")
+        print(f"  {label} (compare-only, {len(graphs)} graphs)")
+        print(f"{'='*60}")
+    elif not matching and consolidated_exists:
         from endive.saturation_analysis import scan_all_experiments
         consolidated_matches = scan_all_experiments(
             str(base_dir), pattern)

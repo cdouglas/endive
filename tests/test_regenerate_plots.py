@@ -50,6 +50,8 @@ class TestGraphRegistry:
         from endive import saturation_analysis as sa
 
         for graph_type, (func_name, _pipeline) in GRAPH_REGISTRY.items():
+            if func_name is None:
+                continue  # compare pipeline dispatches dynamically
             assert hasattr(sa, func_name), (
                 f"GRAPH_REGISTRY['{graph_type}'] references '{func_name}' "
                 f"which does not exist in endive.saturation_analysis"
@@ -58,7 +60,7 @@ class TestGraphRegistry:
     def test_all_pipeline_types_valid(self):
         """Every pipeline type in GRAPH_REGISTRY must be one of the three
         recognised values."""
-        valid_pipelines = {"index", "time_series", "raw"}
+        valid_pipelines = {"index", "time_series", "raw", "compare"}
         for graph_type, (_func_name, pipeline) in GRAPH_REGISTRY.items():
             assert pipeline in valid_pipelines, (
                 f"GRAPH_REGISTRY['{graph_type}'] has pipeline '{pipeline}'; "

@@ -65,9 +65,18 @@ type = "latency_vs_throughput"
 group_by = "partitions_per_txn"
 
 [[plots.graphs]]
+type = "overhead_vs_throughput"
+group_by = "partitions_per_txn"
+
+[[plots.graphs]]
+type = "success_rate_vs_throughput"
+group_by = "partitions_per_txn"
+
+[[plots.graphs]]
 type = "heatmap"
 x_param = "inter_arrival_scale"
 y_param = "partitions_per_txn"
+metrics = ["success_rate", "throughput", "mean_latency", "p99_latency"]
 per_type_metrics = ["success_rate", "mean_latency"]
 
 [[plots.graphs]]

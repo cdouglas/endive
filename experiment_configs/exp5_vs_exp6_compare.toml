@@ -1,0 +1,82 @@
+# Cross-experiment comparison: exp5 (non-inlined) vs exp6 (inlined)
+#
+# These plots overlay exp5 and exp6 results on the same axes to show
+# the effect of inlining table metadata in the catalog CAS object.
+#
+# Requires: exp5 and exp6 results already generated.
+
+[experiment]
+label = "exp5_vs_exp6_compare"
+
+[plots]
+output_dir = "plots/exp5_vs_exp6_compare"
+
+# FA: non-inlined vs inlined latency (uniform partitions)
+[[plots.graphs]]
+type = "compare"
+base_type = "latency_vs_throughput"
+patterns = ["exp5a_partition_fa", "exp6a_inlined_fa"]
+labels = ["non-inlined", "inlined"]
+group_by = "partitions_per_txn"
+title = "Latency vs Throughput: Non-Inlined vs Inlined (100% FA, Uniform)"
+output_file = "fa_uniform_latency_compare.png"
+
+# FA: non-inlined vs inlined overhead (uniform partitions)
+[[plots.graphs]]
+type = "compare"
+base_type = "overhead_vs_throughput"
+patterns = ["exp5a_partition_fa", "exp6a_inlined_fa"]
+labels = ["non-inlined", "inlined"]
+group_by = "partitions_per_txn"
+title = "Overhead: Non-Inlined vs Inlined (100% FA, Uniform)"
+output_file = "fa_uniform_overhead_compare.png"
+
+# FA: non-inlined vs inlined success rate (uniform partitions)
+[[plots.graphs]]
+type = "compare"
+base_type = "success_rate_vs_throughput"
+patterns = ["exp5a_partition_fa", "exp6a_inlined_fa"]
+labels = ["non-inlined", "inlined"]
+group_by = "partitions_per_txn"
+title = "Success Rate: Non-Inlined vs Inlined (100% FA, Uniform)"
+output_file = "fa_uniform_success_compare.png"
+
+# FA: Zipf comparison
+[[plots.graphs]]
+type = "compare"
+base_type = "latency_vs_throughput"
+patterns = ["exp5a_zipf_partition_fa", "exp6a_zipf_inlined_fa"]
+labels = ["non-inlined", "inlined"]
+group_by = "partitions_per_txn"
+title = "Latency vs Throughput: Non-Inlined vs Inlined (100% FA, Zipf)"
+output_file = "fa_zipf_latency_compare.png"
+
+# Mix: non-inlined vs inlined latency (uniform)
+[[plots.graphs]]
+type = "compare"
+base_type = "latency_vs_throughput"
+patterns = ["exp5b_partition_mix", "exp6b_inlined_mix"]
+labels = ["non-inlined", "inlined"]
+group_by = "partitions_per_txn"
+title = "Latency vs Throughput: Non-Inlined vs Inlined (90/10 Mix, Uniform)"
+output_file = "mix_uniform_latency_compare.png"
+
+# Mix: non-inlined vs inlined overhead (uniform)
+[[plots.graphs]]
+type = "compare"
+base_type = "overhead_vs_throughput"
+patterns = ["exp5b_partition_mix", "exp6b_inlined_mix"]
+labels = ["non-inlined", "inlined"]
+group_by = "partitions_per_txn"
+title = "Overhead: Non-Inlined vs Inlined (90/10 Mix, Uniform)"
+output_file = "mix_uniform_overhead_compare.png"
+
+# Uniform vs Zipf comparison (non-inlined FA only)
+[[plots.graphs]]
+type = "compare"
+base_type = "latency_vs_throughput"
+patterns = ["exp5a_partition_fa", "exp5a_zipf_partition_fa"]
+labels = ["uniform", "zipf"]
+group_by = "partitions_per_txn"
+title = "Latency vs Throughput: Uniform vs Zipf (100% FA, Non-Inlined)"
+output_file = "fa_uniform_vs_zipf_latency.png"
