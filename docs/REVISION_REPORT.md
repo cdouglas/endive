@@ -35,7 +35,16 @@ The new model is ~20% more expensive per attempt. This shifts all saturation cur
 | P95 latency at 5s IA | ~340ms | 267ms | -21% |
 | 100% success threshold | 500ms IA | 200ms IA | 2.5x better |
 
-**Note:** The new results show HIGHER throughput and LOWER latency despite the model being more expensive per-attempt. This is because the new results were generated with the post-rewrite codebase which includes architectural changes beyond just the I/O cost model (corrected CAS half-RTT timing, partition version tracking, etc.).
+**Note:** The new results show HIGHER throughput and LOWER latency despite the new model being more expensive per-attempt. This is because the new results were generated with the post-rewrite codebase which includes architectural changes beyond just the I/O cost model (corrected CAS half-RTT timing, partition version tracking, etc.).
+
+## Exp4a Multi-Table Comparison
+
+| Config | Old throughput | New throughput | Old success | New success | Old P50 | New P50 |
+|--------|---------------|---------------|-------------|-------------|---------|---------|
+| 1 table, 100ms IA | 4.6 c/s | 7.7 c/s | 55.8% | 93.7% | 1296ms | 387ms |
+| 10 tables, 100ms IA | 8.1 c/s | 8.2 c/s | 99.2% | 100.0% | 647ms | 194ms |
+
+Multi-table with 10+ tables: throughput is similar (catalog CAS is the bottleneck, not per-attempt I/O), but latency is dramatically lower in new results. Single-table shows the same pattern as exp1 — large improvement from the architectural rewrite.
 
 ## Claims Requiring Revision in 2026-03-09-catalog.md
 
