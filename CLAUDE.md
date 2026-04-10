@@ -110,39 +110,35 @@ docker run -d \
     cdouglas/endive-sim:latest \
     bash -c "python scripts/run_all_experiments.py --groups baseline,metadata --seeds 5 --parallel 8"
 
-# See docs/DOCKER.md for full details
 ```
 
 ## Architecture Overview
 
+See **SPEC.md** for the authoritative module layout, APIs, and invariants.
+
 ### Core Components
 
-**`endive/main.py` (1088 lines)** - Simulation engine
-- `Catalog` class: Versioned state with compare-and-swap operations
-- `Txn` class: Transaction lifecycle (capture snapshot → execute → commit → retry)
-- `ConflictResolver` class: Distinguishes false vs real conflicts, handles manifest operations
-- `txn_gen()`: Transaction generator with configurable inter-arrival distributions
-- `calculate_backoff_time()`: Exponential backoff with jitter
+**`endive/simulation.py`** - SimPy runner. The only module that touches SimPy; bridges bare `float` latency generators to `env.timeout()` via `_drive_generator()`. Owns `Simulation`, `SimulationConfig`, `Statistics` (streaming parquet export).
 
-**`endive/saturation_analysis.py` (1700+ lines)** - Analysis pipeline
-- `build_experiment_index()`: Scans experiments/, extracts parameters from cfg.toml files
-- `load_and_aggregate_results()`: Loads individual per-seed parquet files
-- `load_and_aggregate_results_consolidated()`: Efficient loading from consolidated.parquet with predicate pushdown
-- `plot_*()` functions: Generate saturation curves, overhead analysis, time-series plots
-- `parse_filter_expression()` / `apply_filters()`: Filter experiments by parameter values
+**`endive/catalog.py`** - `Catalog` ABC plus `CASCatalog`, `AppendCatalog`, `InstantCatalog`. Exposes only `read()` and `commit()`. Manages per-table, per-partition version vectors.
 
-**`endive/capstats.py`** - Statistics collection during simulation
+**`endive/transaction.py`** - `Transaction` ABC plus `FastAppendTransaction` and `ValidatedOverwriteTransaction`. Owns the commit loop, per-attempt I/O cost model, write-overlap detection, and conflict-cost calculation.
 
-**`scripts/run_all_experiments.py`** - Unified experiment runner
-- Supports experiment groups (baseline, heatmap, catalog)
-- Parameter sweeps with deterministic seed generation (nonce-based)
-- Progress tracking, resume capability, status checking
-- Parallel execution with configurable concurrency
+**`endive/storage.py`** - `StorageProvider` ABC, `LognormalLatency`/`SizeBasedLatency`/`FixedLatency`, and concrete providers (S3, S3 Express, Azure, Azure Premium, GCS, instant).
 
-**`scripts/regenerate_plots.py`** - Unified plot regeneration
-- Reads `[plots]` sections from experiment configs, dispatches to plotting functions
-- Merges `plotting.toml` defaults with per-graph overrides
-- Supports `--dry-run`, `--pattern`, `--config` for targeted regeneration
+**`endive/conflict_detector.py`** - `ProbabilisticConflictDetector` and `PartitionOverlapConflictDetector`.
+
+**`endive/workload.py`** - `Workload`, `WorkloadConfig`, table/partition selectors (uniform, Zipf). Owns topology.
+
+**`endive/config.py`** - `load_simulation_config()`; the only config entry point. Loads TOML, builds provider profiles, constructs all components.
+
+**`endive/main.py`** - CLI entry point (~330 lines) and experiment directory management.
+
+**`endive/saturation_analysis.py`** - Analysis pipeline: `build_experiment_index()`, `load_and_aggregate_results_consolidated()`, statistics, plotting functions.
+
+**`scripts/run_all_experiments.py`** - Experiment runner. Supports experiment groups (baseline, heatmap, catalog, tables, zipf, providers, partition, inlined). Deterministic seed generation via nonce. Resume capability, status checking, parallel execution.
+
+**`scripts/regenerate_plots.py`** - Reads `[plots]` sections from experiment configs, dispatches to plotting functions. Merges `plotting.toml` defaults with per-graph overrides. Supports `--dry-run`, `--pattern`, `--config`.
 
 ### Critical Design Patterns
 
@@ -150,33 +146,33 @@ docker run -d \
 All latency-bearing operations yield bare `float` values (milliseconds). Only `Simulation._drive_generator()` converts these to SimPy timeouts. This separates I/O modeling from the simulation engine.
 
 #### 2. Snapshot Versioning
-Transactions capture `catalog.seq` via `CatalogSnapshot` at creation. On commit, `catalog.commit()` checks the expected seq. On failure, the transaction reads the current snapshot and uses `has_write_overlap()` to determine if manifest I/O is needed.
+Transactions observe catalog state only through immutable `CatalogSnapshot`s returned by `catalog.read()`. On commit, `catalog.commit(expected_seq, writes)` performs CAS against the expected seq. On failure, the transaction calls `catalog.read()` again and uses `compute_write_overlap()` to decide whether manifest I/O is needed.
 
 **Critical invariant**: `catalog.seq` advances by exactly 1 on each successful commit. Never skip versions.
 
 #### 3. Write Overlap Check
-After a CAS failure, `has_write_overlap()` compares per-partition version vectors between old and new snapshots. Cross-table or disjoint-partition retries skip all manifest I/O — only catalog read + re-CAS. Same-table overlapping-partition retries pay type-specific conflict costs.
+After a CAS failure, `Transaction.compute_write_overlap()` compares per-partition version vectors between the transaction's start snapshot and the current snapshot. Cross-table or disjoint-partition retries skip all manifest I/O — catalog read + re-CAS only. Same-table overlapping-partition retries pay type-specific conflict costs (FA: nothing extra; VO: historical ML reads for the I/O convoy).
 
 #### 4. Conflict Types
 - **No overlap** (cross-table or disjoint partitions): Free retry (catalog read + CAS only)
 - **False conflict**: Same table + overlapping partitions, no data conflict — merge and retry with per-attempt I/O
 - **Real conflict**: Same table + overlapping partitions with data conflict — may abort (operation-dependent)
 
-#### 4. Experiment Organization
+#### 5. Experiment Organization
 ```
 experiments/
-├── exp2_1_single_table_false-a3f7b2/    # Label + hash of parameters
-│   ├── cfg.toml                          # Configuration snapshot
-│   ├── 42/results.parquet                # Seed 42 results
-│   ├── 43/results.parquet                # Seed 43 results
-│   └── 44/results.parquet                # Seed 44 results
-└── consolidated.parquet                  # All experiments (v2.0+)
+├── exp1_fa_baseline-a3f7b2/         # Label + hash of parameters
+│   ├── cfg.toml                     # Configuration snapshot
+│   ├── version.txt                  # Git SHA
+│   ├── 42/results.parquet           # Seed 42 results
+│   └── 43/results.parquet           # Seed 43 results
+└── consolidated.parquet             # All experiments merged
 ```
 
-**Hash computation**: `compute_experiment_hash()` creates deterministic hash from parameters (excludes seed, output_path). Same parameters → same hash → same directory.
+**Hash computation**: `compute_experiment_hash()` creates a deterministic hash from config parameters (excludes seed, output_path, experiment.label). Same parameters + same code → same hash → same directory.
 
-#### 5. Seeds and Determinism
-**IMPORTANT**: Seeds must be in config file, NOT passed as CLI argument to endive.main:
+#### 6. Seeds and Determinism
+**IMPORTANT**: Seeds go in the config file, not as a CLI argument to `endive.main`:
 ```bash
 # WRONG: endive.main doesn't accept --seed
 python -m endive.main config.toml --seed 42  # FAILS
@@ -186,9 +182,9 @@ python -m endive.main config.toml --seed 42  # FAILS
 seed = 42
 ```
 
-For batch experiments, use `run_all_experiments.py` which handles config variants and deterministic seed generation via nonce.
+For batch experiments, use `run_all_experiments.py` which handles config variants and deterministic seed generation via a nonce.
 
-#### 6. Consolidated Format (v2.0+)
+#### 7. Consolidated Format
 - Single parquet file with all experiments: `experiments/consolidated.parquet`
 - Uses predicate pushdown for efficient filtering (memory efficiency, not speed)
 - Falls back to individual files if consolidated doesn't exist
@@ -197,9 +193,9 @@ For batch experiments, use `run_all_experiments.py` which handles config variant
 ### Analysis Pipeline Flow
 
 1. **Index Building** (`build_experiment_index()`):
-   - Scans `experiments/` for pattern matches (e.g., "exp2_1_*")
+   - Scans `experiments/` for pattern matches (e.g., "exp1_*")
    - Reads `cfg.toml` from each experiment directory
-   - Extracts parameters: `inter_arrival_scale`, `num_tables`, `real_conflict_probability`, `t_cas_mean`, etc.
+   - Extracts parameters: `inter_arrival_scale`, `num_tables`, `real_conflict_probability`, `fast_append_ratio`, etc.
    - Filters by `min_seeds` (default: 3)
 
 2. **Data Loading** (`load_and_aggregate_results_consolidated()` or `load_and_aggregate_results()`):
@@ -220,22 +216,22 @@ For batch experiments, use `run_all_experiments.py` which handles config variant
 
 ### Parameter Filtering
 
-For multi-dimensional parameter sweeps (e.g., exp3.3: num_tables × real_conflict_probability × inter_arrival):
+For multi-dimensional parameter sweeps (e.g., exp4b: num_tables × catalog_latency_ms × inter_arrival):
 
 ```bash
-# Filter to single num_tables value, group by real_conflict_probability
+# Filter to a single num_tables value, group by catalog latency
 python -m endive.saturation_analysis \
     -i experiments \
-    -p "exp3_3_*" \
-    -o plots/exp3_3_t10 \
-    --group-by real_conflict_probability \
+    -p "exp4b_*" \
+    -o plots/exp4b_t10 \
+    --group-by catalog_latency_ms \
     --filter "num_tables==10"
 
-# Multiple filters (AND logic) - use SEPARATE --filter arguments
---filter "num_tables>=5" --filter "real_conflict_probability<=0.5"
+# Multiple filters (AND logic) — use SEPARATE --filter arguments
+--filter "num_tables>=5" --filter "catalog_latency_ms<=50"
 
 # WRONG: Do NOT use && operator (not supported)
---filter "num_tables==10 && real_conflict_probability==0.3"  # FAILS
+--filter "num_tables==10 && catalog_latency_ms==50"  # FAILS
 ```
 
 **Supported operators**: `==`, `!=`, `<`, `<=`, `>`, `>=`
@@ -275,27 +271,16 @@ real_conflict_probability = 0.0
 **Common issues**:
 
 1. **Empty experiment index** (`assert expected_count == 0`):
-   - Test experiments have < 3 seeds → Set `min_seeds=1` in test config
-   - Consolidated file exists but doesn't contain test data → Use fresh test environment
+   - Test experiments have < 3 seeds → set `min_seeds=1` in the test config
+   - Consolidated file exists but doesn't contain test data → use a fresh test environment
 
 2. **Seed-related failures**:
-   - Remember: Seeds must be in config file, not CLI argument
-   - Check `SIM_SEED` global in main.py:220
-
-3. **Numerical accuracy issues**:
-   - Simulator is accurate to machine epsilon (1e-10)
-   - Check for floating-point accumulation in long simulations
-   - See tests/test_numerical_accuracy.py for validation patterns
+   - Seeds must be in the TOML config, not a CLI argument to `endive.main`
+   - `SimulationConfig.seed` is applied in `simulation.Simulation.run()`
 
 ### Modifying Analysis Code
 
-**Key locations**:
-- Parameter extraction: `saturation_analysis.py:289-324` (`extract_key_parameters()`)
-- Warmup calculation: `saturation_analysis.py:269-278` (`compute_warmup_duration()`)
-- Filtering: `saturation_analysis.py:1473-1588`
-- Plotting: `saturation_analysis.py:692-1135`
-
-**Pattern**: Use targeted edits instead of reading entire 1700-line file. Use grep with context:
+Use grep with context instead of reading the full 4k-line `saturation_analysis.py`:
 ```bash
 grep -A 10 -B 5 "def extract_key_parameters" endive/saturation_analysis.py
 ```
@@ -304,12 +289,12 @@ grep -A 10 -B 5 "def extract_key_parameters" endive/saturation_analysis.py
 
 ```bash
 # View experiment metadata
-cat experiments/exp2_1_single_table_false-a3f7b2/cfg.toml
+cat experiments/exp1_fa_baseline-*/cfg.toml
 
-# Quick statistics
-python -c "import pandas as pd; df = pd.read_parquet('experiments/exp2_1_*/42/results.parquet'); print(df['status'].value_counts())"
+# Quick statistics on a single seed
+python -c "import pandas as pd; df = pd.read_parquet('experiments/exp1_fa_baseline-*/42/results.parquet'); print(df['status'].value_counts())"
 
-# Check consolidation
+# Check the consolidated file
 python -c "import pyarrow.parquet as pq; meta = pq.read_metadata('experiments/consolidated.parquet'); print(f'{meta.num_rows:,} rows, {meta.num_row_groups} row groups')"
 ```
 
@@ -317,12 +302,10 @@ python -c "import pyarrow.parquet as pq; meta = pq.read_metadata('experiments/co
 
 - **SPEC.md** - Authoritative simulator specification (module APIs, invariants, config schema)
 - **README.md** - Concise getting started guide (installation, usage, analysis, testing)
-- **docs/APPENDIX_SIMULATOR_DETAILS.md** - Technical appendix for blog posts (distributions, parameters, formulas)
-- **docs/QUICKSTART.md** - Installation and first simulation walkthrough
-- **docs/ANALYSIS_GUIDE.md** - How to generate plots and interpret results
+- **docs/model.md** - Simplifications relative to real Iceberg
+- **docs/EXP5.md**, **docs/EXP6.md** - Partition-aware and inlined-metadata experiment designs
 - **docs/CONSOLIDATED_FORMAT.md** - Consolidated parquet format details
-- **docs/DOCKER.md** - Container-based execution with EXP_ARGS
-- **docs/BASELINE_RESULTS.md** - Key findings from baseline experiments
+- **docs/analysis/** - Provider latency verification, DES profiling, reference data
 - **experiment_configs/README.md** - Experiment descriptions and parameter sweeps
 
 ## Important Constraints
@@ -341,15 +324,19 @@ python -c "import pyarrow.parquet as pq; meta = pq.read_metadata('experiments/co
 - **Parallel execution**: Near-linear speedup with CPU core count
 - **Baseline runtime**: ~24 hours with 8 cores for full experiment suite
 - **Memory usage**: Analysis loads ~200MB per experiment with consolidated format
-- **Test execution**: 136 tests in ~3 minutes
+- **Test execution**: ~878 tests in ~3 minutes
 
 ## Current Experiment Coverage
 
 **Experiment Groups (run via `--groups`):**
-- **baseline**: 100% FastAppend with instant catalog (`exp1_fa_baseline`)
+- **baseline**: 100% FastAppend single-table saturation (`exp1_fa_baseline`)
 - **heatmap**: FA/VO operation mix 2D sweep (`exp2_mix_heatmap`)
-- **catalog**: Catalog latency impact on FA and mixed workloads (`exp3a_catalog_fa`, `exp3b_catalog_mix`)
+- **catalog**: Catalog CAS latency × FA/mixed workloads (`exp3a_catalog_fa`, `exp3b_catalog_mix`)
 - **tables**: Multi-table single-file catalog contention (`exp4a_tables_fa`, `exp4b_tables_mix`)
+- **zipf**: Zipf table selection (`exp4a_zipf_tables_fa`, `exp4b_zipf_tables_mix`)
+- **providers**: Real provider profiles × tables × workload (`exp4c_tables_providers`)
+- **partition**: Partition-aware single table (`exp5[ab]_[zipf_]partition_{fa,mix}`)
+- **inlined**: Inlined table metadata (`exp6[ab]_[zipf_]inlined_{fa,mix}`)
 
 **Plotting Approach:**
 - Each experiment config declares `[plots]` section with positive list of graphs

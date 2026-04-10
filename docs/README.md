@@ -1,62 +1,36 @@
 # Documentation Index
 
-## Core Documentation
+Authoritative simulator reference lives at [`../SPEC.md`](../SPEC.md). Project overview in [`../README.md`](../README.md).
+
+## Core
 
 | Document | Description |
 |----------|-------------|
-| [QUICKSTART.md](QUICKSTART.md) | Installation and first simulation |
-| [model.md](model.md) | Model simplifications vs reality |
-| [APPENDIX_SIMULATOR_DETAILS.md](APPENDIX_SIMULATOR_DETAILS.md) | Technical appendix for publications |
-| [SIMULATOR_REVIEW.md](SIMULATOR_REVIEW.md) | Fidelity analysis vs Apache Iceberg source |
+| [model.md](model.md) | Simplifications made vs. real Iceberg implementations |
+| [CONSOLIDATED_FORMAT.md](CONSOLIDATED_FORMAT.md) | Layout of `experiments/consolidated.parquet` |
 
-## Guides
+## Experiment Designs
 
 | Document | Description |
 |----------|-------------|
-| [ANALYSIS_GUIDE.md](ANALYSIS_GUIDE.md) | Generating and interpreting plots |
-| [RUNNING_EXPERIMENTS.md](RUNNING_EXPERIMENTS.md) | Parallel experiment execution |
-| [DOCKER.md](DOCKER.md) | Container-based execution |
-| [CONSOLIDATED_FORMAT.md](CONSOLIDATED_FORMAT.md) | Results storage format |
+| [EXP5.md](EXP5.md) | Partition-aware single table (exp5a/5b) |
+| [EXP6.md](EXP6.md) | Inlined table metadata (exp6a/6b) |
 
-## Technical Details
+See [`../experiment_configs/`](../experiment_configs/) for all runnable configs (exp1–exp6) and [`scripts/run_all_experiments.py`](../scripts/run_all_experiments.py) for the experiment groups.
 
-| Document | Description |
-|----------|-------------|
-| [SNAPSHOT_VERSIONING.md](SNAPSHOT_VERSIONING.md) | Version tracking mechanics |
-| [WARMUP_PERIOD.md](WARMUP_PERIOD.md) | Steady-state measurement |
-| [OVERHEAD_ANALYSIS.md](OVERHEAD_ANALYSIS.md) | Commit protocol overhead |
-| [IO_CONVOY_ANALYSIS.md](IO_CONVOY_ANALYSIS.md) | Historical ML read I/O convoy |
-
-## Results
+## Analysis & Reference Data
 
 | Document | Description |
 |----------|-------------|
-| [BASELINE_RESULTS.md](BASELINE_RESULTS.md) | Findings from baseline experiments |
+| [analysis/IO_CONVOY_ANALYSIS.md](analysis/IO_CONVOY_ANALYSIS.md) | I/O convoy pattern in partition-level OCC |
+| [analysis/des_profiling_report.md](analysis/des_profiling_report.md) | SimPy DES engine profiling: ~75–107k events/s |
+| [analysis/latency_verification.md](analysis/latency_verification.md) | Provider latency parameters vs. measured sources |
+| [analysis/simulation_summary.md](analysis/simulation_summary.md) | YCSB June 2025 benchmark measurements (raw) |
+| [analysis/dr_put_get.md](analysis/dr_put_get.md) | PUT/GET latency research across cloud providers |
+| [analysis/dr_s3x.md](analysis/dr_s3x.md) | S3 Express One Zone PUT/GET research |
+| [analysis/dr_iceberg_metadata.md](analysis/dr_iceberg_metadata.md) | Iceberg metadata artifact size research |
+| [analysis/distributions.json](analysis/distributions.json) | Raw per-provider latency distribution fits |
 
-## Quick Reference
+## Research Notes (not part of the simulator)
 
-### Run Simulation
-```bash
-python -m endive.main experiment_configs/exp1_fa_baseline.toml --yes
-```
-
-### Generate Plots
-```bash
-python scripts/regenerate_plots.py
-```
-
-### Run Tests
-```bash
-pytest tests/ -v
-```
-
-## File Locations
-
-| What | Where |
-|------|-------|
-| Specification | `../SPEC.md` |
-| Experiment configs | `../experiment_configs/` |
-| Results | `../experiments/` |
-| Plots | `../plots/` |
-| Core simulator | `../endive/simulation.py` |
-| Analysis | `../endive/saturation_analysis.py` |
+The `review/` subdirectory contains design documents for a separate catalog file-format effort (LCF/PB) and paper notes — not implemented in the simulator.

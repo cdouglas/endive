@@ -13,9 +13,9 @@ No changes are needed. The profiles are current and well-sourced for S3, S3 Expr
 
 | Abbrev | Source | Date | Coverage |
 |--------|--------|------|----------|
-| YCSB | `analysis/simulation_summary.md` | June 2025 | CAS + append for all 5 providers |
-| DR2025 | `analysis/dr_put_get.md` | Dec 2025 / Mar 2025 | S3/Azure/GCP GET and PUT |
-| DRS3X | `analysis/dr_s3x.md` | Dec 2025 | S3 Express GET (measured), PUT (derived) |
+| YCSB | `simulation_summary.md` | June 2025 | CAS + append for all 5 providers |
+| DR2025 | `dr_put_get.md` | Dec 2025 / Mar 2025 | S3/Azure/GCP GET and PUT |
+| DRS3X | `dr_s3x.md` | Dec 2025 | S3 Express GET (measured), PUT (derived) |
 | DURNER | Durner et al. VLDB 2023 | 2023 | Size-based PUT model (base + rate * MiB) |
 
 ## Verification by Provider

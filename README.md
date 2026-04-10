@@ -1,169 +1,125 @@
 # Endive: Iceberg Catalog Simulator
 
-Discrete-event simulator for Apache Iceberg's optimistic concurrency control (OCC). Models catalog contention, conflict resolution, and commit latency under varying workloads to answer: **When does commit throughput saturate? What causes latency to explode?**
+Discrete-event simulator for Apache Iceberg's optimistic concurrency control (OCC). Models catalog contention, conflict resolution, and commit latency across cloud storage providers to answer: **When does commit throughput saturate? What causes latency to explode?**
 
-## What Endive Simulates
+## What it models
 
-Iceberg installs new versions of tables using a compare-and-set (CAS) in its Catalog. When CAS fails but the transaction commutes with the new state, it merges its metadata with concurrent transactions before retrying.
+Iceberg installs new table versions via a compare-and-swap (CAS) on the catalog. When CAS fails but the transaction commutes with the new state, it merges metadata and retries. Endive models:
 
-The simulator models:
-- **CAS-based commits**: Traditional catalog pointer updates
-- **Append-based commits**: Conditional append to catalog log (ML+)
-- **Conflict resolution**: False conflicts (no data overlap) vs real conflicts (manifest file I/O)
-- **Partition-level conflicts**: Per-partition manifest lists with Zipf/uniform access patterns
-- **Cloud storage latencies**: Provider-specific distributions from YCSB measurements
+- **CAS and append catalogs** backed by opaque `StorageProvider`s (`CASCatalog`, `AppendCatalog`, `InstantCatalog`)
+- **Transaction types** with distinct conflict behavior: `FastAppendTransaction` (always retries) and `ValidatedOverwriteTransaction` (aborts on real conflict, pays historical manifest-list reads as an I/O convoy)
+- **Per-partition version tracking** so concurrent writers to disjoint partitions retry for free (catalog read + CAS only, no manifest I/O)
+- **Table metadata inlining** — store table metadata inside the catalog CAS object to eliminate per-attempt metadata I/O at the cost of CAS payload size
+- **ML+ (manifest-list append) mode** — avoid ML rewrites on false conflicts where the storage layer supports conditional append
+- **Provider-calibrated latencies** from YCSB June 2025 benchmarks (S3, S3 Express, Azure, Azure Premium, GCS) and Durner et al. VLDB 2023 PUT/GET measurements
 
-Latency parameters are calibrated from:
-- **CAS/Append operations**: June 2025 YCSB benchmarks (AWS, Azure, GCP)
-- **PUT/GET operations**: Durner et al. VLDB 2023 measurements
+Complete API and invariants: [SPEC.md](SPEC.md). Model simplifications: [docs/model.md](docs/model.md).
 
-## Quick Start
+## Quick start
 
 ```bash
-# Install
+python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt && pip install -e .
 
-# Run single simulation (1 hour simulated, ~4 seconds wall-clock)
-python -m endive.main experiment_configs/baseline_s3x.toml --yes
+# Run a single 1-hour simulation (~4 seconds wall-clock)
+python -m endive.main experiment_configs/exp1_fa_baseline.toml --yes
 
-# Run tests
-pytest tests/ -v
+# Run the full test suite
+pytest tests/ -q
 ```
 
-## Running Experiments
+## Running experiments
 
 ```bash
-# Run all experiments (parallel, with progress bar)
+# Run all experiments in parallel with 3 seeds per config
 python scripts/run_all_experiments.py --parallel 4 --seeds 3
 
-# Quick test mode (1 minute simulations)
-python scripts/run_all_experiments.py --quick --parallel 4
-
 # Run specific groups
-python scripts/run_all_experiments.py --groups baseline,metadata --seeds 3
+python scripts/run_all_experiments.py --groups baseline,heatmap,catalog --seeds 3
+
+# Quick smoke test (1-minute sims, 3 load levels)
+python scripts/run_all_experiments.py --quick --parallel 4
 ```
+
+Experiment groups defined in `scripts/run_all_experiments.py`:
+
+| Group | Configs | Purpose |
+|-------|---------|---------|
+| `baseline` | `exp1_fa_baseline` | 100% FastAppend saturation curve |
+| `heatmap` | `exp2_mix_heatmap` | FA/VO mix × arrival-rate heatmap |
+| `catalog` | `exp3a_catalog_fa`, `exp3b_catalog_mix` | Catalog CAS latency impact |
+| `tables` | `exp4a_tables_fa`, `exp4b_tables_mix` | Multi-table contention (uniform selection) |
+| `zipf` | `exp4a_zipf_tables_fa`, `exp4b_zipf_tables_mix` | Zipf table selection |
+| `providers` | `exp4c_tables_providers` | Real provider profiles × tables × workload |
+| `partition` | `exp5[ab]_[zipf_]partition_{fa,mix}` | Per-partition conflict detection ([docs/EXP5.md](docs/EXP5.md)) |
+| `inlined` | `exp6[ab]_[zipf_]inlined_{fa,mix}` | Inlined table metadata ([docs/EXP6.md](docs/EXP6.md)) |
+
+Results land in `experiments/<label>-<hash>/<seed>/results.parquet` plus a consolidated `experiments/consolidated.parquet` (see [docs/CONSOLIDATED_FORMAT.md](docs/CONSOLIDATED_FORMAT.md)).
 
 ## Analysis
 
 ```bash
-# Generate saturation curves
-python -m endive.saturation_analysis \
-    -i experiments \
-    -p "baseline_s3x-*" \
-    -o plots/baseline_s3x
+# Regenerate every plot declared in experiment configs
+python scripts/regenerate_plots.py
 
-# Compare configurations across providers
-python -m endive.saturation_analysis \
-    -i experiments \
-    -p "*_s3x-*" \
-    -o plots/s3x_comparison \
-    --group-by label
+# Preview what would be generated
+python scripts/regenerate_plots.py --dry-run
+
+# Ad-hoc analysis against the consolidated results
+python -m endive.saturation_analysis -i experiments -p "exp1_fa_baseline-*" -o plots/exp1_fa_baseline
+python -m endive.saturation_analysis -i experiments -p "exp4a_tables_fa-*" -o plots/exp4a --group-by num_tables
 ```
 
-Outputs:
-- `latency_vs_throughput.png` - Latency curves with error bands
-- `success_vs_throughput.png` - Success rate degradation
-- `experiment_index.csv` - Summary statistics
-
-## Configuration
-
-```toml
-[simulation]
-duration_ms = 3600000      # 1 hour
-
-[experiment]
-label = "baseline_s3x"
-
-[catalog]
-num_tables = 1
-table_metadata_inlined = false  # true = inlining optimization
-
-[transaction]
-retry = 10
-runtime.mean = 180000      # 3 minutes
-inter_arrival.scale = 100.0
-manifest_list_mode = "rewrite"  # or "append" for ML+
-
-[storage]
-provider = "s3x"           # s3, s3x, azure, azurex, gcp
-max_parallel = 4
-
-[partition]                # Optional: partition-level modeling
-enabled = true
-num_partitions = 100
-partitions_per_txn_mean = 3.0
-selection.distribution = "zipf"  # or "uniform"
-selection.zipf_alpha = 1.5
-```
-
-See `experiment_configs/` for complete examples.
-
-## Experiment Design
-
-**Factorial design for optimization experiments:**
-
-| Config | table_metadata_inlined | manifest_list_mode | Effect |
-|--------|:----------------------:|:------------------:|--------|
-| baseline | false | rewrite | No optimizations (control) |
-| metadata | true | rewrite | Inlining effect only |
-| ml_append | false | append | ML+ effect only |
-| combined | true | append | Both optimizations |
-
-**Provider coverage:**
-
-| Config | S3 | S3 Express | Azure | Azure Premium |
-|--------|:--:|:----------:|:-----:|:-------------:|
-| baseline | ✓ | ✓ | ✓ | ✓ |
-| metadata | ✓ | ✓ | ✓ | ✓ |
-| ml_append | - | ✓ | ✓ | ✓ |
-| combined | - | ✓ | ✓ | ✓ |
-
-*S3 Standard excluded from append experiments (no conditional append support).*
-
-## Storage Provider Latencies
-
-| Provider | CAS Median | Append | PUT Base | PUT Rate |
-|----------|------------|--------|----------|----------|
-| S3 Standard | 61ms | N/A | 30ms | 20 ms/MiB |
-| S3 Express | 22ms | 21ms | 10ms | 10 ms/MiB |
-| Azure Std | 93ms | 87ms | 50ms | 25 ms/MiB |
-| Azure Premium | 64ms | 70ms | 30ms | 15 ms/MiB |
-
-*Sources: YCSB June 2025, Durner et al. VLDB 2023*
-
-## Tests
+Filter syntax (AND logic via repeated `--filter`):
 
 ```bash
-pytest tests/ -v                              # All tests (~3 min)
-pytest tests/test_simulator.py -v             # Core simulator
-pytest tests/test_experiment_runner.py -v     # Experiment runner
-pytest tests/test_storage_provider_config.py  # Provider configs
+python -m endive.saturation_analysis -i experiments -p "exp4b_*" \
+    -o plots/exp4b_t10 --group-by real_conflict_probability \
+    --filter "num_tables==10"
 ```
 
-## Documentation
+## Storage provider latencies
 
-- **[docs/QUICKSTART.md](docs/QUICKSTART.md)** - Getting started
-- **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** - Design, invariants, and module structure
-- **[docs/SIMULATOR.md](docs/SIMULATOR.md)** - Detailed simulator internals with pseudocode
-- **[docs/RUNNING_EXPERIMENTS.md](docs/RUNNING_EXPERIMENTS.md)** - Running experiments
-- **[experiment_configs/README.md](experiment_configs/README.md)** - Experiment descriptions
+Calibrated from YCSB June 2025 benchmarks and Durner et al. VLDB 2023. See [docs/analysis/latency_verification.md](docs/analysis/latency_verification.md) for sources.
 
-## Code Organization
+| Provider | CAS median | Append median | PUT base | PUT rate |
+|----------|------------|---------------|----------|----------|
+| S3 Standard   | 61 ms | —      | 60 ms | 20 ms/MiB |
+| S3 Express    | 22 ms | 21 ms  | 6.5 ms | 10 ms/MiB |
+| Azure Std     | 93 ms | 87 ms  | 45 ms | 25 ms/MiB |
+| Azure Premium | 64 ms | 70 ms  | 41 ms | 15 ms/MiB |
+| GCP           | 170 ms | —     | 200 ms | 17 ms/MiB |
+
+S3 Standard and GCS lack conditional append and are excluded from append experiments.
+
+## Module layout
 
 ```
 endive/
-├── snapshot.py       # CatalogSnapshot, CASResult (immutable data types)
-├── transaction.py    # Txn, LogEntry (transaction state)
-├── main.py           # Catalog, ConflictResolver, simulation orchestration
-├── config.py         # Configuration loading and validation
-├── capstats.py       # Statistics collection
-└── utils.py          # Utilities (git sha, table partitioning)
+├── storage.py            # StorageProvider ABC, latency distributions, provider implementations
+├── catalog.py            # Catalog ABC, CASCatalog, AppendCatalog, InstantCatalog
+├── transaction.py        # Transaction ABC, FastAppend, ValidatedOverwrite, commit loop
+├── conflict_detector.py  # Probabilistic and PartitionOverlap detectors
+├── workload.py           # Workload generator, table/partition selectors
+├── simulation.py         # SimPy runner, SimulationConfig, Statistics (streaming parquet)
+├── config.py             # TOML loading, provider profiles, validation
+├── main.py               # CLI entry point, experiment directory management
+└── saturation_analysis.py  # Analysis + plotting pipeline
 ```
 
-Key design: Transactions never access Catalog state directly. All state is obtained via `catalog.read()` or `catalog.try_cas()` which return immutable snapshots, ensuring proper message-passing semantics.
+Design invariant: all latency-bearing operations yield bare `float` milliseconds; the only place SimPy is used is `Simulation._drive_generator()`. Transactions observe catalog state exclusively through immutable `CatalogSnapshot`s returned by `catalog.read()`.
+
+## Documentation
+
+- **[SPEC.md](SPEC.md)** — authoritative module APIs, invariants, I/O cost model, TOML schema
+- **[docs/model.md](docs/model.md)** — simplifications relative to real Iceberg
+- **[docs/EXP5.md](docs/EXP5.md)**, **[docs/EXP6.md](docs/EXP6.md)** — partition-aware and inlined-metadata experiment designs
+- **[docs/CONSOLIDATED_FORMAT.md](docs/CONSOLIDATED_FORMAT.md)** — consolidated parquet output format
+- **[docs/analysis/](docs/analysis/)** — provider latency verification, DES profiling, reference data
+- **[docs/README.md](docs/README.md)** — documentation index
 
 ## References
 
-- **Apache Iceberg**: https://iceberg.apache.org/
-- **Durner et al. VLDB 2023**: "Exploiting Cloud Object Storage for High-Performance Analytics"
-- **SimPy Framework**: https://simpy.readthedocs.io/
+- Apache Iceberg: <https://iceberg.apache.org/>
+- Durner, Leis, Neumann. *Exploiting Cloud Object Storage for High-Performance Analytics*. VLDB 2023.
+- SimPy: <https://simpy.readthedocs.io/>

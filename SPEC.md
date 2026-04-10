@@ -1,7 +1,7 @@
 # Endive Simulator Specification
 
-**Version**: 3.0
-**Date**: 2026-04-08
+**Version**: 3.1
+**Date**: 2026-04-10
 
 ## Executive Summary
 
@@ -800,28 +800,40 @@ label = "exp_baseline"                 # Optional; enables directory structure
 
 [storage]
 provider = "s3x"                       # s3, s3x, azure, azurex, gcp, instant
+max_parallel = 4                       # I/O convoy batch size
 
 [catalog]
 num_tables = 1
-# type = "cas"                         # Inferred from provider capabilities
+num_groups = 1
+table_metadata_inlined = false         # See §3.10
+# Inlined-only knobs (exp6):
+# initial_partition_size_bytes = 16000
+# commit_growth_bytes = 0
 
-[catalog.partitions]
-num_partitions = 100                   # Uniform across tables
-# per_table = [10, 20, 30]            # Or explicit per-table
+[catalog.partition]
+num_partitions = 32                    # Uniform across tables
+# per_table = [10, 20, 30]             # Or explicit per-table
 
 [transaction]
 retry = 10
+runtime.min = 30000
 runtime.mean = 180000
 runtime.sigma = 1.5
 inter_arrival.distribution = "exponential"
 inter_arrival.scale = 100.0
 real_conflict_probability = 0.0
 manifest_list_mode = "rewrite"         # "rewrite" or "append" (ML+ mode)
+operation_types.fast_append = 0.7
+operation_types.validated_overwrite = 0.3
 
-[transaction.operation_types]
-fast_append = 0.7
-validated_overwrite = 0.3
+[partition]                            # Optional: enables PartitionOverlapConflictDetector
+enabled = true
+partitions_per_txn = 1                 # How many partitions each txn writes
+# selection.distribution = "zipf"      # Optional: "uniform" (default) or "zipf"
+# selection.zipf_alpha = 1.5
 ```
+
+Experiment configs may also include a `[plots]` section consumed by `scripts/regenerate_plots.py`; it is ignored by the simulator.
 
 ### 7.3 Experiment Hash
 
