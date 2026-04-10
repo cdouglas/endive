@@ -136,8 +136,8 @@ class TestNonInlinedThroughputBound:
 
         max_rate = 1.0 / (5 * L / 1000.0)  # commits per second
 
-        # Tight 3% tolerance: any information leak between message
-        # delays will push the rate noticeably above the bound.
+        # Tight 3% upper bound: any information leak that bypasses a
+        # message delay pushes the rate above the theoretical max.
         assert observed <= max_rate * 1.03, (
             f"L={L}ms: observed {observed:.2f} c/s exceeds "
             f"theoretical upper bound {max_rate:.2f} c/s "
@@ -145,18 +145,29 @@ class TestNonInlinedThroughputBound:
             f"This indicates information is flowing without a message "
             f"delay somewhere in the commit protocol."
         )
-        # Sanity-check we're actually saturating (not idling)
-        assert observed > max_rate * 0.7, (
-            f"L={L}ms: observed {observed:.2f} c/s is below 70% of "
-            f"bound {max_rate:.2f} c/s. Saturated? Committed={committed}."
+        # Tight 88% lower bound: any bogus extra I/O (e.g., an extra
+        # op per attempt) drops the saturated rate below this.
+        # The correct model saturates at ~95% of the theoretical max;
+        # a single extra op drops it to ~83% (1/6L vs 1/5L).
+        assert observed >= max_rate * 0.88, (
+            f"L={L}ms: observed {observed:.2f} c/s is below 88% of "
+            f"bound {max_rate:.2f} c/s. Either the workload isn't "
+            f"saturated, or there's spurious I/O inflating per-attempt "
+            f"cost. Committed={committed}."
         )
 
     def test_single_partition_fa_bound_50ms(self):
         """At L=50ms, max throughput is 4 c/s (1 commit per 250ms)."""
         committed, observed = _run_saturated(L=50.0, duration_ms=10_000.0)
+        # Upper: no information leaks (observed < 4.12)
         assert observed <= 4.12, (
             f"L=50ms: observed {observed:.2f} c/s exceeds 4.12 c/s "
             f"(theoretical 4.0 + 3% tolerance)"
+        )
+        # Lower: no spurious I/O (observed > 3.52 = 88% of 4.0)
+        assert observed >= 3.52, (
+            f"L=50ms: observed {observed:.2f} c/s below 3.52 c/s "
+            f"(theoretical 4.0 × 88%). Possible spurious per-attempt I/O."
         )
 
 
@@ -183,9 +194,13 @@ class TestInlinedThroughputBound:
             f"theoretical upper bound {max_rate:.2f} c/s "
             f"(3L = {3 * L}ms). Committed={committed}."
         )
-        assert observed > max_rate * 0.7, (
-            f"L={L}ms inlined: observed {observed:.2f} c/s below 70% "
-            f"of bound {max_rate:.2f}. Saturated? Committed={committed}."
+        # Tight lower bound catches spurious I/O regressions.
+        # Correct model saturates at ~92% (3 ops → cycle 3L is tighter);
+        # 1 extra op would drop to ~75% (cycle 4L vs 3L).
+        assert observed >= max_rate * 0.82, (
+            f"L={L}ms inlined: observed {observed:.2f} c/s below 82% "
+            f"of bound {max_rate:.2f}. Possible spurious I/O. "
+            f"Committed={committed}."
         )
 
 
@@ -210,9 +225,10 @@ class TestMLAppendThroughputBound:
             f"ML+ L=50ms: observed {observed:.2f} c/s exceeds bound "
             f"{max_rate:.2f} c/s (4L = 200ms). Committed={committed}."
         )
-        assert observed > max_rate * 0.7, (
-            f"ML+ L=50ms: observed {observed:.2f} c/s below 70% of "
-            f"bound {max_rate:.2f}. Saturated? Committed={committed}."
+        assert observed >= max_rate * 0.85, (
+            f"ML+ L=50ms: observed {observed:.2f} c/s below 85% of "
+            f"bound {max_rate:.2f}. Possible spurious I/O. "
+            f"Committed={committed}."
         )
 
 
