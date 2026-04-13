@@ -68,7 +68,6 @@ partitions_per_txn = 1   # Swept: [1, 2, 4, 8, 16]
 
 [storage]
 provider = "s3"
-max_parallel = 4
 
 [plots]
 output_dir = "plots/exp5a_partition_fa"

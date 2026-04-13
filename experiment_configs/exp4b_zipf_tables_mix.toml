@@ -34,7 +34,7 @@ label = "exp4b_zipf_tables_mix"
 [catalog]
 num_tables = 1           # Swept: [1, 2, 5, 10, 20, 50]
 num_groups = 1           # Single-file catalog: all tables share one seq
-table_metadata_inlined = true
+table_metadata_inlined = false
 backend = "service"
 
 [catalog.service]
@@ -65,7 +65,6 @@ zipf_alpha = 1.5
 
 [storage]
 provider = "s3"  # Fixed S3 storage (catalog latency swept separately)
-max_parallel = 4
 
 [plots]
 output_dir = "plots/exp4b_zipf_tables_mix"

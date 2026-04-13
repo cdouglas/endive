@@ -22,7 +22,7 @@ label = "exp1_fa_baseline"
 [catalog]
 num_tables = 1
 num_groups = 1
-table_metadata_inlined = true
+table_metadata_inlined = false
 backend = "service"
 
 [catalog.service]
@@ -48,7 +48,6 @@ manifest_list_mode = "rewrite"
 
 [storage]
 provider = "s3"  # Real storage I/O (was "instant" — that was the bug)
-max_parallel = 4
 
 [plots]
 output_dir = "plots/exp1_fa_baseline"

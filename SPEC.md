@@ -800,7 +800,6 @@ label = "exp_baseline"                 # Optional; enables directory structure
 
 [storage]
 provider = "s3x"                       # s3, s3x, azure, azurex, gcp, instant
-max_parallel = 4                       # I/O convoy batch size
 
 [catalog]
 num_tables = 1

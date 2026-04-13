@@ -54,7 +54,6 @@ selection.zipf_alpha = 1.5
 
 [storage]
 provider = "s3"
-max_parallel = 4
 
 [plots]
 output_dir = "plots/exp5a_zipf_partition_fa"

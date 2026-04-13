@@ -195,7 +195,6 @@ manifest_list_mode = "rewrite"
 
 [storage]
 provider = "s3"
-max_parallel = 4
 """
         with tempfile.NamedTemporaryFile(mode='w', suffix='.toml', delete=False) as f:
             f.write(config_content)

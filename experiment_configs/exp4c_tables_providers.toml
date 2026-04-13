@@ -40,7 +40,7 @@ label = "exp4c_tables_providers"
 [catalog]
 num_tables = 1           # Swept: [1, 2, 5, 10, 20, 50]
 num_groups = 1           # Single-file catalog: all tables share one seq
-table_metadata_inlined = true
+table_metadata_inlined = false
 backend = "storage"      # CAS uses storage provider (no [catalog.service])
 
 [transaction]
@@ -62,7 +62,6 @@ validated_overwrite = 0.0   # Swept: [0.0, 0.1, 0.5]
 
 [storage]
 provider = "s3"  # Swept: ["s3x", "s3", "azurex", "azure", "gcp"]
-max_parallel = 4
 
 [plots]
 output_dir = "plots/exp4c_tables_providers"
