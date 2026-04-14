@@ -195,6 +195,7 @@ class CatalogSnapshot:
     seq: int                            # Global sequence number (total ordering)
     tables: Tuple[TableMetadata, ...]
     timestamp_ms: float
+    log_offset: int = 0                 # Physical log offset (AppendCatalog only)
 
     def get_table(self, table_id: int) -> TableMetadata: ...
     def get_partition_version(self, table_id: int, partition_id: int) -> int: ...
@@ -202,19 +203,22 @@ class CatalogSnapshot:
 @dataclass(frozen=True)
 class CommitResult:
     """Uniform result of Catalog.commit().
-    On success: snapshot=None (transaction knows its writes were installed).
-    On failure: snapshot=None (CAS/append do not return catalog content;
-    transaction must call catalog.read() to learn the current state)."""
+    On success: the transaction's writes were installed atomically.
+    On failure: the caller must call catalog.read() to learn the current state."""
     success: bool
     latency_ms: float
 
 @dataclass(frozen=True)
 class IntentionRecord:
-    """For append-based catalog commits with preconditions."""
+    """For append-based catalog commits with per-partition preconditions.
+    Disjoint-partition writes commute: two intentions writing different
+    partitions both succeed because their version expectations are independent."""
     txn_id: int
-    expected_seq: int
+    expected_seq: int                    # Global seq (used by CASCatalog)
     tables_written: Dict[int, int]       # table_id -> new_version
     partitions_written: Dict[int, Tuple[int, ...]] | None = None
+    expected_partition_versions: Dict[int, Dict[int, int]] | None = None
+        # table_id -> {partition_id -> expected_version}
     size_bytes: int = 100
 ```
 
@@ -237,6 +241,7 @@ class Catalog(ABC):
         timestamp_ms: float = 0.0,
         intention: Optional[IntentionRecord] = None,
         partitions_written: Optional[Dict[int, FrozenSet[int]]] = None,
+        expected_log_offset: int = 0,    # Physical log offset (AppendCatalog)
     ) -> Generator[float, None, CommitResult]: ...
 
     @property
@@ -254,7 +259,9 @@ class CASCatalog(Catalog):
                  partitions_per_table: Tuple[int, ...]): ...
 ```
 
-**AppendCatalog**: Two internal round-trips (append + discovery read). The transaction sees only the final `CommitResult`, identical in shape to `CASCatalog`.
+**AppendCatalog**: Position-append + discovery read (two internal round-trips, four split-yield points). Uses per-partition version preconditions instead of a global seq check: disjoint-partition writes commute, so two concurrent writers to different partitions both succeed without retry. Table versions are incremented (not set to absolute values) to handle commutative writes from the same snapshot.
+
+The physical check enforces position-append semantics: `expected_log_offset == self._log_offset`. The logical check evaluates per-partition versions from `IntentionRecord.expected_partition_versions`. On physical success but logical failure, the record occupies the log slot (`_log_offset` advances) but writes are not applied. On physical failure, nothing is written and offset is unchanged.
 
 ```python
 class AppendCatalog(Catalog):
@@ -299,14 +306,17 @@ Catalog                                 Storage
     │  [single round-trip]              │
 ```
 
-**Append-based** (internal):
+**Append-based** (internal, split-yield):
 ```
 Catalog                                 Storage
-    ├──── append(key, offset, data) ───▶│  (1. physical append)
-    │◀──── StorageResult ──────────────│
-    ├──── read(key) ───────────────────▶│  (2. discovery read)
-    │◀──── StorageResult ──────────────│
-    │  [two round-trips, hidden from Transaction]
+    ├── yield append_latency/2 ────────▶│  (1. append half-RTT)
+    │   [physical check: offset match?] │
+    │   [logical check: partition vers] │
+    │   [apply writes if both pass]     │
+    ├── yield append_latency/2 ◀────────│  (1. append return)
+    ├── yield read_latency/2 ──────────▶│  (2. discovery half-RTT)
+    ├── yield read_latency/2 ◀──────────│  (2. discovery return)
+    │  [4 yields total, hidden from Transaction]
 ```
 
 ---
@@ -911,8 +921,12 @@ experiments/
 
 ### 8.9 Information Asymmetry in Append Protocol
 - `Storage.append()` returns only physical success (offset matched)
-- Logical outcome (preconditions satisfied) is never returned to the caller
-- The Catalog performs a discovery read to determine the outcome internally
+- Logical outcome (per-partition version preconditions) is evaluated server-side at the append half-RTT point
+- The discovery read models the I/O cost of learning the outcome but does not determine it (the simulator knows the outcome at eval time)
+- Physical check: `expected_log_offset == self._log_offset` (position-append concurrency control)
+- Logical check: per-partition version match from `IntentionRecord.expected_partition_versions`
+- Disjoint-partition writes commute: two intentions writing different partitions both succeed
+- Table versions are incremented (not set) to handle commutative writes from the same snapshot
 - This complexity is hidden by the uniform `commit()` interface
 
 ### 8.10 ML+ Deferred Validity

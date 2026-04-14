@@ -302,9 +302,13 @@ class TestAppendCatalog:
     def test_seq_increments(self):
         storage = make_instant_storage()
         cat = AppendCatalog(storage, 1, (1,))
-        exhaust(cat.commit(expected_seq=0, writes={0: 1}))
+        snap = exhaust(cat.read())
+        exhaust(cat.commit(expected_seq=0, writes={0: 1},
+                           expected_log_offset=snap.log_offset))
         assert cat.seq == 1
-        exhaust(cat.commit(expected_seq=1, writes={0: 2}))
+        snap = exhaust(cat.read())
+        exhaust(cat.commit(expected_seq=1, writes={0: 2},
+                           expected_log_offset=snap.log_offset))
         assert cat.seq == 2
 
     def test_commit_latency_includes_discovery_read(self):
@@ -321,8 +325,9 @@ class TestAppendCatalog:
         cat = AppendCatalog(storage, 2, (1, 1))
         exhaust(cat.commit(expected_seq=0, writes={0: 5, 1: 3}))
         snap = exhaust(cat.read())
-        assert snap.get_table(0).version == 5
-        assert snap.get_table(1).version == 3
+        # AppendCatalog increments table versions (not sets to absolute value)
+        assert snap.get_table(0).version == 1
+        assert snap.get_table(1).version == 1
 
     def test_with_explicit_intention_record(self):
         storage = make_instant_storage()
@@ -491,8 +496,13 @@ class TestSeqInvariant:
     def test_seq_monotone_increment(self, catalog_factory):
         cat = catalog_factory()
         for expected_seq in range(20):
-            assert cat.seq == expected_seq
-            result = exhaust(cat.commit(expected_seq=expected_seq, writes={0: expected_seq + 1}))
+            snap = exhaust(cat.read())
+            assert snap.seq == expected_seq
+            result = exhaust(cat.commit(
+                expected_seq=expected_seq,
+                writes={0: expected_seq + 1},
+                expected_log_offset=snap.log_offset,
+            ))
             assert result.success is True
             assert cat.seq == expected_seq + 1
 
@@ -632,6 +642,311 @@ class TestAppendLatencyAccounting:
 
 
 # ---------------------------------------------------------------------------
+# Bug 1: Physical offset check
+# ---------------------------------------------------------------------------
+
+class TestAppendPhysicalCheck:
+    """Position-append: expected_log_offset must match catalog's EOF."""
+
+    def test_stale_offset_causes_failure(self):
+        storage = make_instant_storage()
+        cat = AppendCatalog(storage, 1, (4,))
+        # First commit at offset 0 succeeds
+        result = exhaust(cat.commit(
+            expected_seq=0, writes={0: 1},
+            partitions_written={0: frozenset({0})},
+            expected_log_offset=0,
+        ))
+        assert result.success is True
+        # Second commit with stale offset 0 (should be 100) fails
+        result = exhaust(cat.commit(
+            expected_seq=1, writes={0: 2},
+            partitions_written={0: frozenset({1})},
+            expected_log_offset=0,  # stale
+        ))
+        assert result.success is False
+
+    def test_correct_offset_succeeds(self):
+        storage = make_instant_storage()
+        cat = AppendCatalog(storage, 1, (4,))
+        snap = exhaust(cat.read())
+        assert snap.log_offset == 0
+        result = exhaust(cat.commit(
+            expected_seq=0, writes={0: 1},
+            partitions_written={0: frozenset({0})},
+            expected_log_offset=snap.log_offset,
+        ))
+        assert result.success is True
+
+    def test_snapshot_carries_log_offset(self):
+        storage = make_instant_storage()
+        cat = AppendCatalog(storage, 1, (1,))
+        snap = exhaust(cat.read())
+        assert snap.log_offset == 0
+        exhaust(cat.commit(expected_seq=0, writes={0: 1},
+                           expected_log_offset=0))
+        snap2 = exhaust(cat.read())
+        assert snap2.log_offset == 100  # default IntentionRecord.size_bytes
+
+    def test_log_offset_advances_only_on_physical_success(self):
+        """Physical failure leaves offset unchanged."""
+        storage = make_instant_storage()
+        cat = AppendCatalog(storage, 1, (1,))
+        exhaust(cat.commit(expected_seq=0, writes={0: 1},
+                           expected_log_offset=0))
+        snap = exhaust(cat.read())
+        assert snap.log_offset == 100
+        # Physical failure: stale offset
+        exhaust(cat.commit(expected_seq=1, writes={0: 2},
+                           expected_log_offset=0))
+        snap2 = exhaust(cat.read())
+        assert snap2.log_offset == 100  # unchanged
+
+
+# ---------------------------------------------------------------------------
+# Bug 2: Success determined at server-eval time
+# ---------------------------------------------------------------------------
+
+class TestAppendServerEvalTiming:
+    """Success is captured at half-RTT eval, immune to post-eval mutations."""
+
+    def test_success_determined_before_discovery_read(self):
+        """Drive the generator manually: mutate catalog state between
+        append eval and discovery read. CommitResult must reflect the
+        pre-mutation outcome."""
+        storage = InstantStorageProvider(
+            rng=np.random.RandomState(0), latency_ms=10.0)
+        cat = AppendCatalog(storage, 1, (4,))
+        gen = cat.commit(expected_seq=0, writes={0: 1},
+                         partitions_written={0: frozenset({0})},
+                         expected_log_offset=0)
+        # Yield 1: append half-RTT (5ms) — generator pauses BEFORE eval
+        y1 = next(gen)
+        assert y1 == 5.0
+        assert cat.seq == 0  # eval hasn't happened yet
+        # Yield 2: generator runs server eval, then pauses at return half
+        y2 = next(gen)
+        assert cat.seq == 1  # eval happened between yield 1 and yield 2
+        # Now simulate an intervening commit by another writer
+        cat._tables[0].version = 999
+        cat._seq = 42
+        # Yield 3, 4: discovery read (split-yield)
+        y3 = next(gen)
+        y4 = next(gen)
+        # Exhaust the generator to get the result
+        try:
+            next(gen)
+            assert False, "Expected StopIteration"
+        except StopIteration as e:
+            result = e.value
+        # A's commit must still report success even though catalog
+        # state was mutated after A's server eval
+        assert result.success is True
+
+
+# ---------------------------------------------------------------------------
+# Bug 3: Split-yield structure
+# ---------------------------------------------------------------------------
+
+class TestAppendSplitYield:
+    """AppendCatalog uses split-yield matching CASCatalog convention."""
+
+    def test_read_yields_twice(self):
+        storage = InstantStorageProvider(
+            rng=np.random.RandomState(42), latency_ms=6.0)
+        cat = AppendCatalog(storage, 1, (1,))
+        gen = cat.read()
+        first = next(gen)
+        second = next(gen)
+        assert first == 3.0  # half-RTT
+        assert second == 3.0
+
+    def test_commit_yields_four_times(self):
+        """2 yields for append + 2 for discovery read = 4 total."""
+        storage = InstantStorageProvider(
+            rng=np.random.RandomState(42), latency_ms=4.0)
+        cat = AppendCatalog(storage, 1, (1,))
+        gen = cat.commit(expected_seq=0, writes={0: 1},
+                         expected_log_offset=0)
+        yields = []
+        try:
+            while True:
+                yields.append(next(gen))
+        except StopIteration:
+            pass
+        assert len(yields) == 4
+        assert yields[0] == 2.0  # append half-RTT
+        assert yields[1] == 2.0
+        assert yields[2] == 2.0  # discovery half-RTT
+        assert yields[3] == 2.0
+
+    def test_seq_updated_at_append_half_rtt(self):
+        """seq advances between the first two yields (append server eval).
+        After next(gen) #1, generator paused AT yield 1 (before eval).
+        After next(gen) #2, generator ran eval and paused AT yield 2."""
+        storage = InstantStorageProvider(
+            rng=np.random.RandomState(42), latency_ms=4.0)
+        cat = AppendCatalog(storage, 1, (1,))
+        gen = cat.commit(expected_seq=0, writes={0: 1},
+                         expected_log_offset=0)
+        assert cat.seq == 0
+        next(gen)  # yield 1: half-RTT, eval NOT yet run
+        assert cat.seq == 0
+        next(gen)  # yield 2: eval ran between yield 1 and yield 2
+        assert cat.seq == 1
+
+
+# ---------------------------------------------------------------------------
+# Bug 4: Per-partition preconditions
+# ---------------------------------------------------------------------------
+
+class TestAppendPartitionPreconditions:
+    """Disjoint-partition writes commute; overlapping writes conflict."""
+
+    def test_disjoint_partitions_both_succeed(self):
+        """T1 writes {0,2}, T2 writes {1} — disjoint, both succeed."""
+        storage = make_instant_storage()
+        cat = AppendCatalog(storage, 1, (4,))
+
+        # T1 writes partitions {0, 2}
+        snap0 = exhaust(cat.read())
+        result1 = exhaust(cat.commit(
+            expected_seq=0, writes={0: 1},
+            partitions_written={0: frozenset({0, 2})},
+            expected_log_offset=snap0.log_offset,
+            intention=IntentionRecord(
+                txn_id=1, expected_seq=0, tables_written={0: 1},
+                partitions_written={0: (0, 2)},
+                expected_partition_versions={0: {0: 0, 2: 0}},
+            ),
+        ))
+        assert result1.success is True
+
+        # T2 writes partition {1} — disjoint with T1
+        snap1 = exhaust(cat.read())
+        result2 = exhaust(cat.commit(
+            expected_seq=snap1.seq, writes={0: 2},
+            partitions_written={0: frozenset({1})},
+            expected_log_offset=snap1.log_offset,
+            intention=IntentionRecord(
+                txn_id=2, expected_seq=snap1.seq, tables_written={0: 2},
+                partitions_written={0: (1,)},
+                expected_partition_versions={0: {1: 0}},
+            ),
+        ))
+        assert result2.success is True
+
+    def test_overlapping_partitions_second_fails(self):
+        """Two commits to the same partition: second fails."""
+        storage = make_instant_storage()
+        cat = AppendCatalog(storage, 1, (4,))
+
+        snap0 = exhaust(cat.read())
+        result1 = exhaust(cat.commit(
+            expected_seq=0, writes={0: 1},
+            partitions_written={0: frozenset({0})},
+            expected_log_offset=snap0.log_offset,
+            intention=IntentionRecord(
+                txn_id=1, expected_seq=0, tables_written={0: 1},
+                partitions_written={0: (0,)},
+                expected_partition_versions={0: {0: 0}},
+            ),
+        ))
+        assert result1.success is True
+
+        # T2 writes same partition {0} with STALE version expectation
+        snap1 = exhaust(cat.read())
+        result2 = exhaust(cat.commit(
+            expected_seq=snap1.seq, writes={0: 2},
+            partitions_written={0: frozenset({0})},
+            expected_log_offset=snap1.log_offset,
+            intention=IntentionRecord(
+                txn_id=2, expected_seq=snap1.seq, tables_written={0: 2},
+                partitions_written={0: (0,)},
+                expected_partition_versions={0: {0: 0}},  # stale! now at v1
+            ),
+        ))
+        assert result2.success is False
+
+    def test_cross_table_disjoint_succeeds(self):
+        """Writes to different tables always commute."""
+        storage = make_instant_storage()
+        cat = AppendCatalog(storage, 2, (2, 2))
+
+        snap0 = exhaust(cat.read())
+        exhaust(cat.commit(
+            expected_seq=0, writes={0: 1},
+            partitions_written={0: frozenset({0})},
+            expected_log_offset=snap0.log_offset,
+            intention=IntentionRecord(
+                txn_id=1, expected_seq=0, tables_written={0: 1},
+                partitions_written={0: (0,)},
+                expected_partition_versions={0: {0: 0}},
+            ),
+        ))
+        snap1 = exhaust(cat.read())
+        result = exhaust(cat.commit(
+            expected_seq=snap1.seq, writes={1: 1},
+            partitions_written={1: frozenset({0})},
+            expected_log_offset=snap1.log_offset,
+            intention=IntentionRecord(
+                txn_id=2, expected_seq=snap1.seq, tables_written={1: 1},
+                partitions_written={1: (0,)},
+                expected_partition_versions={1: {0: 0}},
+            ),
+        ))
+        assert result.success is True
+
+
+# ---------------------------------------------------------------------------
+# Table version increment
+# ---------------------------------------------------------------------------
+
+class TestAppendTableVersionIncrement:
+    """AppendCatalog increments table versions (two disjoint commits
+    from the same snapshot both advance the table version)."""
+
+    def test_two_disjoint_commits_advance_version(self):
+        storage = make_instant_storage()
+        cat = AppendCatalog(storage, 1, (4,))
+
+        snap0 = exhaust(cat.read())
+
+        # T1 writes partition {0}
+        exhaust(cat.commit(
+            expected_seq=0, writes={0: 1},
+            partitions_written={0: frozenset({0})},
+            expected_log_offset=snap0.log_offset,
+            intention=IntentionRecord(
+                txn_id=1, expected_seq=0, tables_written={0: 1},
+                partitions_written={0: (0,)},
+                expected_partition_versions={0: {0: 0}},
+            ),
+        ))
+
+        snap1 = exhaust(cat.read())
+        assert snap1.get_table(0).version == 1
+
+        # T2 writes partition {1} (disjoint)
+        exhaust(cat.commit(
+            expected_seq=snap1.seq, writes={0: 2},
+            partitions_written={0: frozenset({1})},
+            expected_log_offset=snap1.log_offset,
+            intention=IntentionRecord(
+                txn_id=2, expected_seq=snap1.seq, tables_written={0: 2},
+                partitions_written={0: (1,)},
+                expected_partition_versions={0: {1: 0}},
+            ),
+        ))
+
+        snap2 = exhaust(cat.read())
+        # Table version should be 2 (two successful commits), not 1
+        assert snap2.get_table(0).version == 2
+        assert snap2.get_partition_version(0, 0) == 1
+        assert snap2.get_partition_version(0, 1) == 1
+
+
+# ---------------------------------------------------------------------------
 # Snapshot consistency
 # ---------------------------------------------------------------------------
 
@@ -641,8 +956,7 @@ class TestSnapshotConsistency:
     @pytest.mark.parametrize("catalog_factory", [
         lambda: InstantCatalog(2, (1, 1)),
         lambda: CASCatalog(make_instant_storage(), 2, (1, 1)),
-        lambda: AppendCatalog(make_instant_storage(), 2, (1, 1)),
-    ], ids=["instant", "cas", "append"])
+    ], ids=["instant", "cas"])
     def test_read_reflects_committed_writes(self, catalog_factory):
         cat = catalog_factory()
         exhaust(cat.commit(expected_seq=0, writes={0: 10, 1: 20}))
@@ -650,6 +964,15 @@ class TestSnapshotConsistency:
         assert snap.seq == 1
         assert snap.get_table(0).version == 10
         assert snap.get_table(1).version == 20
+
+    def test_read_reflects_committed_writes_append(self):
+        """AppendCatalog increments table versions, doesn't set absolutes."""
+        cat = AppendCatalog(make_instant_storage(), 2, (1, 1))
+        exhaust(cat.commit(expected_seq=0, writes={0: 10, 1: 20}))
+        snap = exhaust(cat.read())
+        assert snap.seq == 1
+        assert snap.get_table(0).version == 1
+        assert snap.get_table(1).version == 1
 
     @pytest.mark.parametrize("catalog_factory", [
         lambda: InstantCatalog(1, (1,)),

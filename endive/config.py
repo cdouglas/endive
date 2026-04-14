@@ -21,7 +21,7 @@ from typing import Tuple
 import numpy as np
 import tomllib
 
-from endive.catalog import CASCatalog, InstantCatalog
+from endive.catalog import AppendCatalog, CASCatalog, InstantCatalog
 from endive.conflict_detector import (
     PartitionOverlapConflictDetector,
     ProbabilisticConflictDetector,
@@ -229,6 +229,19 @@ def _build_catalog(
             initial_partition_size_bytes=initial_partition_size,
             commit_growth_bytes=commit_growth,
             max_catalog_size_bytes=max_catalog_size,
+        )
+
+    # Append-log catalog with per-partition preconditions
+    if mode == "append":
+        if not storage.supports_append:
+            raise ValueError(
+                f"catalog.mode='append' requires a storage provider with "
+                f"append support (provider '{storage.name}' does not)"
+            )
+        return AppendCatalog(
+            storage=storage,
+            num_tables=num_tables,
+            partitions_per_table=partitions_per_table,
         )
 
     # Default: CASCatalog with storage provider

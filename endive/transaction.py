@@ -24,7 +24,7 @@ from dataclasses import dataclass
 from enum import Enum, auto
 from typing import Dict, FrozenSet, Generator, Optional
 
-from endive.catalog import Catalog, CatalogSnapshot, CommitResult
+from endive.catalog import Catalog, CatalogSnapshot, CommitResult, IntentionRecord
 from endive.storage import StorageProvider
 
 
@@ -479,14 +479,35 @@ class Transaction(ABC):
                 yield from self._pay_conflict_cost(per_attempt, storage)
                 self._per_attempt_io_ms += self._elapsed - before
 
-            # CAS
+            # Build intention with per-partition version expectations
+            expected_pv = {
+                tid: {
+                    pid: last_snapshot.get_partition_version(tid, pid)
+                    for pid in pids
+                }
+                for tid, pids in self.partitions_written.items()
+            }
+            intention = IntentionRecord(
+                txn_id=self.id,
+                expected_seq=last_snapshot.seq,
+                tables_written=writes,
+                partitions_written={
+                    tid: tuple(pids)
+                    for tid, pids in self.partitions_written.items()
+                },
+                expected_partition_versions=expected_pv,
+            )
+
+            # Catalog commit (CAS or append — uniform interface)
             before = self._elapsed
             commit_result = yield from self._yield_from(
                 catalog.commit(
                     expected_seq=last_snapshot.seq,
                     writes=writes,
                     timestamp_ms=self.submit_time + self._elapsed,
+                    intention=intention,
                     partitions_written=self.partitions_written,
+                    expected_log_offset=last_snapshot.log_offset,
                 )
             )
             self._catalog_commit_ms += self._elapsed - before

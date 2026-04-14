@@ -72,6 +72,7 @@ class CatalogSnapshot:
     seq: int                            # Global sequence number (total ordering)
     tables: Tuple[TableMetadata, ...]   # Per-table metadata
     timestamp_ms: float                 # Simulation time when snapshot was captured
+    log_offset: int = 0                 # Physical log offset (append catalogs only)
 
     def get_table(self, table_id: int) -> TableMetadata:
         """Get metadata for a specific table."""
@@ -104,11 +105,17 @@ class IntentionRecord:
 
     Contains the transaction's writes and preconditions. The Catalog
     evaluates preconditions server-side but does not report the outcome.
+
+    The precondition is per-partition: for each partition in
+    expected_partition_versions, the catalog's current version must match.
+    Disjoint-partition writes commute — two intentions writing different
+    partitions both succeed because their expectations are independent.
     """
     txn_id: int
-    expected_seq: int                    # Expected catalog seq (precondition)
+    expected_seq: int                    # Global seq (used by CASCatalog)
     tables_written: Dict[int, int]       # table_id -> new_version
     partitions_written: Dict[int, Tuple[int, ...]] | None = None  # table_id -> partition_ids
+    expected_partition_versions: Dict[int, Dict[int, int]] | None = None  # table_id -> {pid -> expected_ver}
     size_bytes: int = 100                # Serialized size for latency calc
 
 
@@ -187,6 +194,7 @@ class Catalog(ABC):
         timestamp_ms: float = 0.0,
         intention: Optional[IntentionRecord] = None,
         partitions_written: Optional[Dict[int, FrozenSet[int]]] = None,
+        expected_log_offset: int = 0,
     ) -> Generator[float, None, CommitResult]:
         """Attempt atomic commit.
 
@@ -200,6 +208,9 @@ class Catalog(ABC):
             intention: Optional intention record (used by append-based catalogs)
             partitions_written: table_id -> set of written partition IDs.
                 On success, partition versions are advanced.
+            expected_log_offset: Physical log offset expected by the caller.
+                Used by AppendCatalog for position-append semantics.
+                Ignored by CAS-based catalogs.
 
         Yields:
             Latency timeout(s)
@@ -302,6 +313,7 @@ class CASCatalog(Catalog):
         timestamp_ms: float = 0.0,
         intention: Optional[IntentionRecord] = None,
         partitions_written: Optional[Dict[int, FrozenSet[int]]] = None,
+        expected_log_offset: int = 0,
     ) -> Generator[float, None, CommitResult]:
         # Sample CAS latency from the storage provider
         cas_gen = self._storage.cas(
@@ -387,20 +399,42 @@ class AppendCatalog(Catalog):
             seq=self._seq,
             tables=tuple(t.to_metadata() for t in self._tables),
             timestamp_ms=timestamp_ms,
+            log_offset=self._log_offset,
         )
 
     def _check_preconditions(self, intention: IntentionRecord) -> bool:
-        """Check whether intention's preconditions are satisfied."""
-        return self._seq == intention.expected_seq
+        """Check per-partition version preconditions.
+
+        Disjoint-partition writes commute: if T1 writes partitions {1,3}
+        and T2 writes partition {2}, both succeed because their
+        partition version expectations are independent.
+
+        When expected_partition_versions is None (direct test calls
+        without full intention), preconditions are vacuously satisfied
+        and the physical offset check is the sole guard.
+        """
+        if intention.expected_partition_versions is None:
+            return True
+        for table_id, pvs in intention.expected_partition_versions.items():
+            for pid, expected_ver in pvs.items():
+                if self._tables[table_id].partition_versions[pid] != expected_ver:
+                    return False
+        return True
 
     def _apply_writes(
         self,
         writes: Dict[int, int],
         partitions_written: Optional[Dict[int, FrozenSet[int]]] = None,
     ) -> None:
-        """Apply writes atomically."""
-        for table_id, version in writes.items():
-            self._tables[table_id].version = version
+        """Apply writes atomically.
+
+        Table versions are incremented (not set to an absolute value)
+        because commutative appends from the same snapshot would
+        otherwise leave the version at the same value.
+        Partition versions for written partitions are incremented.
+        """
+        for table_id in writes:
+            self._tables[table_id].version += 1
         if partitions_written:
             for table_id, pids in partitions_written.items():
                 for pid in pids:
@@ -408,11 +442,16 @@ class AppendCatalog(Catalog):
         self._seq += 1
 
     def read(self, timestamp_ms: float = 0.0) -> Generator[float, None, CatalogSnapshot]:
-        result = yield from self._storage.read(
+        # Split-yield: capture snapshot at half-RTT (server evaluation time)
+        read_gen = self._storage.read(
             key="catalog_log",
             expected_size_bytes=100,
         )
-        return self._create_snapshot(timestamp_ms)
+        latency = next(read_gen)
+        yield latency / 2.0
+        snapshot = self._create_snapshot(timestamp_ms)
+        yield latency - latency / 2.0
+        return snapshot
 
     def commit(
         self,
@@ -421,8 +460,9 @@ class AppendCatalog(Catalog):
         timestamp_ms: float = 0.0,
         intention: Optional[IntentionRecord] = None,
         partitions_written: Optional[Dict[int, FrozenSet[int]]] = None,
+        expected_log_offset: int = 0,
     ) -> Generator[float, None, CommitResult]:
-        # Build intention if not provided
+        # Build intention if not provided (direct-call convenience)
         if intention is None:
             intention = IntentionRecord(
                 txn_id=-1,
@@ -432,38 +472,53 @@ class AppendCatalog(Catalog):
 
         total_latency = 0.0
 
-        # Step 1: Physical append
-        append_result = yield from self._storage.append(
+        # Step 1: Physical append (split-yield)
+        append_gen = self._storage.append(
             key="catalog_log",
-            offset=self._log_offset,
+            offset=expected_log_offset,
             size_bytes=intention.size_bytes,
         )
-        total_latency += append_result.latency_ms
+        append_latency = next(append_gen)
+        total_latency += append_latency
 
-        # Physical success check (offset matched)
-        physical_ok = (self._log_offset == self._log_offset)  # Always true in sim
-        # In simulation, the append always physically succeeds because we
-        # control the offset. The server evaluates preconditions:
-        if self._check_preconditions(intention):
-            self._apply_writes(writes, partitions_written)
-        self._log_offset += intention.size_bytes
+        # Half-RTT: request reaches server
+        yield append_latency / 2.0
 
-        # Step 2: Discovery read (always needed for uniform CommitResult)
-        read_result = yield from self._storage.read(
+        # Server-side evaluation at half-RTT:
+        # 1. Physical check: does expected offset match actual log EOF?
+        physical_ok = (expected_log_offset == self._log_offset)
+
+        if physical_ok:
+            # 2. Logical check: per-partition version preconditions
+            logical_ok = self._check_preconditions(intention)
+            if logical_ok:
+                self._apply_writes(writes, partitions_written)
+            # Record occupies log slot regardless of logical outcome
+            self._log_offset += intention.size_bytes
+            success = logical_ok
+        else:
+            # Physical failure: nothing written, offset unchanged
+            success = False
+
+        # Response returns (remaining half-RTT)
+        yield append_latency - append_latency / 2.0
+
+        # Step 2: Discovery read (split-yield, latency only)
+        # Per SPEC §8.9, the append protocol hides logical outcome from
+        # the caller. We model the cost of learning it via a discovery
+        # read, but the outcome was determined server-side above.
+        read_gen = self._storage.read(
             key="catalog_log",
             expected_size_bytes=100,
         )
-        total_latency += read_result.latency_ms
+        read_latency = next(read_gen)
+        total_latency += read_latency
 
-        # Determine success by checking if writes were applied
-        snapshot = self._create_snapshot(timestamp_ms)
-        committed = (snapshot.seq > expected_seq) and all(
-            snapshot.get_table(tid).version == ver
-            for tid, ver in writes.items()
-        )
+        yield read_latency / 2.0
+        yield read_latency - read_latency / 2.0
 
         return CommitResult(
-            success=committed,
+            success=success,
             latency_ms=total_latency,
         )
 
@@ -559,6 +614,7 @@ class InstantCatalog(Catalog):
         timestamp_ms: float = 0.0,
         intention: Optional[IntentionRecord] = None,
         partitions_written: Optional[Dict[int, FrozenSet[int]]] = None,
+        expected_log_offset: int = 0,
     ) -> Generator[float, None, CommitResult]:
         latency = self._effective_latency()
         half = latency / 2.0
