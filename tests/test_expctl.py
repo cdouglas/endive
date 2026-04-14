@@ -96,16 +96,23 @@ def _make_experiment(
     active_seeds: list[int] | None = None,
     crashed_seeds: list[int] | None = None,
     config: dict | None = None,
-    code_hash: str = "abcdef1234567890",
+    code_hash: str | None = None,
 ) -> Path:
-    """Create a fake experiment directory structure."""
+    """Create a fake experiment directory structure.
+
+    code_hash defaults to the current live simulator code hash so a
+    newly-created test fixture looks "fresh" by default. Pass a literal
+    value (e.g. "0000000000000000") to simulate code drift.
+    """
+    from endive.config import compute_code_hash
+
     exp_dir = base_dir / f"{label}-{exp_hash}"
     exp_dir.mkdir(parents=True, exist_ok=True)
 
     if config:
         _write_cfg_toml_manual(exp_dir, config)
 
-    _write_version_txt(exp_dir, code_hash)
+    _write_version_txt(exp_dir, code_hash if code_hash is not None else compute_code_hash())
 
     for seed in (seeds or []):
         seed_dir = exp_dir / str(seed)
@@ -631,10 +638,10 @@ class TestSynthesizeStatus:
         assert _synthesize_status(entries) == ""
 
     def test_stale_with_reasons(self):
-        entries = [self._entry(is_stale=True, stale_reasons={"code-or-config"})]
+        entries = [self._entry(is_stale=True, stale_reasons={"code"})]
         status = _synthesize_status(entries)
         assert "stale" in status
-        assert "code-or-config" in status
+        assert "code" in status
 
     def test_stale_without_code_version(self):
         entries = [self._entry(is_stale=True)]
@@ -756,7 +763,8 @@ class TestCmdList:
 class TestCmdGc:
     def test_gc_dry_run_stale(self, tmp_path, capsys, mock_groups):
         """Dry run lists stale dirs but doesn't delete."""
-        _make_experiment(tmp_path, "exp1_fa_baseline", "deadbeef", seeds=[42])
+        _make_experiment(tmp_path, "exp1_fa_baseline", "deadbeef",
+                         seeds=[42], code_hash="0000000000000000")
         args = Namespace(
             dir=str(tmp_path), group=None, pattern=None, exclude=None,
             stale=True, incomplete=False, force=False,
@@ -770,7 +778,8 @@ class TestCmdGc:
 
     def test_gc_force_deletes(self, tmp_path, capsys, mock_groups):
         """--force actually removes stale dirs."""
-        _make_experiment(tmp_path, "exp1_fa_baseline", "deadbeef", seeds=[42])
+        _make_experiment(tmp_path, "exp1_fa_baseline", "deadbeef",
+                         seeds=[42], code_hash="0000000000000000")
         args = Namespace(
             dir=str(tmp_path), group=None, pattern=None, exclude=None,
             stale=True, incomplete=False, force=True,
@@ -835,8 +844,10 @@ class TestCmdGc:
 
     def test_gc_pattern_filter(self, tmp_path, capsys, mock_groups):
         """--pattern limits which experiments gc considers."""
-        _make_experiment(tmp_path, "exp1_fa_baseline", "deadbeef", seeds=[42])
-        _make_experiment(tmp_path, "exp2_mix_heatmap", "deadbeef", seeds=[42])
+        _make_experiment(tmp_path, "exp1_fa_baseline", "deadbeef",
+                         seeds=[42], code_hash="0000000000000000")
+        _make_experiment(tmp_path, "exp2_mix_heatmap", "deadbeef",
+                         seeds=[42], code_hash="0000000000000000")
         args = Namespace(
             dir=str(tmp_path), group=None, pattern="exp1*", exclude=None,
             stale=True, incomplete=False, force=True,
@@ -1163,9 +1174,101 @@ class TestStatusFlags:
         entry = ExperimentEntry(
             label="exp1", exp_hash="aa", group="baseline", source="disk",
             disk_dir=None, config={}, code_version="abc",
-            is_stale=True, stale_reasons={"template", "code-or-config"},
+            is_stale=True, stale_reasons={"template", "code"},
             seeds_disk={42},
         )
         status = _synthesize_status([entry])
-        assert "code-or-config" in status
+        assert "code" in status
         assert "template" in status
+
+
+class TestCodeVsSelfHashDistinction:
+    """Code drift (version.txt) is reported independently of self-hash drift."""
+
+    def _make_entry_with_cfg(self, tmp_path: Path, code_hash: str) -> Path:
+        """Build an exp dir whose cfg.toml hashes to its own dir name under
+        the current code. Returns the exp_dir."""
+        from endive.config import compute_experiment_hash
+        cfg = {
+            "simulation": {"duration_ms": 1000},
+            "experiment": {"label": "exp1_fa_baseline"},
+            "catalog": {"num_tables": 1, "table_metadata_inlined": False},
+        }
+        # Use _make_experiment helper with a synthetic hash, then rename dir.
+        # Easier: write cfg first, compute hash, build dir.
+        exp_hash = compute_experiment_hash(cfg)
+        exp_dir = tmp_path / f"exp1_fa_baseline-{exp_hash}"
+        exp_dir.mkdir()
+        _write_cfg_toml_manual(exp_dir, cfg)
+        _write_version_txt(exp_dir, code_hash)
+        (exp_dir / "42").mkdir()
+        pq.write_table(pa.table({"x": [1]}), exp_dir / "42" / "results.parquet")
+        return exp_dir
+
+    def test_clean_when_code_and_self_hash_agree(self, tmp_path, mock_groups):
+        """cfg.toml self-hashes to dir, version.txt matches current code → clean."""
+        from endive.config import compute_code_hash
+        current = compute_code_hash()
+        self._make_entry_with_cfg(tmp_path, code_hash=current)
+
+        store = ExperimentStore(base_dir=tmp_path)
+        store.scan()
+        e = store.get_entries()[0]
+        assert not e.is_stale
+        assert e.stale_reasons == set()
+
+    def test_code_stale_only(self, tmp_path, mock_groups):
+        """Code drifted but cfg.toml still self-hashes correctly (under old code).
+        Should show `code`, not `self-hash` (self-hash is suppressed when code
+        drifted because the digest naturally differs)."""
+        self._make_entry_with_cfg(tmp_path, code_hash="0000000000000000")
+
+        store = ExperimentStore(base_dir=tmp_path)
+        store.scan()
+        e = store.get_entries()[0]
+        assert "code" in e.stale_reasons
+        assert "self-hash" not in e.stale_reasons
+
+    def test_self_hash_stale_only(self, tmp_path, mock_groups):
+        """Code current, but cfg.toml was tampered after the run — dir_hash no
+        longer reproduces under current code."""
+        from endive.config import compute_code_hash
+        current = compute_code_hash()
+
+        exp_dir = tmp_path / "exp1_fa_baseline-deadbeef"  # Hash won't match cfg.
+        exp_dir.mkdir()
+        _write_cfg_toml_manual(exp_dir, {
+            "simulation": {"duration_ms": 1000},
+            "experiment": {"label": "exp1_fa_baseline"},
+            "catalog": {"num_tables": 1, "table_metadata_inlined": False},
+        })
+        _write_version_txt(exp_dir, current)
+        (exp_dir / "42").mkdir()
+        pq.write_table(pa.table({"x": [1]}), exp_dir / "42" / "results.parquet")
+
+        store = ExperimentStore(base_dir=tmp_path)
+        store.scan()
+        e = store.get_entries()[0]
+        assert "self-hash" in e.stale_reasons
+        assert "code" not in e.stale_reasons
+
+    def test_no_version_txt_no_code_reason(self, tmp_path, mock_groups):
+        """If version.txt is missing, we can't assert code drift — don't flag it."""
+        from endive.config import compute_code_hash, compute_experiment_hash
+        cfg = {
+            "simulation": {"duration_ms": 1000},
+            "experiment": {"label": "exp1_fa_baseline"},
+            "catalog": {"num_tables": 1, "table_metadata_inlined": False},
+        }
+        exp_hash = compute_experiment_hash(cfg)
+        exp_dir = tmp_path / f"exp1_fa_baseline-{exp_hash}"
+        exp_dir.mkdir()
+        _write_cfg_toml_manual(exp_dir, cfg)
+        # No version.txt.
+        (exp_dir / "42").mkdir()
+        pq.write_table(pa.table({"x": [1]}), exp_dir / "42" / "results.parquet")
+
+        store = ExperimentStore(base_dir=tmp_path)
+        store.scan()
+        e = store.get_entries()[0]
+        assert "code" not in e.stale_reasons

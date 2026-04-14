@@ -326,8 +326,15 @@ class ExperimentStore:
     # ----- stale hash detection -----
 
     def _detect_stale_hashes(self) -> None:
-        """Mark entries whose hash doesn't match current code, stored config,
-        or source template in experiment_configs/."""
+        """Mark entries with independent reasons for staleness.
+
+        Reasons (a dir may have multiple):
+        - code:             version.txt code_hash differs from current simulator code
+        - self-hash:        stored cfg.toml no longer hashes to dir_hash under current
+                            code (corruption or manual edit after run)
+        - template:         stored template_hash differs from live experiment_configs/
+        - template-missing: source template was deleted/renamed
+        """
         from endive.config import compute_template_hash
 
         current_code_hash = compute_code_hash()
@@ -344,24 +351,32 @@ class ExperimentStore:
             return h
 
         for entry in self._entries.values():
+            # 1. Code drift: compare version.txt code_hash to current simulator code.
+            #    Independent of config — always flag when available.
+            code_drifted = False
+            if entry.code_version and entry.code_version != current_code_hash:
+                entry.is_stale = True
+                entry.stale_reasons.add("code")
+                code_drifted = True
+
             if entry.config is None:
-                # Can't verify without config — assume current if code matches
-                if entry.code_version and entry.code_version != current_code_hash:
-                    entry.is_stale = True
-                    entry.stale_reasons.add("code")
                 continue
 
-            # 1. Recompute variant hash from stored config + current code
-            try:
-                expected_hash = compute_experiment_hash(entry.config)
-            except Exception:
-                expected_hash = None
+            # 2. Self-hash: stored cfg.toml should hash to dir_hash. Only meaningful
+            #    when code has NOT drifted (otherwise the current digest would naturally
+            #    differ from the one baked into dir_hash at creation time). A self-hash
+            #    mismatch under current code points to cfg.toml corruption/manual edits.
+            if not code_drifted:
+                try:
+                    expected_hash = compute_experiment_hash(entry.config)
+                except Exception:
+                    expected_hash = None
 
-            if expected_hash is not None and expected_hash != entry.exp_hash:
-                entry.is_stale = True
-                entry.stale_reasons.add("code-or-config")
+                if expected_hash is not None and expected_hash != entry.exp_hash:
+                    entry.is_stale = True
+                    entry.stale_reasons.add("self-hash")
 
-            # 2. Check template drift: stored template_hash vs live source template.
+            # 3. Template drift: stored template_hash vs live source template.
             exp_section = entry.config.get("experiment", {}) or {}
             stored_template_hash = exp_section.get("template_hash")
             stored_template_path = exp_section.get("template_path")

@@ -846,7 +846,14 @@ Each generated variant carries template provenance stamps under `[experiment]`:
 - `template_hash` — hash of the template itself via `compute_template_hash()`, which mirrors `compute_experiment_hash` but strips `[experiment]` (including these stamps), `[plots]`, and `simulation.seed`. Does **not** mix in the code hash — template drift is tracked separately from code drift.
 - `template_overrides` — inline table of sweep parameters applied to produce this variant.
 
-`expctl list` flags dirs as `stale (template)` when the stored `template_hash` differs from a fresh `compute_template_hash()` of the live template — this catches silent edits to the source config (e.g. flipping `table_metadata_inlined`) that would otherwise leave the variant dir self-consistent but invalid relative to the current experiment definition.
+`expctl list` surfaces staleness reasons independently:
+
+- `code` — `version.txt`'s `code_hash` differs from the current simulator code hash.
+- `self-hash` — stored `cfg.toml` no longer hashes to the dir name under the current code (corruption or manual edit after the run). Suppressed when `code` drift is already flagged, because the digest would naturally differ.
+- `template` — stored `template_hash` differs from `compute_template_hash()` of the live `experiment_configs/<label>.toml`. Catches silent template edits (e.g. flipping `table_metadata_inlined`).
+- `template-missing` — source template was deleted or renamed.
+
+Multiple reasons can apply to a single dir; the list status shows them comma-separated: `stale (code, template)`.
 
 ```
 experiments/
