@@ -11,10 +11,12 @@ Usage:
 """
 
 import argparse
+import io
 import json
 import os
 import sys
 import time
+from contextlib import redirect_stdout
 from pathlib import Path
 
 EXPERIMENTS_DIR = Path("experiments")
@@ -49,11 +51,27 @@ def find_progress_files() -> list[dict]:
 
 
 def print_progress(clear: bool = False):
-    """Print aggregate progress summary."""
-    if clear:
-        # ANSI escape to clear screen and move cursor to top
-        print("\033[2J\033[H", end="")
+    """Print aggregate progress summary.
 
+    In `clear` mode, builds the full frame into a buffer and emits it in
+    one write, prefixed with cursor-home (\\033[H) and suffixed with
+    clear-to-end-of-screen (\\033[J). This overwrites the previous frame
+    in place without the visible blank gap that \\033[2J introduces.
+    """
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        _render_progress()
+    frame = buf.getvalue()
+
+    if clear:
+        sys.stdout.write("\033[H" + frame + "\033[J")
+    else:
+        sys.stdout.write(frame)
+    sys.stdout.flush()
+
+
+def _render_progress():
+    """Render the progress view to the current stdout."""
     state = load_runner_state()
     progress_files = find_progress_files()
 
