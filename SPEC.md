@@ -1,7 +1,7 @@
 # Endive Simulator Specification
 
-**Version**: 3.1
-**Date**: 2026-04-10
+**Version**: 3.2
+**Date**: 2026-04-14
 
 ## Executive Summary
 
@@ -222,7 +222,9 @@ class IntentionRecord:
     size_bytes: int = 100
 ```
 
-**Contention model note:** The global `seq` models a single-file catalog (`FileIOCatalog`) where all tables contend on one atomic pointer. Every commit—regardless of which table it targets—must increment the same `seq`, so concurrent writers to different tables still produce CAS failures. However, **cross-table CAS failures are cheap to retry**: the transaction reads the updated catalog, sees the intervening commit was to a different table, and retries the CAS without any manifest I/O. Only same-table conflicts with overlapping partitions require full conflict resolution. This distinction is critical for multi-table workloads: more tables means more CAS failures but cheaper retries, so the net effect depends on the balance between catalog round-trip cost and manifest I/O cost. A per-table metadata catalog (e.g., REST catalog backed by a database) would version each table independently, eliminating cross-table CAS failures entirely.
+**Contention model — CASCatalog:** The global `seq` models a single-file catalog (`FileIOCatalog`) where all tables contend on one atomic pointer. Every commit—regardless of which table it targets—must increment the same `seq`, so concurrent writers to different tables still produce CAS failures. However, **cross-table CAS failures are cheap to retry**: the transaction reads the updated catalog, sees the intervening commit was to a different table, and retries the CAS without any manifest I/O. Only same-table conflicts with overlapping partitions require full conflict resolution. This distinction is critical for multi-table workloads: more tables means more CAS failures but cheaper retries, so the net effect depends on the balance between catalog round-trip cost and manifest I/O cost.
+
+**Contention model — AppendCatalog:** Per-partition version preconditions replace the global `seq` check. Disjoint-partition writes commute: T1 writing partitions {1,3} and T2 writing partition {2} both succeed because their version expectations are independent. Physical serialization via position-append (only one writer wins each offset) still causes some commit failures, but when the losing writer retries, its per-partition preconditions may still hold (if no overlapping partitions were modified), yielding a cheaper retry path than CASCatalog. **Known limitation:** the current implementation checks only write-set partitions in preconditions. VO transactions should also check read-set partitions to correctly model serializable snapshot isolation (see §3.8).
 
 Internal types `_CASResult`, `_AppendResult`, and `_MutableTable` are not exposed to transactions.
 
@@ -394,12 +396,17 @@ def execute(catalog, storage, conflict_detector, max_retries, ml_append_mode, me
             cost = get_per_attempt_cost(ml_append_mode, per_attempt_n, metadata_inlined)
             yield from pay_io(cost, storage)         # TM read, ML reads, ML writes, TM write
 
-        # --- CAS ---
-        result = yield from catalog.commit(last_snapshot.seq, writes)
+        # --- Catalog commit (CAS or append — uniform interface) ---
+        # Transaction builds IntentionRecord with expected_partition_versions
+        # from last_snapshot. CASCatalog ignores it; AppendCatalog uses it
+        # for per-partition precondition evaluation.
+        result = yield from catalog.commit(last_snapshot.seq, writes,
+                                           intention=intention,
+                                           expected_log_offset=last_snapshot.log_offset)
         if result.success:
             return COMMITTED
 
-        # --- CAS failed: read catalog to determine overlap ---
+        # --- Commit failed: read catalog to determine overlap ---
         current_snapshot = yield from catalog.read()
 
         # Non-inlined: separate TM read needed to get partition versions
@@ -554,6 +561,8 @@ class ValidatedOverwriteTransaction(Transaction):
 ```
 
 `n_table_versions_behind` is the per-table version delta, NOT the catalog sequence delta. The convoy is computed per-table in `_commit_loop`, so each table's version delta is paired with that table's overlapping partition count. For multi-table VO transactions, this correctly yields `(V_A-1)×M_A + (V_B-1)×M_B` instead of overcounting with `(V_A+V_B-1)×(M_A+M_B)`.
+
+**Known limitation — VO with AppendCatalog:** The current implementation only checks write-set partitions in the `IntentionRecord.expected_partition_versions` precondition. A correct model of serializable VO requires checking that read-set partition versions have also not changed (e.g., T3 reads partitions {2,3} and writes partition {4} — T3 must abort if partitions 2 or 3 were modified by an intervening commit, even though T3 doesn't write them). This requires adding `partitions_read` to Transaction and extending the IntentionRecord to include read-set partition expectations. Until then, VO on AppendCatalog may incorrectly succeed when its read-set has been invalidated.
 
 ### 3.9 ML+ Manifest List Protocol
 
@@ -814,7 +823,8 @@ provider = "s3x"                       # s3, s3x, azure, azurex, gcp, instant
 [catalog]
 num_tables = 1
 num_groups = 1
-table_metadata_inlined = false         # See §3.10
+mode = "cas"                           # "cas" (default) or "append"
+table_metadata_inlined = false         # See §3.10 (CAS only)
 # Inlined-only knobs (exp6):
 # initial_partition_size_bytes = 16000
 # commit_growth_bytes = 0
@@ -893,10 +903,12 @@ experiments/
 - The per-attempt cost reads the ML at version K+N; only K+1..K+N-1 need additional reads
 - Skipped entirely when there is no write overlap (cross-table or disjoint partitions)
 
-### 8.4 Conflict Type Distinction
+### 8.4 Conflict Type Distinction (CASCatalog)
 - **No overlap**: Different table or disjoint partitions — no manifest I/O, just re-CAS
 - **False conflict**: Same table + overlapping partitions, but no data conflict — merge and retry
 - **Real conflict**: Same table + overlapping partitions with data conflict — may abort (operation-dependent)
+
+In AppendCatalog, the "no overlap" case does not produce a commit failure at all — disjoint-partition writes commute and succeed outright. The false/real conflict distinction applies only when write-set (or read-set, for VO) partitions overlap.
 
 ### 8.5 Determinism
 - Same seed + same config produces identical results
@@ -939,12 +951,14 @@ experiments/
 - The Workload owns topology and configures Transactions accordingly
 - The Catalog does not expose topology queries
 
-### 8.12 Cross-Table / Disjoint Retry Cost
+### 8.12 Cross-Table / Disjoint Retry Cost (CASCatalog)
 - CAS failures caused by commits to a different table (or disjoint partitions of the same table) do not require manifest or table metadata I/O
 - Each partition has its own entry in the catalog; disjoint writes do not interact
 - The retry cost is: 1 catalog read (+ 1 TM read if non-inlined) + 1 CAS round-trip
 - Per-attempt I/O and conflict resolution costs apply ONLY when `compute_write_overlap()` returns overlap
 - Critical for multi-table workloads: with N tables and uniform selection, ~(N-1)/N of CAS failures are cross-table and essentially free to retry
+
+In AppendCatalog, disjoint-partition writes do not produce failures at all — they succeed via per-partition preconditions. Physical offset contention (position-append) can still cause failures for disjoint writers, but the retry succeeds immediately because the partition preconditions are unaffected.
 
 ### 8.13 Table Metadata Inlining
 - When `metadata_inlined=True`, table metadata is stored in the catalog CAS object
@@ -971,3 +985,7 @@ experiments/
 - **Manifest list (ML)**: Per-partition list of manifest files, stored in object storage
 - **Per-attempt cost**: I/O paid on first attempt and on retries with write overlap: TM read + ML reads + ML writes + TM write (non-inlined) or ML reads + ML writes (inlined)
 - **Conflict cost**: Additional I/O paid only on retry with write overlap (type-dependent: zero for FA, historical ML reads for VO)
+- **Position-append**: Conditional append to a log at a specified offset; fails physically if offset doesn't match current EOF (used by AppendCatalog)
+- **Per-partition precondition**: Logical check in AppendCatalog — each partition in the write set must have the expected version; disjoint writes commute
+- **Discovery read**: Read after an append to learn the outcome; models I/O cost but does not determine commit success (decided at append eval time)
+- **Log offset**: Physical position in the append log; captured in `CatalogSnapshot.log_offset` and passed back as `expected_log_offset` on commit
