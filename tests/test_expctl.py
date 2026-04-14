@@ -630,11 +630,11 @@ class TestSynthesizeStatus:
         entries = [self._entry(seeds_disk={1, 2, 3})]
         assert _synthesize_status(entries) == ""
 
-    def test_stale_with_code_version(self):
-        entries = [self._entry(is_stale=True, code_version="abcdef1234567890")]
+    def test_stale_with_reasons(self):
+        entries = [self._entry(is_stale=True, stale_reasons={"code-or-config"})]
         status = _synthesize_status(entries)
         assert "stale" in status
-        assert "abcdef1" in status
+        assert "code-or-config" in status
 
     def test_stale_without_code_version(self):
         entries = [self._entry(is_stale=True)]
@@ -955,3 +955,217 @@ class TestCmdComplete:
         out = capsys.readouterr().out
         assert "2" in out  # 2 missing
         assert "missing" in out.lower() or "Missing" in out
+
+
+# ---------------------------------------------------------------------------
+# Unit tests: Template hash + drift detection
+# ---------------------------------------------------------------------------
+
+class TestTemplateHash:
+    """compute_template_hash is deterministic and excludes [plots]/[experiment]/seed."""
+
+    def test_hash_is_deterministic(self, tmp_path):
+        from endive.config import compute_template_hash
+
+        (tmp_path / "t.toml").write_text(
+            '[simulation]\nduration_ms = 1000\n'
+            '[catalog]\nnum_tables = 1\ntable_metadata_inlined = false\n'
+        )
+        assert compute_template_hash(tmp_path / "t.toml") == \
+               compute_template_hash(tmp_path / "t.toml")
+
+    def test_hash_ignores_plots_section(self, tmp_path):
+        from endive.config import compute_template_hash
+
+        base = ('[simulation]\nduration_ms = 1000\n'
+                '[catalog]\ntable_metadata_inlined = false\n')
+        (tmp_path / "a.toml").write_text(base)
+        (tmp_path / "b.toml").write_text(base + '[plots]\noutput_dir = "plots/x"\n')
+        assert compute_template_hash(tmp_path / "a.toml") == \
+               compute_template_hash(tmp_path / "b.toml")
+
+    def test_hash_ignores_experiment_label(self, tmp_path):
+        from endive.config import compute_template_hash
+
+        base = '[catalog]\ntable_metadata_inlined = false\n'
+        (tmp_path / "a.toml").write_text('[experiment]\nlabel = "one"\n' + base)
+        (tmp_path / "b.toml").write_text('[experiment]\nlabel = "two"\n' + base)
+        assert compute_template_hash(tmp_path / "a.toml") == \
+               compute_template_hash(tmp_path / "b.toml")
+
+    def test_hash_ignores_seed(self, tmp_path):
+        from endive.config import compute_template_hash
+
+        (tmp_path / "a.toml").write_text(
+            '[simulation]\nduration_ms = 1000\nseed = 1\n'
+            '[catalog]\ntable_metadata_inlined = false\n'
+        )
+        (tmp_path / "b.toml").write_text(
+            '[simulation]\nduration_ms = 1000\nseed = 99\n'
+            '[catalog]\ntable_metadata_inlined = false\n'
+        )
+        assert compute_template_hash(tmp_path / "a.toml") == \
+               compute_template_hash(tmp_path / "b.toml")
+
+    def test_hash_detects_inlined_flip(self, tmp_path):
+        """The motivating bug: silent table_metadata_inlined change → different hash."""
+        from endive.config import compute_template_hash
+
+        (tmp_path / "a.toml").write_text(
+            '[catalog]\ntable_metadata_inlined = false\n'
+        )
+        (tmp_path / "b.toml").write_text(
+            '[catalog]\ntable_metadata_inlined = true\n'
+        )
+        assert compute_template_hash(tmp_path / "a.toml") != \
+               compute_template_hash(tmp_path / "b.toml")
+
+
+class TestTemplateDriftDetection:
+    """ExperimentStore flags dirs whose stored template_hash ≠ live template."""
+
+    def _write_template(self, path: Path, inlined: bool) -> None:
+        path.write_text(
+            '[simulation]\nduration_ms = 1000\n'
+            '[experiment]\nlabel = "exp1_fa_baseline"\n'
+            '[catalog]\nnum_tables = 1\n'
+            f'table_metadata_inlined = {"true" if inlined else "false"}\n'
+        )
+
+    def _make_stamped_experiment(
+        self, base_dir: Path, template_path: Path, template_hash: str,
+        exp_hash: str = "aabbccdd", overrides: dict | None = None,
+    ) -> Path:
+        """Create a cfg.toml carrying template provenance stamps."""
+        exp_dir = base_dir / "experiments" / f"exp1_fa_baseline-{exp_hash}"
+        exp_dir.mkdir(parents=True)
+        overrides_body = ", ".join(
+            f'"{k}" = {_toml_value(v)}' for k, v in sorted((overrides or {}).items())
+        )
+        rel = template_path.relative_to(base_dir).as_posix()
+        cfg = (
+            '[simulation]\nseed = 42\nduration_ms = 1000\n'
+            '[experiment]\n'
+            f'label = "exp1_fa_baseline"\n'
+            f'template_path = "{rel}"\n'
+            f'template_hash = "{template_hash}"\n'
+            f'template_overrides = {{ {overrides_body} }}\n'
+            '[catalog]\nnum_tables = 1\ntable_metadata_inlined = false\n'
+        )
+        (exp_dir / "cfg.toml").write_text(cfg)
+        _write_version_txt(exp_dir)
+        seed_dir = exp_dir / "42"
+        seed_dir.mkdir()
+        pq.write_table(pa.table({"x": [1]}), seed_dir / "results.parquet")
+        return exp_dir
+
+    def test_no_drift_when_template_unchanged(self, tmp_path, mock_groups):
+        from endive.config import compute_template_hash
+
+        template = tmp_path / "experiment_configs" / "exp1_fa_baseline.toml"
+        template.parent.mkdir()
+        self._write_template(template, inlined=False)
+        stored_hash = compute_template_hash(template)
+        self._make_stamped_experiment(tmp_path, template, stored_hash)
+
+        store = ExperimentStore(base_dir=tmp_path / "experiments")
+        with patch("scripts.expctl._PROJECT_ROOT", tmp_path), \
+             patch("scripts.expctl.compute_code_hash",
+                   return_value="abcdef1234567890"):
+            store.scan()
+
+        entry = store.get_entries()[0]
+        assert "template" not in entry.stale_reasons
+        assert "template-missing" not in entry.stale_reasons
+
+    def test_drift_when_template_flipped(self, tmp_path, mock_groups):
+        """The motivating scenario: someone flips table_metadata_inlined."""
+        from endive.config import compute_template_hash
+
+        template = tmp_path / "experiment_configs" / "exp1_fa_baseline.toml"
+        template.parent.mkdir()
+        self._write_template(template, inlined=False)
+        stored_hash = compute_template_hash(template)
+        exp_dir = self._make_stamped_experiment(tmp_path, template, stored_hash)
+
+        # Now flip the template.
+        self._write_template(template, inlined=True)
+
+        store = ExperimentStore(base_dir=tmp_path / "experiments")
+        with patch("scripts.expctl._PROJECT_ROOT", tmp_path), \
+             patch("scripts.expctl.compute_code_hash",
+                   return_value="abcdef1234567890"):
+            store.scan()
+
+        entry = store.get_entries()[0]
+        assert entry.is_stale
+        assert "template" in entry.stale_reasons
+
+    def test_template_missing_flagged(self, tmp_path, mock_groups):
+        """Deleted or renamed template still lets us flag the dir."""
+        from endive.config import compute_template_hash
+
+        template = tmp_path / "experiment_configs" / "exp1_fa_baseline.toml"
+        template.parent.mkdir()
+        self._write_template(template, inlined=False)
+        stored_hash = compute_template_hash(template)
+        self._make_stamped_experiment(tmp_path, template, stored_hash)
+
+        template.unlink()  # template deleted
+
+        store = ExperimentStore(base_dir=tmp_path / "experiments")
+        with patch("scripts.expctl._PROJECT_ROOT", tmp_path), \
+             patch("scripts.expctl.compute_code_hash",
+                   return_value="abcdef1234567890"):
+            store.scan()
+
+        entry = store.get_entries()[0]
+        assert entry.is_stale
+        assert "template-missing" in entry.stale_reasons
+
+    def test_unstamped_dirs_not_template_stale(self, tmp_path, mock_groups):
+        """Pre-stamp dirs (no template_hash) don't get template-stale flags."""
+        # Build an experiment dir with NO template fields in its [experiment].
+        exp_dir = tmp_path / "experiments" / "exp1_fa_baseline-11223344"
+        exp_dir.mkdir(parents=True)
+        (exp_dir / "cfg.toml").write_text(
+            '[simulation]\nseed = 42\n[experiment]\nlabel = "exp1_fa_baseline"\n'
+            '[catalog]\nnum_tables = 1\n'
+        )
+        _write_version_txt(exp_dir)
+        (exp_dir / "42").mkdir()
+        pq.write_table(pa.table({"x": [1]}), exp_dir / "42" / "results.parquet")
+
+        store = ExperimentStore(base_dir=tmp_path / "experiments")
+        with patch("scripts.expctl._PROJECT_ROOT", tmp_path), \
+             patch("scripts.expctl.compute_code_hash",
+                   return_value="abcdef1234567890"):
+            store.scan()
+
+        entry = store.get_entries()[0]
+        assert "template" not in entry.stale_reasons
+        assert "template-missing" not in entry.stale_reasons
+
+
+class TestStatusFlags:
+    """_synthesize_status surfaces stale reasons."""
+
+    def test_shows_template_reason(self):
+        entry = ExperimentEntry(
+            label="exp1", exp_hash="aa", group="baseline", source="disk",
+            disk_dir=None, config={}, code_version="abc",
+            is_stale=True, stale_reasons={"template"},
+            seeds_disk={42},
+        )
+        assert "stale (template)" in _synthesize_status([entry])
+
+    def test_shows_multiple_reasons_sorted(self):
+        entry = ExperimentEntry(
+            label="exp1", exp_hash="aa", group="baseline", source="disk",
+            disk_dir=None, config={}, code_version="abc",
+            is_stale=True, stale_reasons={"template", "code-or-config"},
+            seeds_disk={42},
+        )
+        status = _synthesize_status([entry])
+        assert "code-or-config" in status
+        assert "template" in status

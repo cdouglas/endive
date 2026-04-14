@@ -392,6 +392,43 @@ def compute_code_hash() -> str:
     return _compute_code_hash_digest().hex()[:16]
 
 
+def _strip_hash_irrelevant(config: dict) -> dict:
+    """Return a copy of config with sections that must not affect hashing removed.
+
+    Removes:
+    - simulation.seed (seed varies per run; seeds go in different subdirs)
+    - [experiment] entirely (label, template_hash/path/overrides — provenance, not parameters)
+    - [plots] entirely (post-sim analysis config)
+    """
+    out = dict(config)
+    if 'simulation' in out and 'seed' in out['simulation']:
+        out['simulation'] = {k: v for k, v in out['simulation'].items() if k != 'seed'}
+    out.pop('experiment', None)
+    out.pop('plots', None)
+    return out
+
+
+def compute_template_hash(template_path: str | Path) -> str:
+    """Compute deterministic hash of an experiment template.
+
+    A template is a source config in experiment_configs/. The hash covers
+    every parameter a sweep would carry forward to each variant, so it
+    detects silent template edits (e.g. flipping table_metadata_inlined).
+
+    Excludes the same sections as compute_experiment_hash (seed, experiment,
+    plots). Does NOT mix in the code hash — template drift is a separate
+    concern from simulator-code drift.
+
+    Returns:
+        8-character hex hash string
+    """
+    with open(template_path, 'rb') as f:
+        config = tomllib.load(f)
+    config_for_hash = _strip_hash_irrelevant(config)
+    config_str = json.dumps(config_for_hash, sort_keys=True)
+    return hashlib.sha256(config_str.encode('utf-8')).hexdigest()[:8]
+
+
 def compute_experiment_hash(config: dict) -> str:
     """Compute deterministic hash of config + simulator code.
 
@@ -408,23 +445,7 @@ def compute_experiment_hash(config: dict) -> str:
         8-character hex hash string
     """
     # 1. Hash configuration (excluding seed, label, and plots)
-    config_for_hash = dict(config)
-
-    # Remove seed from simulation section
-    if 'simulation' in config_for_hash and 'seed' in config_for_hash['simulation']:
-        config_for_hash = dict(config_for_hash)  # Copy
-        config_for_hash['simulation'] = dict(config_for_hash['simulation'])
-        del config_for_hash['simulation']['seed']
-
-    # Remove experiment section entirely (contains label)
-    if 'experiment' in config_for_hash:
-        config_for_hash = dict(config_for_hash)
-        del config_for_hash['experiment']
-
-    # Remove plots section (plot config doesn't affect simulation results)
-    if 'plots' in config_for_hash:
-        config_for_hash = dict(config_for_hash)
-        del config_for_hash['plots']
+    config_for_hash = _strip_hash_irrelevant(config)
 
     # Serialize config deterministically
     config_str = json.dumps(config_for_hash, sort_keys=True)

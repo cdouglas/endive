@@ -43,6 +43,13 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
+# Project root on sys.path so `from endive...` works when invoked as a script.
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
+
+from endive.config import compute_template_hash  # noqa: E402
+
 # Progress bar
 try:
     from tqdm import tqdm
@@ -216,6 +223,29 @@ def create_config_variant(base_config: Path, params: dict, seed: int,
     # Add seed after [simulation]
     if "[simulation]" in content:
         content = content.replace("[simulation]", f"[simulation]\nseed = {seed}")
+
+    # Stamp template provenance into [experiment]. These fields are
+    # ignored by compute_experiment_hash (the whole [experiment] section
+    # is stripped), so they do not affect directory hashing.
+    resolved = base_config.resolve()
+    try:
+        template_path_rel = resolved.relative_to(_PROJECT_ROOT).as_posix()
+    except ValueError:
+        template_path_rel = resolved.as_posix()
+    template_hash = compute_template_hash(base_config)
+    overrides_body = ", ".join(
+        f'"{k}" = {format_toml_value(v)}' for k, v in sorted(params.items())
+    )
+    provenance = (
+        f'[experiment]\n'
+        f'template_path = "{template_path_rel}"\n'
+        f'template_hash = "{template_hash}"\n'
+        f'template_overrides = {{ {overrides_body} }}'
+    )
+    if "[experiment]" in content:
+        content = content.replace("[experiment]", provenance, 1)
+    else:
+        content = f"{provenance}\n\n{content}"
 
     # Override duration if specified
     if duration_ms:

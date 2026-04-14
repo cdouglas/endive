@@ -838,6 +838,16 @@ Experiment configs may also include a `[plots]` section consumed by `scripts/reg
 
 `compute_experiment_hash()` creates a deterministic hash from config parameters (excludes seed, output_path, experiment.label). Same parameters with the same code produce the same hash and share a directory.
 
+### 7.3.1 Template Provenance
+
+Each generated variant carries template provenance stamps under `[experiment]`:
+
+- `template_path` — relative path to the source template in `experiment_configs/`.
+- `template_hash` — hash of the template itself via `compute_template_hash()`, which mirrors `compute_experiment_hash` but strips `[experiment]` (including these stamps), `[plots]`, and `simulation.seed`. Does **not** mix in the code hash — template drift is tracked separately from code drift.
+- `template_overrides` — inline table of sweep parameters applied to produce this variant.
+
+`expctl list` flags dirs as `stale (template)` when the stored `template_hash` differs from a fresh `compute_template_hash()` of the live template — this catches silent edits to the source config (e.g. flipping `table_metadata_inlined`) that would otherwise leave the variant dir self-consistent but invalid relative to the current experiment definition.
+
 ```
 experiments/
 ├── exp_baseline-a3f7b2/

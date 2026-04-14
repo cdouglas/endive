@@ -50,6 +50,7 @@ class ExperimentEntry:
     disk_bytes: int = 0
     code_version: str = ""
     is_stale: bool = False
+    stale_reasons: set[str] = field(default_factory=set)
 
     @property
     def all_seeds(self) -> set[int]:
@@ -325,25 +326,53 @@ class ExperimentStore:
     # ----- stale hash detection -----
 
     def _detect_stale_hashes(self) -> None:
-        """Mark entries whose hash doesn't match current code + config."""
+        """Mark entries whose hash doesn't match current code, stored config,
+        or source template in experiment_configs/."""
+        from endive.config import compute_template_hash
+
         current_code_hash = compute_code_hash()
+        template_hash_cache: dict[str, str | None] = {}
+
+        def _live_template_hash(template_path: str) -> str | None:
+            if template_path in template_hash_cache:
+                return template_hash_cache[template_path]
+            try:
+                h = compute_template_hash(_PROJECT_ROOT / template_path)
+            except (OSError, ValueError):
+                h = None
+            template_hash_cache[template_path] = h
+            return h
 
         for entry in self._entries.values():
             if entry.config is None:
                 # Can't verify without config — assume current if code matches
                 if entry.code_version and entry.code_version != current_code_hash:
                     entry.is_stale = True
+                    entry.stale_reasons.add("code")
                 continue
 
-            # Recompute hash from stored config + current code
+            # 1. Recompute variant hash from stored config + current code
             try:
                 expected_hash = compute_experiment_hash(entry.config)
             except Exception:
-                # If hash computation fails, can't verify
-                continue
+                expected_hash = None
 
-            if expected_hash != entry.exp_hash:
+            if expected_hash is not None and expected_hash != entry.exp_hash:
                 entry.is_stale = True
+                entry.stale_reasons.add("code-or-config")
+
+            # 2. Check template drift: stored template_hash vs live source template.
+            exp_section = entry.config.get("experiment", {}) or {}
+            stored_template_hash = exp_section.get("template_hash")
+            stored_template_path = exp_section.get("template_path")
+            if stored_template_hash and stored_template_path:
+                live = _live_template_hash(stored_template_path)
+                if live is None:
+                    entry.is_stale = True
+                    entry.stale_reasons.add("template-missing")
+                elif live != stored_template_hash:
+                    entry.is_stale = True
+                    entry.stale_reasons.add("template")
 
     # ----- filtering -----
 
@@ -428,13 +457,12 @@ def _synthesize_status(label_entries: list[ExperimentEntry]) -> str:
     """
     flags: list[str] = []
     if any(e.is_stale for e in label_entries):
-        code_versions = {
-            e.code_version[:7]
-            for e in label_entries
-            if e.is_stale and e.code_version
-        }
-        if code_versions:
-            flags.append(f"stale ({', '.join(sorted(code_versions))})")
+        reasons: set[str] = set()
+        for e in label_entries:
+            if e.is_stale:
+                reasons.update(e.stale_reasons)
+        if reasons:
+            flags.append(f"stale ({', '.join(sorted(reasons))})")
         else:
             flags.append("stale")
     if any(e.seeds_active for e in label_entries):
