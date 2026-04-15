@@ -322,6 +322,72 @@ class TestPartitionOverlapConflictDetector:
 
 
 # ---------------------------------------------------------------------------
+# Read-set conflict detection
+# ---------------------------------------------------------------------------
+
+class TestReadSetConflictDetection:
+    """PartitionOverlapConflictDetector checks read-set partitions for VO."""
+
+    def test_read_partition_modified_is_real_conflict(self):
+        """VO reads {2,3}, writes {0}. Partition 2 modified → real conflict."""
+        detector = PartitionOverlapConflictDetector()
+        txn = make_validated_overwrite(
+            partitions_written={0: frozenset({0})},
+            partitions_read={0: frozenset({2, 3})},
+        )
+        start = make_snapshot(seq=0, partition_versions={0: (0, 0, 0, 0)})
+        current = make_snapshot(seq=1, partition_versions={0: (0, 0, 1, 0)})
+        assert detector.is_real_conflict(txn, current, start) is True
+
+    def test_disjoint_read_write_no_change_is_false(self):
+        """VO reads {2,3}, writes {0}. No partitions changed → false conflict."""
+        detector = PartitionOverlapConflictDetector()
+        txn = make_validated_overwrite(
+            partitions_written={0: frozenset({0})},
+            partitions_read={0: frozenset({2, 3})},
+        )
+        start = make_snapshot(seq=0, partition_versions={0: (0, 0, 0, 0)})
+        current = make_snapshot(seq=1, partition_versions={0: (0, 0, 0, 0)})
+        assert detector.is_real_conflict(txn, current, start) is False
+
+    def test_write_disjoint_but_read_overlaps(self):
+        """Write partitions disjoint, but read partition modified → real conflict.
+        Models: VO scans {2}, writes {4}. Concurrent FA writes {2}."""
+        detector = PartitionOverlapConflictDetector()
+        txn = make_validated_overwrite(
+            tables_written=frozenset({0}),
+            partitions_written={0: frozenset({4})},
+            partitions_read={0: frozenset({2})},
+        )
+        start = make_snapshot(seq=0, partition_versions={0: (0, 0, 0, 0, 0)})
+        current = make_snapshot(seq=1, partition_versions={0: (0, 0, 1, 0, 0)})
+        assert detector.is_real_conflict(txn, current, start) is True
+
+    def test_fa_ignores_read_set(self):
+        """FA with partitions_read set → still returns False (can't have real conflict)."""
+        detector = PartitionOverlapConflictDetector()
+        txn = make_fast_append(
+            partitions_written={0: frozenset({0})},
+            partitions_read={0: frozenset({2})},
+        )
+        start = make_snapshot(seq=0, partition_versions={0: (0, 0, 0, 0)})
+        current = make_snapshot(seq=1, partition_versions={0: (0, 0, 1, 0)})
+        assert detector.is_real_conflict(txn, current, start) is False
+
+    def test_empty_read_set_unchanged_behavior(self):
+        """With empty read set, behavior matches pre-read-set behavior."""
+        detector = PartitionOverlapConflictDetector()
+        txn = make_validated_overwrite(
+            partitions_written={0: frozenset({0})},
+            # No partitions_read → empty dict
+        )
+        start = make_snapshot(seq=0, partition_versions={0: (0, 0, 0, 0)})
+        # Partition 2 changed but txn only writes {0}
+        current = make_snapshot(seq=1, partition_versions={0: (0, 0, 1, 0)})
+        assert detector.is_real_conflict(txn, current, start) is False
+
+
+# ---------------------------------------------------------------------------
 # Interface compliance
 # ---------------------------------------------------------------------------
 

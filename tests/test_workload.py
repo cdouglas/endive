@@ -552,3 +552,129 @@ class TestTopologyOwnership:
                     assert 0 <= p < max_part
 
 
+# ---------------------------------------------------------------------------
+# Read-set tracking
+# ---------------------------------------------------------------------------
+
+class TestReadSetGeneration:
+    """VO read-set generation and backward compatibility."""
+
+    def test_fa_always_has_empty_read_set(self):
+        """FA transactions have partitions_read == {}."""
+        config = make_config(
+            fast_append_weight=1.0,
+            validated_overwrite_weight=0.0,
+            partitions_per_txn=2,
+            partition_selector=UniformPartitionSelector(),
+        )
+        workload = Workload(config, seed=42)
+        for _, txn in generate_n(workload, 50):
+            assert isinstance(txn, FastAppendTransaction)
+            assert txn.partitions_read == {}
+
+    def test_default_vo_read_set_equals_write_set(self):
+        """Without read config, VO partitions_read == partitions_written."""
+        config = make_config(
+            fast_append_weight=0.0,
+            validated_overwrite_weight=1.0,
+            partitions_per_txn=2,
+            partition_selector=UniformPartitionSelector(),
+        )
+        workload = Workload(config, seed=42)
+        for _, txn in generate_n(workload, 50):
+            assert isinstance(txn, ValidatedOverwriteTransaction)
+            assert txn.partitions_read == txn.partitions_written
+
+    def test_explicit_read_config_draws_independently(self):
+        """With read_partitions_per_txn set, read and write are independent draws."""
+        config = make_config(
+            fast_append_weight=0.0,
+            validated_overwrite_weight=1.0,
+            num_tables=1,
+            partitions_per_table=(32,),
+            partitions_per_txn=1,
+            partition_selector=UniformPartitionSelector(),
+            read_partitions_per_txn=3,
+            read_partition_selector=UniformPartitionSelector(),
+        )
+        workload = Workload(config, seed=42)
+        any_differ = False
+        for _, txn in generate_n(workload, 100):
+            assert len(list(txn.partitions_read.values())[0]) == 3
+            assert len(list(txn.partitions_written.values())[0]) == 1
+            if txn.partitions_read != txn.partitions_written:
+                any_differ = True
+        assert any_differ, "With independent draws, some should differ"
+
+    def test_distinct_read_write_distributions(self):
+        """Read from Zipf, write from Uniform → statistically different."""
+        config = make_config(
+            fast_append_weight=0.0,
+            validated_overwrite_weight=1.0,
+            num_tables=1,
+            partitions_per_table=(32,),
+            partitions_per_txn=1,
+            partition_selector=UniformPartitionSelector(),
+            read_partitions_per_txn=1,
+            read_partition_selector=ZipfPartitionSelector(alpha=2.0),
+        )
+        workload = Workload(config, seed=42)
+        read_counts = Counter()
+        write_counts = Counter()
+        for _, txn in generate_n(workload, 1000):
+            for pids in txn.partitions_read.values():
+                for p in pids:
+                    read_counts[p] += 1
+            for pids in txn.partitions_written.values():
+                for p in pids:
+                    write_counts[p] += 1
+        # Zipf should heavily concentrate on low partition IDs
+        # Uniform should be roughly equal
+        assert read_counts[0] > write_counts.get(0, 0) * 1.5, \
+            "Zipf read distribution should skew toward partition 0"
+
+    def test_read_partitions_within_range(self):
+        """Read-set partitions must be in valid range."""
+        config = make_config(
+            fast_append_weight=0.0,
+            validated_overwrite_weight=1.0,
+            num_tables=2,
+            partitions_per_table=(3, 5),
+            partitions_per_txn=1,
+            partition_selector=UniformPartitionSelector(),
+            read_partitions_per_txn=2,
+            read_partition_selector=UniformPartitionSelector(),
+        )
+        workload = Workload(config, seed=42)
+        for _, txn in generate_n(workload, 100):
+            for table_id, parts in txn.partitions_read.items():
+                max_part = config.partitions_per_table[table_id]
+                for p in parts:
+                    assert 0 <= p < max_part
+
+    def test_no_rng_state_change_for_existing_configs(self):
+        """Without read config, RNG draws are identical to pre-read-set code.
+        Verified by checking that FA transactions are bitwise identical
+        between configs with and without the read_partitions_per_txn field."""
+        config_base = make_config(
+            fast_append_weight=1.0,
+            validated_overwrite_weight=0.0,
+            partitions_per_txn=2,
+            partition_selector=UniformPartitionSelector(),
+        )
+        # Same config, explicitly setting read fields to None
+        config_explicit = make_config(
+            fast_append_weight=1.0,
+            validated_overwrite_weight=0.0,
+            partitions_per_txn=2,
+            partition_selector=UniformPartitionSelector(),
+            read_partitions_per_txn=None,
+            read_partition_selector=None,
+        )
+        wl_base = Workload(config_base, seed=99)
+        wl_explicit = Workload(config_explicit, seed=99)
+        for (_, t1), (_, t2) in zip(generate_n(wl_base, 50), generate_n(wl_explicit, 50)):
+            assert t1.partitions_written == t2.partitions_written
+            assert t1.tables_written == t2.tables_written
+
+

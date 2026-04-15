@@ -315,6 +315,8 @@ def _build_workload(
     # Partition selection (from [partition] config section)
     partitions_per_txn = None
     partition_selector = None
+    read_partitions_per_txn = None
+    read_partition_selector = None
     if partition_cfg and partition_cfg.get("enabled", False):
         partitions_per_txn = partition_cfg.get("partitions_per_txn", 1)
         selection = partition_cfg.get("selection", {})
@@ -323,6 +325,17 @@ def _build_workload(
             partition_selector = ZipfPartitionSelector(
                 alpha=selection.get("zipf_alpha", 1.5),
             )
+
+        # VO read-set partition selection (optional; default: same as write)
+        read_partitions_per_txn = partition_cfg.get("read_partitions_per_txn", None)
+        read_sel = partition_cfg.get("read_selection", {})
+        rps_dist = read_sel.get("distribution", None)
+        if rps_dist == "zipf":
+            read_partition_selector = ZipfPartitionSelector(
+                alpha=read_sel.get("zipf_alpha", 1.5),
+            )
+        elif rps_dist == "uniform":
+            read_partition_selector = UniformPartitionSelector()
 
     wl_config = WorkloadConfig(
         inter_arrival=inter_arrival,
@@ -335,6 +348,8 @@ def _build_workload(
         table_selector=table_selector,
         partitions_per_txn=partitions_per_txn,
         partition_selector=partition_selector,
+        read_partitions_per_txn=read_partitions_per_txn,
+        read_partition_selector=read_partition_selector,
     )
 
     # Workload seed is derived from simulation seed

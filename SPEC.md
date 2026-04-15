@@ -1,6 +1,6 @@
 # Endive Simulator Specification
 
-**Version**: 3.2
+**Version**: 3.3
 **Date**: 2026-04-14
 
 ## Executive Summary
@@ -224,7 +224,7 @@ class IntentionRecord:
 
 **Contention model — CASCatalog:** The global `seq` models a single-file catalog (`FileIOCatalog`) where all tables contend on one atomic pointer. Every commit—regardless of which table it targets—must increment the same `seq`, so concurrent writers to different tables still produce CAS failures. However, **cross-table CAS failures are cheap to retry**: the transaction reads the updated catalog, sees the intervening commit was to a different table, and retries the CAS without any manifest I/O. Only same-table conflicts with overlapping partitions require full conflict resolution. This distinction is critical for multi-table workloads: more tables means more CAS failures but cheaper retries, so the net effect depends on the balance between catalog round-trip cost and manifest I/O cost.
 
-**Contention model — AppendCatalog:** Per-partition version preconditions replace the global `seq` check. Disjoint-partition writes commute: T1 writing partitions {1,3} and T2 writing partition {2} both succeed because their version expectations are independent. Physical serialization via position-append (only one writer wins each offset) still causes some commit failures, but when the losing writer retries, its per-partition preconditions may still hold (if no overlapping partitions were modified), yielding a cheaper retry path than CASCatalog. **Known limitation:** the current implementation checks only write-set partitions in preconditions. VO transactions should also check read-set partitions to correctly model serializable snapshot isolation (see §3.8).
+**Contention model — AppendCatalog:** Per-partition version preconditions replace the global `seq` check. Disjoint-partition writes commute: T1 writing partitions {1,3} and T2 writing partition {2} both succeed because their version expectations are independent. Physical serialization via position-append (only one writer wins each offset) still causes some commit failures, but when the losing writer retries, its per-partition preconditions may still hold (if no overlapping partitions were modified), yielding a cheaper retry path than CASCatalog. VO transactions include read-set partitions in preconditions for serializable snapshot isolation: T3 reading partitions {2,3} and writing partition {4} aborts if partitions 2 or 3 were modified by an intervening commit (see §3.8).
 
 Internal types `_CASResult`, `_AppendResult`, and `_MutableTable` are not exposed to transactions.
 
@@ -499,7 +499,10 @@ class TransactionResult:
 class Transaction(ABC):
     def __init__(self, txn_id, submit_time_ms, runtime_ms,
                  tables_written: FrozenSet[int],
-                 partitions_written: Dict[int, FrozenSet[int]]): ...
+                 partitions_written: Dict[int, FrozenSet[int]],
+                 partitions_read: Dict[int, FrozenSet[int]] = None): ...
+                 # partitions_read: VO scan set for serializable validation
+                 # FA: always {}. VO default: same as partitions_written.
 
     def execute(self, catalog, storage, conflict_detector,
                 max_retries=10, ml_append_mode=False,
@@ -517,21 +520,40 @@ class Transaction(ABC):
 
 ### 3.7 Write Overlap Detection
 
+Checks both write-set and read-set partitions. `WriteOverlap` tracks them separately: `overlapping` (write-set, for I/O cost scaling) and `read_overlapping` (read-set, for VO validation). `has_overlap` is True if either is non-empty.
+
 ```python
 def compute_write_overlap(self, old_snapshot, new_snapshot) -> WriteOverlap:
-    overlapping = {}
+    write_overlapping = {}
     for table_id in self.tables_written:
         old_table = old_snapshot.get_table(table_id)
         new_table = new_snapshot.get_table(table_id)
         if old_table.version == new_table.version:
-            continue  # Table not modified by intervening commits
+            continue
         overlap_pids = frozenset(
             pid for pid in self.partitions_written.get(table_id, ())
             if old_table.partition_versions[pid] != new_table.partition_versions[pid]
         )
         if overlap_pids:
-            overlapping[table_id] = overlap_pids
-    return WriteOverlap(overlapping) if overlapping else NO_OVERLAP
+            write_overlapping[table_id] = overlap_pids
+
+    read_overlapping = {}
+    for table_id, pids in self.partitions_read.items():
+        old_table = old_snapshot.get_table(table_id)
+        new_table = new_snapshot.get_table(table_id)
+        if old_table.version == new_table.version:
+            continue
+        overlap_pids = frozenset(
+            pid for pid in pids
+            if old_table.partition_versions[pid] != new_table.partition_versions[pid]
+        )
+        if overlap_pids:
+            read_overlapping[table_id] = overlap_pids
+
+    if not write_overlapping and not read_overlapping:
+        return NO_OVERLAP
+    return WriteOverlap(overlapping=write_overlapping,
+                        read_overlapping=read_overlapping)
 ```
 
 ### 3.8 Concrete Transaction Types
@@ -562,7 +584,7 @@ class ValidatedOverwriteTransaction(Transaction):
 
 `n_table_versions_behind` is the per-table version delta, NOT the catalog sequence delta. The convoy is computed per-table in `_commit_loop`, so each table's version delta is paired with that table's overlapping partition count. For multi-table VO transactions, this correctly yields `(V_A-1)×M_A + (V_B-1)×M_B` instead of overcounting with `(V_A+V_B-1)×(M_A+M_B)`.
 
-**Known limitation — VO with AppendCatalog:** The current implementation only checks write-set partitions in the `IntentionRecord.expected_partition_versions` precondition. A correct model of serializable VO requires checking that read-set partition versions have also not changed (e.g., T3 reads partitions {2,3} and writes partition {4} — T3 must abort if partitions 2 or 3 were modified by an intervening commit, even though T3 doesn't write them). This requires adding `partitions_read` to Transaction and extending the IntentionRecord to include read-set partition expectations. Until then, VO on AppendCatalog may incorrectly succeed when its read-set has been invalidated.
+VO transactions include read-set partitions in `IntentionRecord.expected_partition_versions` (gated by `can_have_real_conflict()`). If any read-set partition was modified by an intervening commit, the VO aborts. This models serializable snapshot isolation: T3 reads partitions {2,3} and writes partition {4} — T3 must abort if partitions 2 or 3 were modified, even though T3 doesn't write them.
 
 ### 3.9 ML+ Manifest List Protocol
 
@@ -602,7 +624,7 @@ class ProbabilisticConflictDetector(ConflictDetector):
                  rng: np.random.RandomState | None = None): ...
 ```
 
-**PartitionOverlapConflictDetector**: Checks per-(table, partition) version changes between start and current snapshots. Real conflict if any written partition was modified by a concurrent transaction.
+**PartitionOverlapConflictDetector**: Checks per-(table, partition) version changes between start and current snapshots for both write-set and read-set partitions. Real conflict if any partition in the transaction's `partitions_written ∪ partitions_read` was modified by a concurrent transaction. Read-set checking models serializable snapshot isolation for VO.
 
 ```python
 class PartitionOverlapConflictDetector(ConflictDetector):
@@ -657,6 +679,10 @@ class WorkloadConfig:
     table_selector: Optional[TableSelector] = None       # None = uniform
     partitions_per_txn: Optional[int] = None
     partition_selector: Optional[PartitionSelector] = None  # None = uniform
+
+    # VO read-set (optional; default: same as write set for backward compat)
+    read_partitions_per_txn: Optional[int] = None
+    read_partition_selector: Optional[PartitionSelector] = None
 ```
 
 ### 5.3 Workload
@@ -850,6 +876,11 @@ enabled = true
 partitions_per_txn = 1                 # How many partitions each txn writes
 # selection.distribution = "zipf"      # Optional: "uniform" (default) or "zipf"
 # selection.zipf_alpha = 1.5
+
+# VO read-set (optional; default: same as write set)
+# read_partitions_per_txn = 3          # Independent read-set size for VO
+# read_selection.distribution = "zipf" # Can differ from write distribution
+# read_selection.zipf_alpha = 1.5
 ```
 
 Experiment configs may also include a `[plots]` section consumed by `scripts/regenerate_plots.py`; it is ignored by the simulator.

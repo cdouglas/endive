@@ -69,9 +69,14 @@ class ProbabilisticConflictDetector(ConflictDetector):
 class PartitionOverlapConflictDetector(ConflictDetector):
     """Partition-based conflict detection.
 
-    Returns real conflict if any (table, partition) pair written by the
-    transaction was also modified by a concurrent transaction (detected
-    by comparing partition versions between start and current snapshots).
+    Returns real conflict if any (table, partition) pair in the
+    transaction's write set OR read set was modified by a concurrent
+    transaction (detected by comparing partition versions between start
+    and current snapshots).
+
+    Read-set checking models serializable snapshot isolation: a VO that
+    scanned partitions {2,3} must abort if either was modified, even if
+    the VO only writes to partition {4}.
 
     Only returns True for transactions where can_have_real_conflict() is
     True (i.e., ValidatedOverwriteTransaction).
@@ -86,8 +91,15 @@ class PartitionOverlapConflictDetector(ConflictDetector):
         if not txn.can_have_real_conflict():
             return False
 
-        for table_id, partitions in txn.partitions_written.items():
-            for partition_id in partitions:
+        # Check both write-set and read-set partitions
+        all_partitions: dict[int, set[int]] = {}
+        for table_id, pids in txn.partitions_written.items():
+            all_partitions.setdefault(table_id, set()).update(pids)
+        for table_id, pids in txn.partitions_read.items():
+            all_partitions.setdefault(table_id, set()).update(pids)
+
+        for table_id, pids in all_partitions.items():
+            for partition_id in pids:
                 start_ver = start_snapshot.get_partition_version(
                     table_id, partition_id
                 )
@@ -95,6 +107,6 @@ class PartitionOverlapConflictDetector(ConflictDetector):
                     table_id, partition_id
                 )
                 if current_ver != start_ver:
-                    return True  # Partition was modified by concurrent txn
+                    return True
 
         return False

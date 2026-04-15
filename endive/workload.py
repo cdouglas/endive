@@ -225,6 +225,10 @@ class WorkloadConfig:
     partitions_per_txn: Optional[int] = None
     partition_selector: Optional[PartitionSelector] = None  # None = uniform
 
+    # VO read-set partition selection (None = same as write set)
+    read_partitions_per_txn: Optional[int] = None
+    read_partition_selector: Optional[PartitionSelector] = None  # None = use partition_selector
+
 
 # ---------------------------------------------------------------------------
 # Workload
@@ -267,6 +271,11 @@ class Workload:
         # Default selectors
         self._table_selector = config.table_selector or UniformTableSelector()
         self._partition_selector = config.partition_selector or UniformPartitionSelector()
+        self._read_partition_selector = (
+            config.read_partition_selector
+            or config.partition_selector
+            or UniformPartitionSelector()
+        )
 
     @property
     def config(self) -> WorkloadConfig:
@@ -317,8 +326,27 @@ class Workload:
             # Model unpartitioned tables as single-partition
             partitions_written = {tid: frozenset({0}) for tid in tables_written}
 
-        # Sample operation type
+        # Sample operation type (position preserved for RNG backward compat)
         op_type = self._sample_operation_type()
+
+        # Generate read-set partitions (after op_type to preserve RNG order)
+        # FA: no read set. VO: default = same as write set for backward compat;
+        # independent draw only when read_partitions_per_txn is configured.
+        partitions_read: Optional[Dict[int, FrozenSet[int]]] = None
+        if op_type != 'fast_append':
+            if self._config.read_partitions_per_txn is not None:
+                # Explicit read-set config: draw from (possibly distinct) distribution
+                read_n = self._config.read_partitions_per_txn
+                partitions_read = {}
+                for table_id in tables_written:
+                    n_parts = self._config.partitions_per_table[table_id]
+                    pr, _ = self._read_partition_selector.select(
+                        read_n, n_parts, self._rng,
+                    )
+                    partitions_read[table_id] = pr
+            else:
+                # Default: read set = write set (backward compat, no extra draws)
+                partitions_read = dict(partitions_written)
 
         # Create appropriate transaction type
         common = dict(
@@ -327,6 +355,7 @@ class Workload:
             runtime_ms=runtime,
             tables_written=tables_written,
             partitions_written=partitions_written,
+            partitions_read=partitions_read,
         )
 
         if op_type == 'fast_append':

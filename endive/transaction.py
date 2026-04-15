@@ -43,16 +43,18 @@ class TransactionStatus(Enum):
 
 @dataclass(frozen=True)
 class WriteOverlap:
-    """Details of write overlap between transaction and intervening commits.
+    """Details of overlap between transaction and intervening commits.
 
-    Replaces the boolean has_write_overlap() with structured information
-    about which tables/partitions overlap, enabling I/O cost scaling.
+    Tracks both write-set overlap (for I/O cost scaling) and read-set
+    overlap (for VO validation). Disjoint write-set but invalidated
+    read-set still triggers conflict detection.
     """
-    overlapping: Dict[int, FrozenSet[int]]  # table_id → overlapping partition IDs
+    overlapping: Dict[int, FrozenSet[int]]           # write-set overlap
+    read_overlapping: Dict[int, FrozenSet[int]] = None  # read-set overlap (None = no tracking)
 
     @property
     def has_overlap(self) -> bool:
-        return bool(self.overlapping)
+        return bool(self.overlapping) or bool(self.read_overlapping or {})
 
     @property
     def n_tables(self) -> int:
@@ -60,6 +62,7 @@ class WriteOverlap:
 
     @property
     def n_partitions(self) -> int:
+        """Write-overlapping partitions only (for I/O cost scaling)."""
         return sum(len(pids) for pids in self.overlapping.values())
 
 
@@ -164,12 +167,14 @@ class Transaction(ABC):
         runtime_ms: float,
         tables_written: FrozenSet[int],
         partitions_written: Optional[Dict[int, FrozenSet[int]]] = None,
+        partitions_read: Optional[Dict[int, FrozenSet[int]]] = None,
     ):
         self.id = txn_id
         self.submit_time = submit_time_ms
         self.runtime = runtime_ms
         self.tables_written = tables_written
         self.partitions_written: Dict[int, FrozenSet[int]] = partitions_written if partitions_written is not None else {}
+        self.partitions_read: Dict[int, FrozenSet[int]] = partitions_read if partitions_read is not None else {}
 
         # Internal mutable state
         self._status = TransactionStatus.PENDING
@@ -291,28 +296,46 @@ class Transaction(ABC):
         old_snapshot: CatalogSnapshot,
         new_snapshot: CatalogSnapshot,
     ) -> WriteOverlap:
-        """Compute structured write overlap between this transaction and
-        intervening commits between old_snapshot and new_snapshot.
+        """Compute overlap between this transaction's read/write sets
+        and intervening commits between old_snapshot and new_snapshot.
 
-        Returns a WriteOverlap with the set of overlapping partitions per
-        table, enabling I/O cost scaling by overlap size.
+        Returns a WriteOverlap with write-set overlap (for I/O cost
+        scaling) and read-set overlap (for VO validation). Read-set
+        overlap triggers conflict detection even when write partitions
+        are disjoint.
         """
-        overlapping: Dict[int, FrozenSet[int]] = {}
+        # Write-set overlap
+        write_overlapping: Dict[int, FrozenSet[int]] = {}
         for table_id in self.tables_written:
             old_table = old_snapshot.get_table(table_id)
             new_table = new_snapshot.get_table(table_id)
             if old_table.version == new_table.version:
                 continue
-            # Table was modified — check partition-level overlap
             overlap_pids = frozenset(
                 pid for pid in self.partitions_written.get(table_id, ())
                 if old_table.partition_versions[pid] != new_table.partition_versions[pid]
             )
             if overlap_pids:
-                overlapping[table_id] = overlap_pids
-        if not overlapping:
+                write_overlapping[table_id] = overlap_pids
+
+        # Read-set overlap (VO: invalidated scan partitions)
+        read_overlapping: Dict[int, FrozenSet[int]] = {}
+        for table_id, pids in self.partitions_read.items():
+            old_table = old_snapshot.get_table(table_id)
+            new_table = new_snapshot.get_table(table_id)
+            if old_table.version == new_table.version:
+                continue
+            overlap_pids = frozenset(
+                pid for pid in pids
+                if old_table.partition_versions[pid] != new_table.partition_versions[pid]
+            )
+            if overlap_pids:
+                read_overlapping[table_id] = overlap_pids
+
+        if not write_overlapping and not read_overlapping:
             return NO_OVERLAP
-        return WriteOverlap(overlapping=overlapping)
+        return WriteOverlap(overlapping=write_overlapping,
+                            read_overlapping=read_overlapping)
 
     def has_write_overlap(
         self,
@@ -480,6 +503,7 @@ class Transaction(ABC):
                 self._per_attempt_io_ms += self._elapsed - before
 
             # Build intention with per-partition version expectations
+            # Write-set partitions are always included.
             expected_pv = {
                 tid: {
                     pid: last_snapshot.get_partition_version(tid, pid)
@@ -487,6 +511,16 @@ class Transaction(ABC):
                 }
                 for tid, pids in self.partitions_written.items()
             }
+            # Read-set partitions included for VO (serializable validation):
+            # if any read-set partition was modified by an intervening commit,
+            # the scan results are stale and the VO must abort.
+            if self.can_have_real_conflict():
+                for tid, pids in self.partitions_read.items():
+                    if tid not in expected_pv:
+                        expected_pv[tid] = {}
+                    for pid in pids:
+                        if pid not in expected_pv[tid]:
+                            expected_pv[tid][pid] = last_snapshot.get_partition_version(tid, pid)
             intention = IntentionRecord(
                 txn_id=self.id,
                 expected_seq=last_snapshot.seq,

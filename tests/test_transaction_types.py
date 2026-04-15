@@ -480,6 +480,23 @@ class TestWriteOverlap:
         assert empty.has_overlap is False
         assert empty == NO_OVERLAP
 
+    def test_read_only_overlap(self):
+        """Read-set overlap with no write overlap → has_overlap True, n_partitions 0."""
+        overlap = WriteOverlap(
+            overlapping={},
+            read_overlapping={0: frozenset({2})},
+        )
+        assert overlap.has_overlap is True
+        assert overlap.n_partitions == 0  # write-count only
+        assert overlap.read_overlapping == {0: frozenset({2})}
+
+    def test_write_overlap_with_no_read(self):
+        """Write overlap only (no read tracking) → same as before."""
+        overlap = WriteOverlap(overlapping={0: frozenset({1})})
+        assert overlap.has_overlap is True
+        assert overlap.n_partitions == 1
+        assert overlap.read_overlapping is None
+
 
 # ---------------------------------------------------------------------------
 # compute_write_overlap()
