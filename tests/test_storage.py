@@ -633,3 +633,139 @@ class TestInstantProvider:
         ]
         for gen in ops:
             assert next(gen) == 2.0
+
+
+# ---------------------------------------------------------------------------
+# Position-append: EOF tracking and physical-check semantics
+# ---------------------------------------------------------------------------
+
+class TestStorageEOFTracking:
+    """Storage tracks per-key EOF for position-append semantics."""
+
+    def test_get_eof_initial_zero(self):
+        p = create_provider("s3x", np.random.RandomState(0))
+        assert p.get_eof("anything") == 0
+        assert p.get_eof("other_key") == 0
+
+    def test_append_at_zero_offset_succeeds_and_advances_eof(self):
+        p = create_provider("s3x", np.random.RandomState(0))
+        result = exhaust_generator(p.append("log", 0, 128))
+        assert result.success is True
+        assert p.get_eof("log") == 128
+
+    def test_append_at_correct_new_offset_succeeds(self):
+        p = create_provider("s3x", np.random.RandomState(0))
+        exhaust_generator(p.append("log", 0, 100))
+        result = exhaust_generator(p.append("log", 100, 50))
+        assert result.success is True
+        assert p.get_eof("log") == 150
+
+    def test_stale_offset_fails(self):
+        """Second append at offset 0 (stale) fails; EOF unchanged."""
+        p = create_provider("s3x", np.random.RandomState(0))
+        exhaust_generator(p.append("log", 0, 100))
+        result = exhaust_generator(p.append("log", 0, 50))
+        assert result.success is False
+        assert p.get_eof("log") == 100  # unchanged
+
+    def test_wrong_offset_fails(self):
+        """Offset beyond current EOF also fails."""
+        p = create_provider("s3x", np.random.RandomState(0))
+        result = exhaust_generator(p.append("log", 50, 100))
+        assert result.success is False
+        assert p.get_eof("log") == 0
+
+    def test_eof_is_per_key(self):
+        p = create_provider("s3x", np.random.RandomState(0))
+        exhaust_generator(p.append("log_a", 0, 100))
+        exhaust_generator(p.append("log_b", 0, 200))
+        assert p.get_eof("log_a") == 100
+        assert p.get_eof("log_b") == 200
+
+    def test_instant_storage_respects_offset(self):
+        """InstantStorageProvider honors position-append too."""
+        p = InstantStorageProvider(rng=np.random.RandomState(0), latency_ms=1.0)
+        r1 = exhaust_generator(p.append("k", 0, 64))
+        r2 = exhaust_generator(p.append("k", 0, 64))  # stale
+        assert r1.success is True
+        assert r2.success is False
+        assert p.get_eof("k") == 64
+
+    def test_tail_append_always_advances_eof(self):
+        """tail_append is unconditional; EOF always advances."""
+        p = InstantStorageProvider(rng=np.random.RandomState(0), latency_ms=1.0)
+        exhaust_generator(p.tail_append("q", 50))
+        exhaust_generator(p.tail_append("q", 30))
+        assert p.get_eof("q") == 80
+
+
+# ---------------------------------------------------------------------------
+# Append failure latency distributions
+# ---------------------------------------------------------------------------
+
+class TestAppendFailureLatency:
+    """Failed appends sample from the failure distribution (dramatically
+    higher than success for Azure-family providers)."""
+
+    def test_azure_failure_latency_is_high(self):
+        """Azure's failure latency (~2072ms) is >10x success (~87ms).
+        Verify that forced failures sample from the high distribution."""
+        p = create_provider("azure", np.random.RandomState(0))
+        # Seed the EOF to force a stale-offset failure on every append
+        exhaust_generator(p.append("k", 0, 100))
+        failure_latencies = []
+        for _ in range(30):
+            # Always pass offset=0 → always fail
+            gen = p.append("k", 0, 100)
+            lat = next(gen)
+            try:
+                next(gen)
+            except StopIteration as e:
+                assert e.value.success is False
+            failure_latencies.append(lat)
+        median = sorted(failure_latencies)[len(failure_latencies) // 2]
+        # Failure median should be >1000ms (config is 2072ms)
+        assert median > 1000, f"Expected failure median >1000ms, got {median}"
+
+    def test_azure_success_latency_is_low(self):
+        """Success path samples from the low-latency distribution (~87ms)."""
+        p = create_provider("azure", np.random.RandomState(0))
+        success_latencies = []
+        offset = 0
+        for _ in range(30):
+            gen = p.append("k", offset, 100)
+            lat = next(gen)
+            try:
+                next(gen)
+            except StopIteration as e:
+                assert e.value.success is True
+            success_latencies.append(lat)
+            offset += 100
+        median = sorted(success_latencies)[len(success_latencies) // 2]
+        # Success median should be ~87ms, well under 500ms
+        assert median < 500, f"Expected success median <500ms, got {median}"
+
+    def test_s3x_failure_and_success_close(self):
+        """S3X failure (~23ms) and success (~21ms) are nearly identical —
+        verify both are drawn from the right (small-latency) distributions."""
+        p = create_provider("s3x", np.random.RandomState(0))
+        exhaust_generator(p.append("k", 0, 100))  # seed EOF
+        fail_latencies = []
+        for _ in range(30):
+            gen = p.append("k", 0, 100)
+            lat = next(gen)
+            try:
+                next(gen)
+            except StopIteration:
+                pass
+            fail_latencies.append(lat)
+        assert max(fail_latencies) < 100  # Both S3X distributions are small
+
+    def test_append_result_success_flag_reflects_physical_outcome(self):
+        """StorageResult.success field is True on physical success,
+        False on physical failure — not always True like before."""
+        p = create_provider("azure", np.random.RandomState(0))
+        r1 = exhaust_generator(p.append("k", 0, 50))
+        r2 = exhaust_generator(p.append("k", 0, 50))  # stale offset
+        assert r1.success is True
+        assert r2.success is False

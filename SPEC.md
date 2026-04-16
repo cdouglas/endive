@@ -1,7 +1,7 @@
 # Endive Simulator Specification
 
-**Version**: 3.3
-**Date**: 2026-04-14
+**Version**: 3.4
+**Date**: 2026-04-16
 
 ## Executive Summary
 
@@ -111,9 +111,15 @@ class StorageProvider(ABC):
     def name(self) -> str: ...
     @property
     def min_latency_ms(self) -> float: ...
+
+    # Read-only accessor for position-append catalogs to populate
+    # CatalogSnapshot.log_offset. EOF is tracked per key.
+    def get_eof(self, key: str) -> int: ...
 ```
 
 Unsupported operations raise `UnsupportedOperationError`.
+
+**Position-append semantics:** `StorageProvider` tracks per-key EOF (`self._eof: Dict[str, int]`). `append(key, offset, size)` compares the caller's offset against the key's current EOF; on match, samples the success latency and advances EOF; on mismatch, samples the failure latency and leaves EOF unchanged. The `StorageResult.success` field reflects the physical outcome. This pushes offset bookkeeping out of catalog implementations so any future caller (TailAppendCatalog, ML-append modes, TM-append) gets correct latency for free.
 
 ### 1.2 Latency Distributions
 
@@ -263,7 +269,7 @@ class CASCatalog(Catalog):
 
 **AppendCatalog**: Position-append + discovery read (two internal round-trips, four split-yield points). Uses per-partition version preconditions instead of a global seq check: disjoint-partition writes commute, so two concurrent writers to different partitions both succeed without retry. Table versions are incremented (not set to absolute values) to handle commutative writes from the same snapshot.
 
-The physical check enforces position-append semantics: `expected_log_offset == self._log_offset`. The logical check evaluates per-partition versions from `IntentionRecord.expected_partition_versions`. On physical success but logical failure, the record occupies the log slot (`_log_offset` advances) but writes are not applied. On physical failure, nothing is written and offset is unchanged.
+The physical check is owned by the Storage layer: `storage.append(key, offset, size)` compares the client's `expected_log_offset` against its tracked EOF and returns `StorageResult.success` accordingly (also sampling from the success or failure latency distribution). AppendCatalog reads the result and performs the logical check (per-partition versions from `IntentionRecord.expected_partition_versions`) only on physical success. `CatalogSnapshot.log_offset` is populated from `storage.get_eof("catalog_log")`.
 
 ```python
 class AppendCatalog(Catalog):
@@ -963,10 +969,10 @@ In AppendCatalog, the "no overlap" case does not produce a commit failure at all
 - This models the real cost: CAS returns only success/failure, not the current value
 
 ### 8.9 Information Asymmetry in Append Protocol
-- `Storage.append()` returns only physical success (offset matched)
-- Logical outcome (per-partition version preconditions) is evaluated server-side at the append half-RTT point
-- The discovery read models the I/O cost of learning the outcome but does not determine it (the simulator knows the outcome at eval time)
-- Physical check: `expected_log_offset == self._log_offset` (position-append concurrency control)
+- `Storage.append()` owns the physical check: it compares the client's expected offset against its tracked EOF and returns `StorageResult.success` accordingly. Failure samples from `append_failure_latency` (measured distributions: Azure 2072ms, AzureX 2534ms, S3X 23ms); success samples from `append_latency`.
+- Logical outcome (per-partition version preconditions) is evaluated server-side at the append half-RTT point by the Catalog, only on physical success.
+- The discovery read models the I/O cost of learning the outcome but does not determine it (the simulator knows the outcome at eval time).
+- Physical check: `offset == storage.get_eof(key)` (position-append concurrency control, owned by Storage)
 - Logical check: per-partition version match from `IntentionRecord.expected_partition_versions`
 - Disjoint-partition writes commute: two intentions writing different partitions both succeed
 - Table versions are incremented (not set) to handle commutative writes from the same snapshot

@@ -388,7 +388,8 @@ class AppendCatalog(Catalog):
             )
         self._storage = storage
         self._seq = 0
-        self._log_offset = 0
+        # Log offset is tracked by Storage (storage.get_eof("catalog_log"));
+        # AppendCatalog no longer duplicates that state.
         self._tables = [
             _MutableTable(i, partitions_per_table[i])
             for i in range(num_tables)
@@ -399,7 +400,7 @@ class AppendCatalog(Catalog):
             seq=self._seq,
             tables=tuple(t.to_metadata() for t in self._tables),
             timestamp_ms=timestamp_ms,
-            log_offset=self._log_offset,
+            log_offset=self._storage.get_eof("catalog_log"),
         )
 
     def _check_preconditions(self, intention: IntentionRecord) -> bool:
@@ -473,6 +474,11 @@ class AppendCatalog(Catalog):
         total_latency = 0.0
 
         # Step 1: Physical append (split-yield)
+        # Storage is the authority on position-append: it checks the
+        # client's expected_log_offset against its own EOF, samples the
+        # appropriate latency distribution (success vs failure), and
+        # advances its EOF on success. Catalog reads the outcome from
+        # StorageResult.success.
         append_gen = self._storage.append(
             key="catalog_log",
             offset=expected_log_offset,
@@ -484,20 +490,22 @@ class AppendCatalog(Catalog):
         # Half-RTT: request reaches server
         yield append_latency / 2.0
 
-        # Server-side evaluation at half-RTT:
-        # 1. Physical check: does expected offset match actual log EOF?
-        physical_ok = (expected_log_offset == self._log_offset)
+        # Drive the storage generator to completion to get its
+        # StorageResult (contains physical success/failure).
+        try:
+            next(append_gen)
+        except StopIteration as e:
+            storage_result = e.value
 
+        physical_ok = storage_result.success
         if physical_ok:
-            # 2. Logical check: per-partition version preconditions
+            # Logical check: per-partition version preconditions
             logical_ok = self._check_preconditions(intention)
             if logical_ok:
                 self._apply_writes(writes, partitions_written)
-            # Record occupies log slot regardless of logical outcome
-            self._log_offset += intention.size_bytes
             success = logical_ok
         else:
-            # Physical failure: nothing written, offset unchanged
+            # Physical failure: nothing written, EOF unchanged in Storage
             success = False
 
         # Response returns (remaining half-RTT)

@@ -26,6 +26,10 @@ sigma = 0.22
 median_ms = 21
 sigma = 0.25
 
+[append.failure]
+median_ms = 23
+sigma = 0.22
+
 # Unused data preserved for future use:
 # [cas.failure]
 # median_ms = 21

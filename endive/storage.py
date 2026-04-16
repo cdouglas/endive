@@ -184,6 +184,18 @@ class StorageProvider(ABC):
 
     def __init__(self, rng: np.random.RandomState):
         self._rng = rng
+        # Per-key end-of-file tracking for position-append semantics.
+        # Any key not present has implicit EOF=0.
+        self._eof: dict[str, int] = {}
+
+    def get_eof(self, key: str) -> int:
+        """Return the current end-of-file offset for a key.
+
+        Used by position-append catalogs to populate snapshots. Read-only
+        from the catalog's perspective; advanced only by successful
+        append() / tail_append() calls.
+        """
+        return self._eof.get(key, 0)
 
     # -- Abstract operations --
 
@@ -349,6 +361,7 @@ class S3ExpressStorageProvider(StorageProvider):
         write_latency: SizeBasedLatency,
         cas_latency: LatencyDistribution,
         append_latency: LatencyDistribution,
+        append_failure_latency: LatencyDistribution,
         min_latency: float = 10.0,
     ):
         super().__init__(rng)
@@ -356,6 +369,7 @@ class S3ExpressStorageProvider(StorageProvider):
         self._write_latency = write_latency
         self._cas_latency = cas_latency
         self._append_latency = append_latency
+        self._append_failure_latency = append_failure_latency
         self._min_latency = min_latency
 
     def read(self, key: str, expected_size_bytes: int) -> Generator[float, None, StorageResult]:
@@ -382,9 +396,16 @@ class S3ExpressStorageProvider(StorageProvider):
                              data_size_bytes=size_bytes)
 
     def append(self, key: str, offset: int, size_bytes: int) -> Generator[float, None, StorageResult]:
-        latency = self._append_latency.sample(self._rng)
+        # Position-append: success iff client's expected offset matches EOF.
+        current_eof = self._eof.get(key, 0)
+        physical_success = (offset == current_eof)
+        if physical_success:
+            latency = self._append_latency.sample(self._rng)
+            self._eof[key] = current_eof + size_bytes
+        else:
+            latency = self._append_failure_latency.sample(self._rng)
         yield latency
-        return StorageResult(success=True, latency_ms=latency,
+        return StorageResult(success=physical_success, latency_ms=latency,
                              data_size_bytes=size_bytes)
 
     def tail_append(self, key: str, size_bytes: int) -> Generator[float, None, StorageResult]:
@@ -428,6 +449,7 @@ class AzureBlobStorageProvider(StorageProvider):
         write_latency: SizeBasedLatency,
         cas_latency: LatencyDistribution,
         append_latency: LatencyDistribution,
+        append_failure_latency: LatencyDistribution,
         min_latency: float = 51.0,
         provider_name: str = "azure",
     ):
@@ -436,6 +458,7 @@ class AzureBlobStorageProvider(StorageProvider):
         self._write_latency = write_latency
         self._cas_latency = cas_latency
         self._append_latency = append_latency
+        self._append_failure_latency = append_failure_latency
         self._min_latency = min_latency
         self._name = provider_name
 
@@ -463,9 +486,17 @@ class AzureBlobStorageProvider(StorageProvider):
                              data_size_bytes=size_bytes)
 
     def append(self, key: str, offset: int, size_bytes: int) -> Generator[float, None, StorageResult]:
-        latency = self._append_latency.sample(self._rng)
+        # Position-append: success iff client's expected offset matches EOF.
+        # Azure failure latency is dramatically higher than success.
+        current_eof = self._eof.get(key, 0)
+        physical_success = (offset == current_eof)
+        if physical_success:
+            latency = self._append_latency.sample(self._rng)
+            self._eof[key] = current_eof + size_bytes
+        else:
+            latency = self._append_failure_latency.sample(self._rng)
         yield latency
-        return StorageResult(success=True, latency_ms=latency,
+        return StorageResult(success=physical_success, latency_ms=latency,
                              data_size_bytes=size_bytes)
 
     def tail_append(self, key: str, size_bytes: int) -> Generator[float, None, StorageResult]:
@@ -597,10 +628,20 @@ class InstantStorageProvider(StorageProvider):
         return self._make_result(size_bytes)
 
     def append(self, key: str, offset: int, size_bytes: int) -> Generator[float, None, StorageResult]:
+        # Position-append: success iff client's offset matches current EOF.
+        # Instant uses a single latency for both success and failure.
+        current_eof = self._eof.get(key, 0)
+        physical_success = (offset == current_eof)
+        if physical_success:
+            self._eof[key] = current_eof + size_bytes
         yield self._latency
-        return self._make_result(size_bytes)
+        return StorageResult(success=physical_success, latency_ms=self._latency,
+                             data_size_bytes=size_bytes)
 
     def tail_append(self, key: str, size_bytes: int) -> Generator[float, None, StorageResult]:
+        # Tail-append: server assigns offset, always succeeds, EOF advances.
+        current_eof = self._eof.get(key, 0)
+        self._eof[key] = current_eof + size_bytes
         yield self._latency
         return self._make_result(size_bytes)
 
@@ -652,6 +693,17 @@ def _build_size_latency(profile: dict, section_name: str = "write",
     )
 
 
+def _build_append_failure_latency(profile: dict,
+                                  min_latency: float = 1.0) -> LognormalLatency:
+    """Build an append-failure LognormalLatency from [append.failure]."""
+    section = profile["append"]["failure"]
+    return LognormalLatency.from_median(
+        median_ms=section["median_ms"],
+        sigma=section["sigma"],
+        min_latency_ms=min_latency,
+    )
+
+
 def create_provider(provider_name: str,
                     rng: np.random.RandomState | None = None) -> StorageProvider:
     """Factory function to create a StorageProvider from a provider name.
@@ -694,6 +746,7 @@ def create_provider(provider_name: str,
             write_latency=write_latency,
             cas_latency=_build_lognormal(profile, "cas", min_latency=min_lat),
             append_latency=_build_lognormal(profile, "append", min_latency=min_lat),
+            append_failure_latency=_build_append_failure_latency(profile, min_latency=min_lat),
             min_latency=min_lat,
         )
 
@@ -704,6 +757,7 @@ def create_provider(provider_name: str,
             write_latency=write_latency,
             cas_latency=_build_lognormal(profile, "cas", min_latency=min_lat),
             append_latency=_build_lognormal(profile, "append", min_latency=min_lat),
+            append_failure_latency=_build_append_failure_latency(profile, min_latency=min_lat),
             min_latency=min_lat,
             provider_name=resolved_name,
         )
