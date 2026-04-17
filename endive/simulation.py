@@ -352,6 +352,7 @@ class Simulation:
         self._start_wall = time.time()
         env = _CountingEnvironment()
         self._env = env
+        self._config.catalog.setup(env)
         env.process(self._run_workload(env))
         if self._progress_path:
             env.process(self._progress_reporter(env))

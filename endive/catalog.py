@@ -177,6 +177,14 @@ class Catalog(ABC):
     - Snapshots are immutable
     """
 
+    def setup(self, env) -> None:
+        """Register background processes with SimPy environment.
+
+        Called by Simulation before run(). Default: no-op. Only
+        TailAppendCatalog overrides this to start its compactor.
+        """
+        pass
+
     @abstractmethod
     def read(self, timestamp_ms: float = 0.0) -> Generator[float, None, CatalogSnapshot]:
         """Read current catalog state.
@@ -529,6 +537,265 @@ class AppendCatalog(Catalog):
             success=success,
             latency_ms=total_latency,
         )
+
+    @property
+    def seq(self) -> int:
+        return self._seq
+
+
+# ---------------------------------------------------------------------------
+# TailAppendCatalog
+# ---------------------------------------------------------------------------
+
+class TailAppendCatalog(Catalog):
+    """Queue-based catalog: FIFO-queue ingest + snapshot compaction.
+
+    Writers insert intentions via storage.tail_append() (always succeeds
+    physically — no offset contention). A compaction step drains the queue,
+    applies intentions whose per-partition preconditions hold, and CAS's a
+    new snapshot.
+
+    Two compaction policies:
+    - "sync": each writer drains the queue and CAS's inline as part of
+      its own commit(). CAS contention serializes concurrent writers.
+    - "batched": a background compactor runs every compact_interval_ms
+      (or when compact_after_n intentions are queued). Writers wait for
+      their batch to be processed.
+
+    In both modes, disjoint-partition intentions commute: the compactor
+    applies them in queue order, and non-conflicting writes all succeed.
+    """
+
+    def __init__(
+        self,
+        storage: StorageProvider,
+        num_tables: int,
+        partitions_per_table: Tuple[int, ...],
+        *,
+        compaction_policy: str = "sync",
+        compact_after_n: int = 10,
+        compact_interval_ms: float = 100.0,
+        compaction_read_latency_ms: float = 5.0,
+    ):
+        if not storage.supports_tail_append:
+            raise ValueError("TailAppendCatalog requires storage with tail_append support")
+        if len(partitions_per_table) != num_tables:
+            raise ValueError(
+                f"partitions_per_table length ({len(partitions_per_table)}) "
+                f"!= num_tables ({num_tables})"
+            )
+        if compaction_policy not in ("sync", "batched"):
+            raise ValueError(f"compaction_policy must be 'sync' or 'batched', got {compaction_policy!r}")
+        self._storage = storage
+        self._seq = 0
+        self._cas_version = 0
+        self._tables = [
+            _MutableTable(i, partitions_per_table[i])
+            for i in range(num_tables)
+        ]
+        self._compaction_policy = compaction_policy
+        self._compact_after_n = compact_after_n
+        self._compact_interval_ms = compact_interval_ms
+        self._compaction_read_latency_ms = compaction_read_latency_ms
+
+        # Queue of pending intentions (ordered by tail_append arrival)
+        self._queue: list = []  # list of (IntentionRecord, int)
+        self._queue_counter: int = 0
+        # Outcomes from the last compaction cycle (txn_id -> bool)
+        self._outcomes: dict = {}
+
+    def setup(self, env) -> None:
+        """Start background compactor for batched policy."""
+        if self._compaction_policy == "batched":
+            env.process(self._compactor_loop(env))
+
+    def _compactor_loop(self, env):
+        """Background compactor for batched policy."""
+        while True:
+            yield env.timeout(self._compact_interval_ms)
+            if not self._queue:
+                continue
+            batch = self._queue
+            self._queue = []
+            # CAS latency for writing snapshot
+            cas_gen = self._storage.cas(
+                key="catalog_snapshot",
+                expected_version=self._cas_version,
+                size_bytes=100,
+            )
+            cas_latency = next(cas_gen)
+            yield env.timeout(cas_latency)
+            # Apply intentions in queue order
+            for intention, queue_seq in batch:
+                if self._check_preconditions(intention):
+                    self._apply_writes_from_intention(intention)
+                    self._outcomes[queue_seq] = True
+                else:
+                    self._outcomes[queue_seq] = False
+            self._cas_version += 1
+
+    def _create_snapshot(self, timestamp_ms: float = 0.0) -> CatalogSnapshot:
+        return CatalogSnapshot(
+            seq=self._seq,
+            tables=tuple(t.to_metadata() for t in self._tables),
+            timestamp_ms=timestamp_ms,
+        )
+
+    def _check_preconditions(self, intention: IntentionRecord) -> bool:
+        if intention.expected_partition_versions is None:
+            return True
+        for table_id, pvs in intention.expected_partition_versions.items():
+            for pid, expected_ver in pvs.items():
+                if self._tables[table_id].partition_versions[pid] != expected_ver:
+                    return False
+        return True
+
+    def _apply_writes_from_intention(self, intention: IntentionRecord) -> None:
+        for table_id in intention.tables_written:
+            self._tables[table_id].version += 1
+        if intention.partitions_written:
+            for table_id, pids in intention.partitions_written.items():
+                if isinstance(pids, (tuple, list, frozenset, set)):
+                    for pid in pids:
+                        self._tables[table_id].partition_versions[pid] += 1
+        self._seq += 1
+
+    def read(self, timestamp_ms: float = 0.0) -> Generator[float, None, CatalogSnapshot]:
+        read_gen = self._storage.read(
+            key="catalog_snapshot",
+            expected_size_bytes=100,
+        )
+        latency = next(read_gen)
+        yield latency / 2.0
+        snapshot = self._create_snapshot(timestamp_ms)
+        yield latency - latency / 2.0
+        return snapshot
+
+    def commit(
+        self,
+        expected_seq: int,
+        writes: Dict[int, int],
+        timestamp_ms: float = 0.0,
+        intention: Optional[IntentionRecord] = None,
+        partitions_written: Optional[Dict[int, FrozenSet[int]]] = None,
+        expected_log_offset: int = 0,
+    ) -> Generator[float, None, CommitResult]:
+        if intention is None:
+            intention = IntentionRecord(
+                txn_id=-1,
+                expected_seq=expected_seq,
+                tables_written=writes,
+            )
+
+        if self._compaction_policy == "sync":
+            return (yield from self._commit_sync(intention, timestamp_ms))
+        else:
+            return (yield from self._commit_batched(intention, timestamp_ms))
+
+    def _commit_sync(
+        self,
+        intention: IntentionRecord,
+        timestamp_ms: float,
+    ) -> Generator[float, None, CommitResult]:
+        """Sync policy: writer drains queue and CAS's inline."""
+        total_latency = 0.0
+
+        # Step 1: tail_append intention to queue
+        append_gen = self._storage.tail_append(
+            key="catalog_queue",
+            size_bytes=intention.size_bytes,
+        )
+        append_latency = next(append_gen)
+        total_latency += append_latency
+        yield append_latency / 2.0
+        queue_seq = self._queue_counter
+        self._queue_counter += 1
+        self._queue.append((intention, queue_seq))
+        try:
+            next(append_gen)
+        except StopIteration:
+            pass
+        yield append_latency - append_latency / 2.0
+
+        # Step 2: read queue (ReceiveMessage latency)
+        read_latency = self._compaction_read_latency_ms
+        total_latency += read_latency
+        yield read_latency / 2.0
+        # Drain queue at half-RTT
+        batch = self._queue
+        self._queue = []
+        yield read_latency - read_latency / 2.0
+
+        # Step 3: apply valid intentions in queue order
+        my_success = False
+        for int_, seq in batch:
+            if self._check_preconditions(int_):
+                self._apply_writes_from_intention(int_)
+                if seq == queue_seq:
+                    my_success = True
+            else:
+                if seq == queue_seq:
+                    my_success = False
+
+        # Step 4: CAS snapshot
+        cas_gen = self._storage.cas(
+            key="catalog_snapshot",
+            expected_version=self._cas_version,
+            size_bytes=100,
+        )
+        cas_latency = next(cas_gen)
+        total_latency += cas_latency
+        yield cas_latency / 2.0
+        self._cas_version += 1
+        yield cas_latency - cas_latency / 2.0
+
+        return CommitResult(success=my_success, latency_ms=total_latency)
+
+    def _commit_batched(
+        self,
+        intention: IntentionRecord,
+        timestamp_ms: float,
+    ) -> Generator[float, None, CommitResult]:
+        """Batched policy: writer appends, then waits for background compactor."""
+        total_latency = 0.0
+
+        # Step 1: tail_append intention to queue
+        append_gen = self._storage.tail_append(
+            key="catalog_queue",
+            size_bytes=intention.size_bytes,
+        )
+        append_latency = next(append_gen)
+        total_latency += append_latency
+        yield append_latency / 2.0
+        queue_seq = self._queue_counter
+        self._queue_counter += 1
+        self._queue.append((intention, queue_seq))
+        try:
+            next(append_gen)
+        except StopIteration:
+            pass
+        yield append_latency - append_latency / 2.0
+
+        # Step 2: wait for next compaction cycle to process my intention
+        my_finish_time = timestamp_ms + append_latency
+        interval = self._compact_interval_ms
+        # Sample CAS latency for the compactor's upcoming cycle
+        cas_gen = self._storage.cas(
+            key="catalog_snapshot",
+            expected_version=self._cas_version,
+            size_bytes=100,
+        )
+        est_cas_latency = next(cas_gen)
+        # Next compactor tick strictly after my finish
+        next_tick = (int(my_finish_time // interval) + 1) * interval
+        cycle_end = next_tick + est_cas_latency + 0.001  # epsilon
+        wait = cycle_end - my_finish_time
+        total_latency += wait
+        yield wait
+
+        # Step 3: read outcome (compactor has populated it by now)
+        success = self._outcomes.pop(queue_seq, False)
+        return CommitResult(success=success, latency_ms=total_latency)
 
     @property
     def seq(self) -> int:

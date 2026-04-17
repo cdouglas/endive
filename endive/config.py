@@ -21,7 +21,7 @@ from typing import Tuple
 import numpy as np
 import tomllib
 
-from endive.catalog import AppendCatalog, CASCatalog, InstantCatalog
+from endive.catalog import AppendCatalog, CASCatalog, InstantCatalog, TailAppendCatalog
 from endive.conflict_detector import (
     PartitionOverlapConflictDetector,
     ProbabilisticConflictDetector,
@@ -242,6 +242,24 @@ def _build_catalog(
             storage=storage,
             num_tables=num_tables,
             partitions_per_table=partitions_per_table,
+        )
+
+    # Queue-based catalog with tail_append + periodic/sync compaction
+    if mode == "tail_append":
+        if not storage.supports_tail_append:
+            raise ValueError(
+                f"catalog.mode='tail_append' requires a storage provider with "
+                f"tail_append support (provider '{storage.name}' does not)"
+            )
+        queue_cfg = catalog_cfg.get("queue", {})
+        return TailAppendCatalog(
+            storage=storage,
+            num_tables=num_tables,
+            partitions_per_table=partitions_per_table,
+            compaction_policy=queue_cfg.get("compaction_policy", "sync"),
+            compact_after_n=queue_cfg.get("compact_after_n", 10),
+            compact_interval_ms=queue_cfg.get("compact_interval_ms", 100.0),
+            compaction_read_latency_ms=queue_cfg.get("compaction_read_latency_ms", 5.0),
         )
 
     # Default: CASCatalog with storage provider

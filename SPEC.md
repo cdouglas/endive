@@ -1,6 +1,6 @@
 # Endive Simulator Specification
 
-**Version**: 3.4
+**Version**: 3.5
 **Date**: 2026-04-16
 
 ## Executive Summary
@@ -285,6 +285,23 @@ class InstantCatalog(Catalog):
                  latency_ms: float = 1.0): ...
 ```
 
+**TailAppendCatalog**: Queue-based catalog decoupling append throughput from CAS throughput. Writers insert intentions via `storage.tail_append()` (unconditional, always succeeds). A compactor applies valid intentions (per-partition preconditions) and CAS's a snapshot.
+
+Two compaction policies:
+- **sync**: each writer drains the queue and CAS's inline. CAS contention serializes concurrent writers. Latency = append + queue-read + CAS.
+- **batched**: a background compactor runs every `compact_interval_ms`. Writers wait for the next compaction cycle. Throughput = batch_size / CAS_latency.
+
+```python
+class TailAppendCatalog(Catalog):
+    def __init__(self, storage: StorageProvider, num_tables: int,
+                 partitions_per_table: Tuple[int, ...], *,
+                 compaction_policy: str = "sync",
+                 compact_after_n: int = 10,
+                 compact_interval_ms: float = 100.0,
+                 compaction_read_latency_ms: float = 5.0): ...
+    def setup(self, env) -> None: ...  # Starts background compactor for batched policy
+```
+
 ### 2.4 Commit Protocols
 
 From the Transaction's perspective, the commit protocol is uniform: call `catalog.commit()` and receive a `CommitResult`.
@@ -325,6 +342,36 @@ Catalog                                 Storage
     ├── yield read_latency/2 ──────────▶│  (2. discovery half-RTT)
     ├── yield read_latency/2 ◀──────────│  (2. discovery return)
     │  [4 yields total, hidden from Transaction]
+```
+
+**Queue-based, sync policy** (internal):
+```
+Catalog                                 Storage
+    ├── yield tail_append_latency/2 ───▶│  (1. queue insert, always succeeds)
+    │   [record intention in queue]     │
+    ├── yield tail_append_latency/2 ◀──│  (1. insert return)
+    ├── yield queue_read_latency/2 ────▶│  (2. ReceiveMessage: drain queue)
+    ├── yield queue_read_latency/2 ◀───│  (2. drain complete)
+    │   [apply valid intentions]        │
+    ├── yield cas_latency/2 ───────────▶│  (3. CAS snapshot to S3)
+    │   [bump cas_version]              │
+    ├── yield cas_latency/2 ◀──────────│  (3. CAS complete)
+    │  [6 yields total]
+```
+
+**Queue-based, batched policy** (internal):
+```
+Writer                           Catalog                         Storage
+  ├── tail_append ──────────────▶│ record in queue              │
+  │                               │                              │
+  ├── yield wait_for_compaction  │                              │
+  │                               │ [background compactor runs]  │
+  │                               ├── drain queue ──────────────▶│
+  │                               ├── yield cas_latency ────────▶│
+  │                               │ [apply valid intentions]     │
+  │                               │ [record outcomes]            │
+  │                               │                              │
+  ◀── read outcome ──────────────│                              │
 ```
 
 ---
@@ -855,7 +902,7 @@ provider = "s3x"                       # s3, s3x, azure, azurex, gcp, instant
 [catalog]
 num_tables = 1
 num_groups = 1
-mode = "cas"                           # "cas" (default) or "append"
+mode = "cas"                           # "cas" (default), "append", or "tail_append"
 table_metadata_inlined = false         # See §3.10 (CAS only)
 # Inlined-only knobs (exp6):
 # initial_partition_size_bytes = 16000
@@ -887,6 +934,12 @@ partitions_per_txn = 1                 # How many partitions each txn writes
 # read_partitions_per_txn = 3          # Independent read-set size for VO
 # read_selection.distribution = "zipf" # Can differ from write distribution
 # read_selection.zipf_alpha = 1.5
+
+[catalog.queue]                        # TailAppendCatalog only
+# compaction_policy = "sync"           # "sync" or "batched"
+# compact_after_n = 10                 # batched: trigger after N inserts
+# compact_interval_ms = 100            # batched: fallback timer interval
+# compaction_read_latency_ms = 5       # ReceiveMessage latency
 ```
 
 Experiment configs may also include a `[plots]` section consumed by `scripts/regenerate_plots.py`; it is ignored by the simulator.

@@ -35,6 +35,7 @@ from endive.catalog import (
     CASCatalog,
     AppendCatalog,
     InstantCatalog,
+    TailAppendCatalog,
 )
 
 
@@ -1198,3 +1199,186 @@ class TestCatalogSizeGrowth:
         assert cat.catalog_size_bytes == 0
         exhaust(cat.commit(expected_seq=0, writes={0: 1}))
         assert cat.catalog_size_bytes == 0
+
+
+# ---------------------------------------------------------------------------
+# TailAppendCatalog
+# ---------------------------------------------------------------------------
+
+class TestTailAppendCatalog:
+
+    def test_requires_tail_append_support(self):
+        """TailAppendCatalog rejects storage without tail_append support."""
+        rng = np.random.RandomState(42)
+        s3x = create_provider("s3x", rng)  # S3X: supports_tail_append = False
+        with pytest.raises(ValueError, match="tail_append"):
+            TailAppendCatalog(s3x, 1, (1,))
+
+    def test_sync_single_commit_succeeds(self):
+        """Sync policy: single writer commits successfully."""
+        storage = make_instant_storage()
+        cat = TailAppendCatalog(storage, 1, (4,), compaction_policy="sync")
+        result = exhaust(cat.commit(
+            expected_seq=0, writes={0: 1},
+            partitions_written={0: frozenset({0})},
+            intention=IntentionRecord(
+                txn_id=1, expected_seq=0, tables_written={0: 1},
+                partitions_written={0: (0,)},
+                expected_partition_versions={0: {0: 0}},
+            ),
+        ))
+        assert result.success is True
+        assert cat.seq == 1
+
+    def test_sync_seq_increments(self):
+        """Sequential commits via sync drain-and-CAS."""
+        storage = make_instant_storage()
+        cat = TailAppendCatalog(storage, 1, (2,), compaction_policy="sync")
+        for i in range(5):
+            result = exhaust(cat.commit(
+                expected_seq=i, writes={0: i + 1},
+                partitions_written={0: frozenset({0})},
+                intention=IntentionRecord(
+                    txn_id=i + 1, expected_seq=i, tables_written={0: i + 1},
+                    partitions_written={0: (0,)},
+                    expected_partition_versions={0: {0: i}},
+                ),
+            ))
+            assert result.success is True
+        assert cat.seq == 5
+
+    def test_sync_disjoint_partitions_both_succeed(self):
+        """Sync: T1 writes {0}, T2 writes {1}. T1 drains queue with both
+        intentions queued. Both succeed because partitions are disjoint."""
+        storage = make_instant_storage()
+        cat = TailAppendCatalog(storage, 1, (4,), compaction_policy="sync")
+
+        # Queue T1's intention directly (simulating concurrent append)
+        cat._queue.append((IntentionRecord(
+            txn_id=1, expected_seq=0, tables_written={0: 1},
+            partitions_written={0: (0,)},
+            expected_partition_versions={0: {0: 0}},
+        ), 0))
+        cat._queue_counter = 1
+
+        # T2 commits — will drain queue and process both
+        result = exhaust(cat.commit(
+            expected_seq=0, writes={0: 2},
+            partitions_written={0: frozenset({1})},
+            intention=IntentionRecord(
+                txn_id=2, expected_seq=0, tables_written={0: 2},
+                partitions_written={0: (1,)},
+                expected_partition_versions={0: {1: 0}},
+            ),
+        ))
+        assert result.success is True
+        assert cat.seq == 2  # Both intentions applied
+        snap = exhaust(cat.read())
+        assert snap.get_partition_version(0, 0) == 1  # T1's write
+        assert snap.get_partition_version(0, 1) == 1  # T2's write
+
+    def test_sync_overlapping_fails_second(self):
+        """Sync: two intentions to same partition. First succeeds (queue order),
+        second fails because partition version advanced."""
+        storage = make_instant_storage()
+        cat = TailAppendCatalog(storage, 1, (4,), compaction_policy="sync")
+
+        # Queue T1 first
+        cat._queue.append((IntentionRecord(
+            txn_id=1, expected_seq=0, tables_written={0: 1},
+            partitions_written={0: (0,)},
+            expected_partition_versions={0: {0: 0}},
+        ), 0))
+        cat._queue_counter = 1
+
+        # T2 writes same partition {0} — will be second in queue order
+        result = exhaust(cat.commit(
+            expected_seq=0, writes={0: 2},
+            partitions_written={0: frozenset({0})},
+            intention=IntentionRecord(
+                txn_id=2, expected_seq=0, tables_written={0: 2},
+                partitions_written={0: (0,)},
+                expected_partition_versions={0: {0: 0}},
+            ),
+        ))
+        # T2 fails because T1 advanced partition 0 to version 1
+        assert result.success is False
+        assert cat.seq == 1  # Only T1 applied
+
+    def test_sync_commit_latency(self):
+        """Sync latency = append + read + CAS."""
+        lat = 5.0
+        storage = InstantStorageProvider(rng=np.random.RandomState(42), latency_ms=lat)
+        cat = TailAppendCatalog(storage, 1, (1,), compaction_policy="sync",
+                                compaction_read_latency_ms=lat)
+        result = exhaust(cat.commit(expected_seq=0, writes={0: 1}))
+        # append (5ms) + read (5ms) + CAS (5ms) = 15ms
+        assert result.latency_ms == lat * 3
+
+    def test_batched_single_commit(self):
+        """Batched policy: writer waits for compaction cycle."""
+        import simpy
+        storage = InstantStorageProvider(rng=np.random.RandomState(42), latency_ms=1.0)
+        cat = TailAppendCatalog(storage, 1, (4,), compaction_policy="batched",
+                                compact_interval_ms=50.0)
+        env = simpy.Environment()
+        cat.setup(env)
+
+        results = []
+        def writer(env):
+            gen = cat.commit(
+                expected_seq=0, writes={0: 1},
+                partitions_written={0: frozenset({0})},
+                timestamp_ms=env.now,
+                intention=IntentionRecord(
+                    txn_id=1, expected_seq=0, tables_written={0: 1},
+                    partitions_written={0: (0,)},
+                    expected_partition_versions={0: {0: 0}},
+                ),
+            )
+            latency = next(gen)
+            while True:
+                yield env.timeout(latency)
+                try:
+                    latency = gen.send(None)
+                except StopIteration as e:
+                    results.append(e.value)
+                    break
+
+        env.process(writer(env))
+        env.run(until=200)
+
+        assert len(results) == 1
+        assert results[0].success is True
+        assert cat.seq == 1
+
+    def test_batched_latency_includes_compaction_wait(self):
+        """Batched: commit latency > append latency (includes wait for cycle)."""
+        import simpy
+        lat = 1.0
+        storage = InstantStorageProvider(rng=np.random.RandomState(42), latency_ms=lat)
+        cat = TailAppendCatalog(storage, 1, (1,), compaction_policy="batched",
+                                compact_interval_ms=50.0)
+        env = simpy.Environment()
+        cat.setup(env)
+
+        results = []
+        def writer(env):
+            gen = cat.commit(
+                expected_seq=0, writes={0: 1}, timestamp_ms=env.now,
+            )
+            latency = next(gen)
+            while True:
+                yield env.timeout(latency)
+                try:
+                    latency = gen.send(None)
+                except StopIteration as e:
+                    results.append(e.value)
+                    break
+
+        env.process(writer(env))
+        env.run(until=200)
+
+        assert len(results) == 1
+        # Latency should be much more than just append (1ms) — includes wait for cycle
+        assert results[0].latency_ms > 40  # at least interval/2 on average
