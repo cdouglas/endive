@@ -21,6 +21,8 @@ from pathlib import Path
 
 EXPERIMENTS_DIR = Path("experiments")
 STATE_FILE = EXPERIMENTS_DIR / ".runner_state.json"
+SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+BAR_WIDTH = 30
 
 
 def load_runner_state() -> dict | None:
@@ -50,7 +52,7 @@ def find_progress_files() -> list[dict]:
     return progress
 
 
-def print_progress(clear: bool = False):
+def print_progress(clear: bool = False, spin_char: str = " "):
     """Print aggregate progress summary.
 
     In `clear` mode, builds the full frame into a buffer and emits it in
@@ -60,7 +62,7 @@ def print_progress(clear: bool = False):
     """
     buf = io.StringIO()
     with redirect_stdout(buf):
-        _render_progress()
+        _render_progress(spin_char=spin_char)
     frame = buf.getvalue()
 
     if clear:
@@ -70,13 +72,13 @@ def print_progress(clear: bool = False):
     sys.stdout.flush()
 
 
-def _render_progress():
+def _render_progress(spin_char: str = " "):
     """Render the progress view to the current stdout."""
     state = load_runner_state()
     progress_files = find_progress_files()
 
     print(f"{'=' * 60}")
-    print(f"  EXPERIMENT PROGRESS")
+    print(f" {spin_char} EXPERIMENT PROGRESS")
     print(f"{'=' * 60}")
 
     if state:
@@ -93,6 +95,11 @@ def _render_progress():
         print(f"  Failed:      {failed}")
         print(f"  In progress: {in_progress}")
         print(f"  Remaining:   {remaining}")
+
+        # Progress bar
+        filled = int(BAR_WIDTH * pct / 100) if total > 0 else 0
+        bar = "█" * filled + "░" * (BAR_WIDTH - filled)
+        print(f"\n  [{bar}] {pct:.1f}%")
     else:
         print("  No runner state found.")
         print("  Start experiments with: python scripts/run_all_experiments.py")
@@ -168,12 +175,23 @@ def main():
     args = parser.parse_args()
 
     if args.watch:
+        sys.stdout.write("\033[2J\033[H")  # clear screen on init
+        sys.stdout.flush()
+        spin_idx = 0
+        sub_tick = 0.5  # spinner update interval (seconds)
         try:
             while True:
-                print_progress(clear=True)
-                time.sleep(args.interval)
+                print_progress(clear=True, spin_char=SPINNER[spin_idx])
+                # Sleep in sub-ticks, updating spinner between full refreshes
+                ticks = int(args.interval / sub_tick)
+                for _ in range(ticks):
+                    time.sleep(sub_tick)
+                    spin_idx = (spin_idx + 1) % len(SPINNER)
+                    # Update just the spinner character in-place (row 2, col 2)
+                    sys.stdout.write(f"\033[2;2H{SPINNER[spin_idx]}")
+                    sys.stdout.flush()
         except KeyboardInterrupt:
-            print("\nStopped.")
+            print("\033[J\nStopped.")  # clear remainder + newline
     else:
         print_progress()
 
