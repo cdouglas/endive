@@ -1,17 +1,19 @@
 # Blog Update Report — exp4 Post-Fix Results
 
-Written 2026-04-16, companion to `EXP1-3_REPORT.md`. Covers exp4a (FA-only
-multi-table), exp4a_zipf, exp4b (90/10 mix multi-table), exp4b_zipf. **Exp4c
-(real-provider sweep) is still pending a re-run** — see §9.
+Written 2026-04-16 (exp4a/b), updated 2026-04-17 (exp4c). Companion to
+`EXP1-3_REPORT.md`. Covers exp4a (FA-only multi-table), exp4a_zipf,
+exp4b (90/10 mix multi-table), exp4b_zipf, and exp4c (real-provider
+sweep across S3, S3 Express, Azure, Azure Premium, GCS).
 
 ## 1. Validation
 
 | Check | Result |
 |---|---|
-| Templates `experiment_configs/exp4{a,b}_*.toml` | `table_metadata_inlined = false` ✓ |
-| Stored `cfg.toml` across all 960 exp4a/b dirs | `table_metadata_inlined = false` ✓ |
-| Sweep coverage | 4×240 configs, 4×1200 seeds — all present, none crashed |
-| `expctl list` | `stale (code)` — from `1be49a1` (AppendCatalog rewrite), not reachable from CAS catalog path used by exp4 |
+| Templates `experiment_configs/exp4{a,b,c}_*.toml` | `table_metadata_inlined = false` ✓ |
+| Stored `cfg.toml` across all 1860 exp4a/b/c dirs | `table_metadata_inlined = false` ✓ |
+| Sweep coverage — exp4a/b | 4×240 configs, 4×1200 seeds — all present |
+| Sweep coverage — exp4c | 900 configs, 4499/4500 seeds — 1 seed crashed at 96.7 % (S3x, 1 tbl, 20 ms IA, 50/50 mix — the heaviest possible config; ran 7.5 h). 5-seed aggregation unaffected. |
+| `expctl list` | `stale (code)` — from `1be49a1` (AppendCatalog rewrite), not reachable from CAS catalog path |
 
 This report contrasts `experiments/` (2026-04-15/16 runs, post-fix) against
 `experiments-bak/` (pre-publication runs the 2026-03-23 blog was built on).
@@ -200,51 +202,187 @@ Same issue as the 2026-03-09 post: remove any mention of "up to 4 I/O
 operations in parallel." The simulator is serial. `max_parallel=4` has
 been deleted from every config.
 
-## 9. Exp4c is still pending
+## 9. Exp4c — real-provider sweep (the centerpiece)
 
-The 2026-03-23 post's **per-provider comparison tables** and the
-`exp4c_*` heatmaps (Azure / Azure Premium / S3 / S3 Express / GCP) are
-the core empirical result of the blog. They are still driven by the
-pre-fix inlined-mode simulator and **must be regenerated before any
-correction is published**.
+Exp4c sweeps 5 providers × 6 table counts × 3 FA/VO mixes × 10 arrival
+rates = 900 configs. All on `backend="storage"` (CAS through each
+provider's own conditional write). 4499/4500 seeds complete.
 
-The re-run command once the other fixes are committed:
+### 9.1 Workload knee table (>95 % success threshold)
 
-```bash
-.venv/bin/python scripts/run_all_experiments.py \
-    --groups providers --seeds 5 \
-    > experiment_logs/run_$(date +%Y%m%d_%H%M%S).log 2>&1 &
-```
+This table is the blog post's main empirical result. Comparing
+`plots/exp4c_tables_providers/workload_knee/workload_knee_table.md`
+(new) vs. `plots_bak_new/exp4c_tables_providers/workload_knee/` (bak):
 
-Estimated runtime: ~5 hours at 72-parallel based on the 4a/4b timing.
+#### Single table (the headline row)
 
-**Do not publish a partial correction** that updates exp4a/4b but
-leaves exp4c stale — it would create exactly the kind of inconsistent
-picture (per-provider numbers from the old model vs. multi-table
-numbers from the new) that the single-correction rule (`EXP1-4_UPDATE.md §5`)
-was meant to prevent.
+| Provider | BAK FA-only | **NEW FA-only** | BAK 90/10 | **NEW 90/10** |
+|---|---:|---:|---:|---:|
+| S3 Express  | 14.6 c/s | **14.6 c/s** | 7.5 c/s | **7.4 c/s** |
+| S3 Standard | 2.4 c/s  | **1.8 c/s**  | 1.8 c/s | **1.8 c/s** |
+| Azure Prem  | 2.5 c/s  | **2.4 c/s**  | 1.9 c/s | **1.8 c/s** |
+| Azure Std   | 2.4 c/s  | **1.8 c/s**  | 1.5 c/s | **1.5 c/s** |
+| GCP         | 0.7 c/s  | **0.4 c/s**  | 0.4 c/s | **0.4 c/s** |
 
-## 10. Directional summary for the editor
+S3 Express is unchanged — its per-op latency is low enough (~10 ms)
+that the additional TM pair barely dents the per-table bound. For S3
+Standard, the per-attempt cost roughly doubles (3 → 5 ops) and the
+FA-only knee drops proportionally from 2.4 → 1.8 c/s. GCP is hit
+hardest in relative terms (0.7 → 0.4 c/s FA-only).
+
+The **90/10 mix** knees are largely unchanged across all providers
+because VO was already the binding constraint and VO cost is dominated
+by the convoy, not the per-attempt cost.
+
+#### Multi-table scaling (the structural change)
+
+| Provider | Tables | BAK FA-only | **NEW FA-only** | Change |
+|---|---:|---:|---:|---|
+| S3 Standard | 5  | 7.2 c/s | **3.7 c/s** | **−49 %** |
+| S3 Standard | 10 | 7.4 c/s | **3.7 c/s** | −50 % |
+| S3 Standard | 20 | 7.4 c/s | **3.7 c/s** | −50 % |
+| S3 Standard | 50 | 7.4 c/s | **7.2 c/s** | −3 % (catalog-bound) |
+| Azure Prem  | 5  | 7.2 c/s | **3.7 c/s** | −49 % |
+| Azure Prem  | 10 | 7.4 c/s | **3.7 c/s** | −50 % |
+| Azure Prem  | 50 | 7.4 c/s | **3.7 c/s** | −50 % |
+| GCP         | 5  | 1.8 c/s | **0.7 c/s** | −61 % |
+| GCP         | 10 | 2.4 c/s | **0.7 c/s** | −71 % |
+| GCP         | 50 | 3.6 c/s | **0.7 c/s** | −81 % |
+| S3 Express  | 50 | 14.9 c/s| **36.0 c/s** | **+142 %** |
+
+The **biggest structural change**: for S3 Standard at 5–20 tables,
+the FA-only knee was 7.2–7.4 c/s (catalog-CAS-bound); now it's
+**3.7 c/s** (per-table-bound). The per-table ceiling dropped from
+1/(3L) ≈ 11.4 c/s (old inlined model) to 1/(5L) ≈ 5.7 c/s
+(non-inlined). When the per-table bound tightens, it binds before
+the catalog CAS does, flattening the multi-table scaling curve.
+
+Only at **50 tables** does the catalog CAS again become the bottleneck
+(7.2 c/s, nearly matching the old 7.4 c/s) — because per-table
+offered load drops below the per-table bound.
+
+S3 Express at 50 tables **jumps to 36 c/s** (was 14.9). The old model's
+per-table inlined bound was already above the catalog-CAS rate, so
+the old 14.9 was catalog-limited. The non-inlined model has a higher
+per-attempt cost but S3 Express's CAS is so fast (~5 ms) that the
+catalog remains the bottleneck only up to ~20 tables. At 50 tables,
+per-table contention drops enough that the free-retry fix (`ec383ff`:
+cross-table CAS failures skip manifest I/O) lets more commits through.
+
+GCP is hit hardest because its per-op latency is already high
+(~118 ms). The 5-op non-inlined cost of ~590 ms limits each table to
+~1.7 c/s, so even at 50 tables the per-table bound is still binding
+(0.7 c/s × 50 = 35 c/s theoretical, but GCP's CAS at ~118 ms caps
+the catalog at ~8.5 c/s). The combination gives 0.7 c/s aggregate
+at the knee — not enough per-table traffic to exceed the per-table
+bound *and* not enough tables to overcome the CAS latency.
+
+### 9.2 Per-provider heatmaps
+
+All `plots/exp4c_tables_providers/{provider}_{mix}/` heatmaps need
+replacement. The same "success drops, latency rises" pattern from
+exp4a/4b applies, but the *magnitude* varies by provider. Representative:
+
+| Provider | Cell (1 tbl, 100 ms IA, FA=90%) | BAK FA succ | **NEW FA succ** |
+|---|---|---:|---:|
+| S3 Express | | 76.2 % | **58.3 %** |
+| S3 Standard | | 60.0 % | **48.4 %** |
+| Azure Premium | | 64.0 % | **51.2 %** |
+| Azure Standard | | 55.7 % | **45.8 %** |
+| GCP | | 23.3 % | **16.4 %** |
+
+(Approximate values read from heatmap CSV. Full precision in the
+per-provider `heatmap_data.csv` files.)
+
+### 9.3 VO latencies in the provider comparison
+
+VO P99 latencies at the single-table knee are now:
+
+| Provider | BAK VO P99 (1 tbl, 90/10, at knee) | **NEW VO P99** |
+|---|---:|---:|
+| S3 Express | 6.6 s | **6.7 s** |
+| S3 Standard | 19.7 s | **20.2 s** |
+| Azure Premium | 21.2 s | **21.7 s** |
+| Azure Standard | 23.3 s | **22.6 s** |
+| GCP | 26.9 s | **32.9 s** |
+
+VO tails are within ±10 % of the old numbers across all providers.
+The convoy cost model changes (§2 errata) largely cancel out for VO
+because the per-table decomposition correction roughly offsets the
+added TM pair. GCP's VO tail grows more because its higher per-op
+latency amplifies the TM pair.
+
+## 10. Required edits to `2026-03-23-providercatalog.md` — exp4c additions
+
+(Extending §8 from the exp4a/b report.)
+
+### 10.1 Workload knee / per-provider throughput table (HIGH IMPACT)
+
+The blog's summary table of "sustainable commit rates by provider" is
+the post's main claim. **Replace entirely** from the new
+`plots/exp4c_tables_providers/workload_knee/workload_knee_table.md`.
+
+Key headline substitutions:
+
+| Blog claim | New value |
+|---|---|
+| "S3 Standard: 2.4 c/s FA, 1.8 c/s mixed" (1 table) | **1.8 c/s FA, 1.8 c/s mixed** |
+| "S3 Express sustains 14.6 c/s on a single table" | **still 14.6 c/s** ✓ |
+| "GCP: 0.7 c/s FA" (1 table) | **0.4 c/s** |
+| "S3 Standard at 10+ tables: 7.4 c/s FA" | **3.7 c/s** ⚠ (most impactful change) |
+| "S3 Express at 50 tables: 14.9 c/s FA" | **36.0 c/s** (up — free retry helps) |
+
+### 10.2 "More tables = more throughput" narrative (MEDIUM)
+
+The blog's scaling narrative claims that adding tables shifts the
+bottleneck from per-table metadata I/O to catalog CAS. This is still
+true but the transition now happens at **~50 tables** instead of ~5
+for S3/Azure. The passage should explain that non-inlined metadata adds
+enough per-table cost that the per-table bound binds through 20 tables
+for S3 Standard.
+
+### 10.3 All exp4c heatmaps (HIGH IMPACT)
+
+Every `exp4c_*` PNG in the blog must be replaced from
+`plots/exp4c_tables_providers/`. Alt-text that quotes specific cell
+values must be updated cell-by-cell from the new heatmap CSVs.
+
+### 10.4 GCP scaling claim
+
+If the blog claims GCP benefits substantially from multi-table scaling,
+that needs softening. Old: 0.7 c/s (1 tbl) → 3.6 c/s (50 tbl) FA.
+New: 0.4 c/s (1 tbl) → 0.7 c/s (50 tbl) FA. The per-table bound is
+now so tight for GCP that adding tables barely helps.
+
+## 11. Directional summary for the editor
 
 - **Nothing in the blog's argument needs to be rewritten.** Every
   conclusion (tables help, Zipf limits help, VO is expensive, catalog
-  modest impact) survives.
+  modest impact) survives — but the "tables help" story needs
+  quantitative hedging: the per-table bound is now tighter, so the
+  scaling flattens sooner.
 - **Absolute numbers all move in the same direction**: lower success
   rates at contention boundaries, higher latencies across the board,
   wider tails for single-table VO under contention.
-- **The "magic number" updates are mechanical**: replace cell values
-  from the new heatmap CSVs and alt-text quantities pointed to in §8.
-- **Exp4c is load-bearing** for the post's per-provider comparison and
-  must be redone.
+- **The biggest structural change**: multi-table FA-only scaling for
+  S3/Azure at 5–20 tables drops from ~7.4 to ~3.7 c/s. The blog's
+  "spreading across tables" argument is less impactful than presented.
+  Only at 50 tables does catalog CAS again become the bottleneck.
+- **S3 Express is the exception**: its fast ops mean the per-table bound
+  rarely binds. At 50 tables it jumps to 36 c/s (free-retry benefit).
+- **GCP scaling is weaker than presented**: 50 tables at GCP only
+  reaches 0.7 c/s FA (was 3.6 c/s in the old model).
 
-## 11. Artifacts
+## 12. Artifacts
 
 - `plots/exp4a_tables_fa/cas_*ms/*`, `plots/exp4a_zipf_tables_fa/cas_*ms/*` — new non-inlined heatmaps, ready to swap in.
 - `plots/exp4b_tables_mix/cas_*ms/*`, `plots/exp4b_zipf_tables_mix/cas_*ms/*` — same for the mix.
-- `plots_bak_new/exp4{a,b}*/` — `experiments-bak/` rendered through the current pipeline, so the blog's old numbers can be cross-checked without relying on transcribed alt-text.
+- `plots/exp4c_tables_providers/` — new per-provider heatmaps, workload knee tables, conflict-type breakdowns. 48 graph sets generated.
+- `plots_bak_new/exp4{a,b,c}*/` — `experiments-bak/` rendered through the current pipeline for apples-to-apples comparison.
 - Companion `.md` tables in each plot subdir contain the numerical data.
 
-Human-reviewable before/after delta is easiest via
-`diff plots_bak_new/exp4{a,b}_*/cas_*ms/latency_vs_throughput.md
-      plots/exp4{a,b}_*/cas_*ms/latency_vs_throughput.md`
-— side-by-side they compress to a small set of per-cell substitutions.
+Human-reviewable before/after delta for the workload knee:
+```bash
+diff plots_bak_new/exp4c_tables_providers/workload_knee/workload_knee_table.md \
+     plots/exp4c_tables_providers/workload_knee/workload_knee_table.md
+```
