@@ -12,3 +12,6 @@ docs/review/
 .dolt/
 *.db
 .beads-credential-key
+
+# Claude Code: per-machine settings, hooks and session notes
+.claude/
